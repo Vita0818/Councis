@@ -9,6 +9,8 @@ struct CouncisCLI {
         let command = args.first ?? ""
         do {
             switch command {
+            case "chat" where args.count > 1:
+                try await runChatCommand(Array(args.dropFirst()))
             case "", "chat", "code", "cowork":
                 let config = try CLIConfig.load()
                 let mode: Mode = command.isEmpty ? config.mode : (Mode(rawValue: command) ?? .chat)

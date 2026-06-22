@@ -24,6 +24,7 @@ private struct CouncilAgentResult: Codable, Sendable {
     let name: String
     let model: String
     let provider: String
+    let status: String
     let ok: Bool
     let answer: String
     let error: String?
@@ -37,6 +38,7 @@ private struct CouncilRunLog: Codable, Sendable {
     let startedAt: String
     let completedAt: String
     let baseURL: String
+    let streaming: Bool
     let candidateResults: [CouncilAgentResult]
     let judgeResult: CouncilAgentResult?
     let finalAnswer: String
@@ -186,6 +188,7 @@ private struct CouncilRunner {
             startedAt: started,
             completedAt: timestamp(),
             baseURL: config.baseURL.absoluteString,
+            streaming: true,
             candidateResults: orderedResults,
             judgeResult: judgeResult,
             finalAnswer: finalAnswer
@@ -238,7 +241,8 @@ private func callChat(_ agent: CouncilAgentConfig, prompt: String, system: Strin
                       config: CLIConfig, started: Date) async -> CouncilAgentResult {
     guard agent.provider == "openai-compatible" else {
         return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
-                                  ok: false, answer: "", error: "unsupported provider: \(agent.provider)",
+                                  status: "failed", ok: false, answer: "",
+                                  error: "unsupported provider: \(agent.provider)",
                                   elapsedMillis: elapsedMillis(since: started))
     }
 
@@ -268,12 +272,14 @@ private func callChat(_ agent: CouncilAgentConfig, prompt: String, system: Strin
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
+                                  status: trimmed.isEmpty ? "failed" : "succeeded",
                                   ok: !trimmed.isEmpty, answer: trimmed,
                                   error: trimmed.isEmpty ? "empty response" : nil,
                                   elapsedMillis: elapsedMillis(since: started))
     } catch {
         return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
-                                  ok: false, answer: "", error: error.localizedDescription,
+                                  status: "failed", ok: false, answer: "",
+                                  error: error.localizedDescription,
                                   elapsedMillis: elapsedMillis(since: started))
     }
 }
@@ -284,12 +290,13 @@ private func mockAgent(_ agent: CouncilAgentConfig, prompt: String, started: Dat
     try? await Task.sleep(nanoseconds: delay)
     if role == "candidate", agent.name.lowercased().contains("gemini") {
         return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
-                                  ok: false, answer: "", error: "mock failure for fail-soft coverage",
+                                  status: "failed", ok: false, answer: "",
+                                  error: "mock failure for fail-soft coverage",
                                   elapsedMillis: elapsedMillis(since: started))
     }
     let answer = "\(agent.name) mock answer for: \(prompt)"
     return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
-                              ok: true, answer: answer, error: nil,
+                              status: "succeeded", ok: true, answer: answer, error: nil,
                               elapsedMillis: elapsedMillis(since: started))
 }
 
@@ -301,7 +308,7 @@ private func mockJudge(_ agent: CouncilAgentConfig, prompt: String,
     This verifies the council workflow, parallel candidate collection, fail-soft handling, and judge handoff without using an API key.
     """
     return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
-                              ok: true, answer: answer, error: nil,
+                              status: "succeeded", ok: true, answer: answer, error: nil,
                               elapsedMillis: elapsedMillis(since: started))
 }
 
@@ -328,7 +335,7 @@ private func saveCouncilRun(_ run: CouncilRunLog) throws -> URL {
     let safeStamp = run.startedAt
         .replacingOccurrences(of: ":", with: "-")
         .replacingOccurrences(of: ".", with: "-")
-    let url = root.appendingPathComponent("run-\(safeStamp).json")
+    let url = root.appendingPathComponent("run-\(safeStamp)-\(UUID().uuidString).json")
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     try encoder.encode(run).write(to: url, options: .atomic)

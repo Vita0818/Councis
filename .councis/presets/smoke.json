@@ -1,0 +1,28 @@
+{
+  "name": "smoke",
+  "candidates": [
+    {
+      "name": "Candidate A",
+      "model": "gpt-4o-mini",
+      "provider": "openai-compatible",
+      "required": false
+    },
+    {
+      "name": "Candidate B",
+      "model": "gpt-4o-mini",
+      "provider": "openai-compatible",
+      "required": false
+    }
+  ],
+  "judge": {
+    "name": "Judge",
+    "model": "gpt-4o-mini",
+    "provider": "openai-compatible",
+    "required": true
+  },
+  "mode": "synthesize",
+  "minSuccessfulCandidates": 1,
+  "failSoft": true,
+  "anonymizeCandidates": true,
+  "shuffleCandidates": true
+}

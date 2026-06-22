@@ -20,7 +20,9 @@ func printHelp() {
 
     USAGE
       councis                 Start your default mode (set via `councis settings`)
-      councis chat            Streaming chat (no tools)
+      councis chat            Interactive streaming chat (no tools)
+      councis chat "..."      One-shot streaming chat smoke test
+      councis chat --mock "..."  One-shot mock chat smoke test
       councis code [dir]      Coding agent: read/search/edit files, git/shell (with approval)
       councis cowork [dir]    Multi-agent: /agent add <name> <path>, then @name <message>
       councis council "..."   Parallel candidate agents plus optional judge
@@ -49,6 +51,7 @@ func printHelp() {
 
     COUNCIL
       councis council --mock "Explain Hamiltonian paths and cycles"
+      councis council --preset smoke "Explain Hamiltonian paths and cycles"
       councis council --preset elite "Explain Hamiltonian paths and cycles"
 
     """)
