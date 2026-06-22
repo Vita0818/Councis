@@ -1,5 +1,7 @@
 {
-  "name": "elite",
+  "name": "elite-chat",
+  "mode": "chat",
+  "engine": "council",
   "candidates": [
     {
       "name": "Fable 5",
@@ -38,8 +40,6 @@
     "provider": "openai-compatible",
     "required": true
   },
-  "mode": "chat",
-  "engine": "council",
   "minSuccessfulCandidates": 2,
   "failSoft": true,
   "anonymizeCandidates": true,

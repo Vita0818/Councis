@@ -1,5 +1,7 @@
 {
-  "name": "elite",
+  "name": "elite-work",
+  "mode": "work",
+  "engine": "council",
   "candidates": [
     {
       "name": "Fable 5",
@@ -38,13 +40,26 @@
     "provider": "openai-compatible",
     "required": true
   },
-  "mode": "chat",
-  "engine": "council",
   "minSuccessfulCandidates": 2,
   "failSoft": true,
   "anonymizeCandidates": true,
   "shuffleCandidates": true,
   "tools": {
-    "filesystem": false
+    "filesystem": true,
+    "allowed": [
+      "read_file",
+      "write_file",
+      "list_files",
+      "search_files"
+    ],
+    "disallowed": [
+      "shell",
+      "run_command",
+      "spawn_agent",
+      "cowork",
+      "build",
+      "test"
+    ],
+    "writeRequiresApproval": true
   }
 }

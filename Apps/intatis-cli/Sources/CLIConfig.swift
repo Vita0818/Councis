@@ -2,7 +2,7 @@ import Foundation
 import IntatisCore
 import IntatisProviders
 
-enum Mode: String { case chat, code, cowork }
+enum Mode: String { case chat, work, code, cowork }
 
 /// Persistent config at `~/.councis/config.json` (string values; null values are ignored).
 /// `councis settings` writes it; env vars override it; both override defaults.

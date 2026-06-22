@@ -9,14 +9,12 @@ struct CouncisCLI {
         let command = args.first ?? ""
         do {
             switch command {
-            case "chat" where args.count > 1:
+            case "":
+                try await runChatCommand([])
+            case "chat":
                 try await runChatCommand(Array(args.dropFirst()))
-            case "", "chat", "code", "cowork":
-                let config = try CLIConfig.load()
-                let mode: Mode = command.isEmpty ? config.mode : (Mode(rawValue: command) ?? .chat)
-                let pathArg = (command == "code" || command == "cowork") && args.count > 1
-                    ? args[1] : FileManager.default.currentDirectoryPath
-                try await runMode(config, mode: mode, workspace: URL(fileURLWithPath: pathArg).standardizedFileURL)
+            case "work":
+                try await runWorkCommand(Array(args.dropFirst()))
             case "council":
                 try await runCouncilCommand(Array(args.dropFirst()))
             case "settings":

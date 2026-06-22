@@ -20,9 +20,13 @@
     "provider": "openai-compatible",
     "required": true
   },
-  "mode": "synthesize",
+  "mode": "chat",
+  "engine": "council",
   "minSuccessfulCandidates": 1,
   "failSoft": true,
   "anonymizeCandidates": true,
-  "shuffleCandidates": true
+  "shuffleCandidates": true,
+  "tools": {
+    "filesystem": false
+  }
 }

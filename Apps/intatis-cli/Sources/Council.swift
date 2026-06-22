@@ -2,15 +2,23 @@ import Foundation
 import IntatisCore
 import IntatisProviders
 
-private struct CouncilAgentConfig: Codable, Sendable {
+struct CouncilAgentConfig: Codable, Sendable {
     let name: String
     let model: String
     let provider: String
     let required: Bool?
 }
 
-private struct CouncilPreset: Codable, Sendable {
+struct CouncilToolsConfig: Codable, Sendable {
+    let filesystem: Bool?
+    let allowed: [String]?
+    let disallowed: [String]?
+    let writeRequiresApproval: Bool?
+}
+
+struct CouncilPreset: Codable, Sendable {
     let name: String
+    let engine: String?
     let candidates: [CouncilAgentConfig]
     let judge: CouncilAgentConfig?
     let mode: String?
@@ -18,9 +26,10 @@ private struct CouncilPreset: Codable, Sendable {
     let failSoft: Bool?
     let anonymizeCandidates: Bool?
     let shuffleCandidates: Bool?
+    let tools: CouncilToolsConfig?
 }
 
-private struct CouncilAgentResult: Codable, Sendable {
+struct CouncilAgentResult: Codable, Sendable {
     let name: String
     let model: String
     let provider: String
@@ -31,7 +40,8 @@ private struct CouncilAgentResult: Codable, Sendable {
     let elapsedMillis: Int
 }
 
-private struct CouncilRunLog: Codable, Sendable {
+struct CouncilRunLog: Codable, Sendable {
+    let surface: String
     let preset: CouncilPreset
     let prompt: String
     let mock: Bool
@@ -39,16 +49,25 @@ private struct CouncilRunLog: Codable, Sendable {
     let completedAt: String
     let baseURL: String
     let streaming: Bool
+    let workspace: String?
+    let contextEvents: [String]
     let candidateResults: [CouncilAgentResult]
     let judgeResult: CouncilAgentResult?
     let finalAnswer: String
+    let executorEvents: [String]
 }
 
 func runCouncilCommand(_ args: [String]) async throws {
+    out("`council` is deprecated/internal. Council is now the default engine behind Chat and Work. Use `chat` or `work`.\n\n")
+    try await runChatCommand(args)
+}
+
+func runCouncilEngineCommand(_ args: [String], surface: String, defaultPreset: String) async throws {
     var presetName = "elite"
     var mock = false
     var promptParts: [String] = []
     var i = 0
+    presetName = defaultPreset
 
     while i < args.count {
         let arg = args[i]
@@ -60,7 +79,7 @@ func runCouncilCommand(_ args: [String]) async throws {
             guard i < args.count else { throw IntatisError.config("--preset requires a name") }
             presetName = args[i]
         case "--help", "-h":
-            printCouncilHelp()
+            printCouncilHelp(surface: surface, defaultPreset: defaultPreset)
             return
         default:
             promptParts.append(arg)
@@ -70,20 +89,33 @@ func runCouncilCommand(_ args: [String]) async throws {
 
     let prompt = promptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !prompt.isEmpty else {
-        printCouncilHelp()
-        throw IntatisError.config("council requires a prompt")
+        printCouncilHelp(surface: surface, defaultPreset: defaultPreset)
+        throw IntatisError.config("\(surface) requires a prompt")
     }
 
     let config = try CLIConfig.load(requireAPIKey: !mock)
     let preset = try loadCouncilPreset(named: presetName)
     let runner = CouncilRunner(config: config, preset: preset, mock: mock)
-    let run = try await runner.run(prompt: prompt)
+    let run = try await runner.run(prompt: prompt, surface: surface)
     let logURL = try saveCouncilRun(run)
+    printCouncilRun(run, logURL: logURL)
+}
 
+func printCouncilRun(_ run: CouncilRunLog, logURL: URL) {
     let successCount = run.candidateResults.filter(\.ok).count
-    out("Councis council · preset \(preset.name) · \(successCount)/\(run.candidateResults.count) candidates succeeded")
-    if mock { out(" · mock") }
+    out("Councis \(run.surface) · preset \(run.preset.name) · \(successCount)/\(run.candidateResults.count) candidates succeeded")
+    if run.mock { out(" · mock") }
     out("\n\n")
+    
+    if let workspace = run.workspace {
+        out("[context] workspace: \(workspace)\n")
+    }
+    for event in run.contextEvents {
+        out("[context] \(event)\n")
+    }
+    if run.workspace != nil || !run.contextEvents.isEmpty {
+        out("\n")
+    }
 
     for result in run.candidateResults {
         if result.ok {
@@ -100,21 +132,30 @@ func runCouncilCommand(_ args: [String]) async throws {
 
     out("\nFinal answer\n")
     out(run.finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines))
-    out("\n\nrun log: \(logURL.path)\n")
+    out("\n")
+    
+    if !run.executorEvents.isEmpty {
+        out("\n[executor]\n")
+        for event in run.executorEvents {
+            out("\(event)\n")
+        }
+    }
+    
+    out("\nrun log: \(logURL.path)\n")
 }
 
-private func printCouncilHelp() {
+private func printCouncilHelp(surface: String, defaultPreset: String) {
     out("""
     USAGE
-      councis council [--preset elite] [--mock] "prompt"
+      councis \(surface) [--preset \(defaultPreset)] [--mock] "prompt"
 
-    Reads .councis/presets/<name>.json, runs candidate agents in parallel, then
-    asks the configured judge to synthesize when available.
+    Reads .councis/presets/<name>.json, runs candidate models in parallel, then
+    asks the configured judge to synthesize one final answer.
 
     """)
 }
 
-private func loadCouncilPreset(named name: String) throws -> CouncilPreset {
+func loadCouncilPreset(named name: String) throws -> CouncilPreset {
     let fm = FileManager.default
     let local = URL(fileURLWithPath: fm.currentDirectoryPath)
         .appendingPathComponent(".councis/presets/\(name).json")
@@ -132,12 +173,17 @@ private func loadCouncilPreset(named name: String) throws -> CouncilPreset {
     return try JSONDecoder().decode(CouncilPreset.self, from: data)
 }
 
-private struct CouncilRunner {
+struct CouncilRunner {
     let config: CLIConfig
     let preset: CouncilPreset
     let mock: Bool
 
-    func run(prompt: String) async throws -> CouncilRunLog {
+    func run(prompt: String,
+             logPrompt: String? = nil,
+             surface: String,
+             workspace: String? = nil,
+             contextEvents: [String] = [],
+             executorEvents: [String] = []) async throws -> CouncilRunLog {
         let started = timestamp()
         var candidates = preset.candidates
         if preset.shuffleCandidates == true {
@@ -182,16 +228,20 @@ private struct CouncilRunner {
         }
 
         return CouncilRunLog(
+            surface: surface,
             preset: preset,
-            prompt: prompt,
+            prompt: logPrompt ?? prompt,
             mock: mock,
             startedAt: started,
             completedAt: timestamp(),
             baseURL: config.baseURL.absoluteString,
             streaming: true,
+            workspace: workspace,
+            contextEvents: contextEvents,
             candidateResults: orderedResults,
             judgeResult: judgeResult,
-            finalAnswer: finalAnswer
+            finalAnswer: finalAnswer,
+            executorEvents: executorEvents
         )
     }
 }
@@ -303,13 +353,22 @@ private func mockAgent(_ agent: CouncilAgentConfig, prompt: String, started: Dat
 private func mockJudge(_ agent: CouncilAgentConfig, prompt: String,
                        candidates: [CouncilAgentResult], started: Date) async -> CouncilAgentResult {
     try? await Task.sleep(nanoseconds: 80_000_000)
+    let displayPrompt = userRequestForDisplay(from: prompt)
     let answer = """
-    Mock synthesis for "\(prompt)" using \(candidates.count) successful candidate answers.
+    Mock synthesis for "\(displayPrompt)" using \(candidates.count) successful candidate answers.
     This verifies the council workflow, parallel candidate collection, fail-soft handling, and judge handoff without using an API key.
     """
     return CouncilAgentResult(name: agent.name, model: agent.model, provider: agent.provider,
                               status: "succeeded", ok: true, answer: answer, error: nil,
                               elapsedMillis: elapsedMillis(since: started))
+}
+
+private func userRequestForDisplay(from prompt: String) -> String {
+    guard let start = prompt.range(of: "User request:\n"),
+          let end = prompt.range(of: "\n\nWork context:", range: start.upperBound..<prompt.endIndex) else {
+        return prompt
+    }
+    return String(prompt[start.upperBound..<end.lowerBound])
 }
 
 private func fallbackAnswer(successes: [CouncilAgentResult], minSuccess: Int) -> String {
@@ -328,7 +387,7 @@ private func candidateBlocks(_ results: [CouncilAgentResult], anonymize: Bool) -
     }.joined(separator: "\n\n")
 }
 
-private func saveCouncilRun(_ run: CouncilRunLog) throws -> URL {
+func saveCouncilRun(_ run: CouncilRunLog) throws -> URL {
     let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent(".councis/runs", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

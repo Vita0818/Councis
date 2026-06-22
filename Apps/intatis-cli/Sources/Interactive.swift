@@ -25,7 +25,12 @@ private func prompt(_ mode: Mode) -> String {
 
 /// Ctrl-A cycles chat → code → cowork → chat.
 private func nextMode(_ m: Mode) -> Mode {
-    switch m { case .chat: return .code; case .code: return .cowork; case .cowork: return .chat }
+    switch m {
+    case .chat: return .work
+    case .work: return .chat
+    case .code: return .cowork
+    case .cowork: return .chat
+    }
 }
 
 /// Strip surrounding [] '' "" that users sometimes copy from `[model]`-style help.
@@ -49,7 +54,7 @@ func runMode(_ config: CLIConfig, mode startMode: Mode, workspace: URL) async th
     while true {
         let exit: REPLExit
         switch mode {
-        case .chat, .code: exit = try await chatCodeREPL(config, mode: mode, workspace: workspace)
+        case .chat, .work, .code: exit = try await chatCodeREPL(config, mode: mode, workspace: workspace)
         case .cowork:      exit = try await coworkREPL(config, workspace: workspace)
         }
         switch exit {
@@ -65,7 +70,7 @@ private let replHelp = """
   /model [name]             show or switch the model for this session
   /reasoning [level|off]    show or set reasoning (minimal|low|medium|high)
   /verbose [on|off]         expand tool calls & terminal output (default: collapsed)
-  /mode <chat|code|cowork>  switch mode
+  /mode <chat|work>         switch mode
   /clear                    start a fresh session (clears history)
   /config                   show endpoint / model / reasoning
   /help                     this help
@@ -186,6 +191,11 @@ private func chatCodeREPL(_ config: CLIConfig, mode: Mode, workspace: URL) async
                 try await ChatLoop(log: log, provider: provider, model: ModelID(rawValue: model),
                                    reasoningEffort: reasoning, includeUsage: config.includeUsage)
                     .send(sendText, images: sendImages)
+            case .work:
+                render.cancel()
+                spinner.stop()
+                try await runWorkCommand([sendText])
+                return .quit
             case .code:
                 let provider = try await registry.defaultAgentProvider()
                 let agent = Agent(name: AgentID(rawValue: "cli"), workspaceRoot: workspace,

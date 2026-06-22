@@ -47,7 +47,7 @@ func runSettings() throws {
                 if t.isEmpty || t == "off" { cfg["reasoning"] = nil } else { cfg["reasoning"] = t }
             }
         case "5":
-            out("Default mode [chat|code|cowork]: ")
+            out("Default mode [chat|work]: ")
             if let v = readLine() { cfg["mode"] = v.trimmingCharacters(in: .whitespaces).lowercased() }
         case "s":
             try ConfigFile.write(cfg.filter { !$0.value.isEmpty })
