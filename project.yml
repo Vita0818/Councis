@@ -32,6 +32,20 @@ settings:
 
 targets:
 
+  # ---- macOS app: Councis v0.2 Chat / Work shell ----
+  CouncisMac:
+    type: application
+    platform: macOS
+    sources:
+      - Apps/CouncisMac/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.councis.app
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleDisplayName: Councis
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Councis"
+
   # ---- macOS app: full Chat / Code / Cowork (links all 11 library products) ----
   IntatisMac:
     type: application
@@ -106,6 +120,12 @@ targets:
         product: IntatisSharedUI
 
 schemes:
+  CouncisMac:
+    build:
+      targets:
+        CouncisMac: all
+    run:
+      config: Debug
   IntatisMac:
     build:
       targets:

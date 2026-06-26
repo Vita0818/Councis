@@ -30,6 +30,7 @@ let package = Package(
         .library(name: "IntatisSharedUI", targets: ["IntatisSharedUI"]),
         // The CLI IS a SwiftPM executable (no Xcode needed): `swift run councis chat`.
         .executable(name: "councis", targets: ["IntatisCLI"]),
+        .executable(name: "CouncisMac", targets: ["CouncisMac"]),
         // The GUI apps (IntatisMac, IntatisiOS) are Xcode App targets, not SPM
         // products — SwiftPM cannot build a .app bundle, and iOS apps cannot be
         // built from SPM at all. See project.yml (XcodeGen) + README.
@@ -115,6 +116,10 @@ let package = Package(
                 "IntatisTools", "IntatisPermission", "IntatisAgentKernel", "IntatisCowork",
             ],
             path: "Apps/intatis-cli/Sources"
+        ),
+        .executableTarget(
+            name: "CouncisMac",
+            path: "Apps/CouncisMac/Sources"
         ),
         // GUI app targets (IntatisMac macOS app, IntatisiOS iOS app) are defined in
         // the Xcode project generated from project.yml — they link these library
