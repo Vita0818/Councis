@@ -1,16 +1,16 @@
 # XcodeGen spec — generates the Xcode project that builds the real .app bundles.
 #
 #   brew install xcodegen      # one-time
-#   xcodegen generate          # creates Intatis.xcodeproj
-#   open Intatis.xcodeproj     # pick the IntatisMac or IntatisiOS scheme, then Run
+#   xcodegen generate          # creates Councis.xcodeproj
+#   open Councis.xcodeproj     # pick the CouncisMac or councis scheme, then Run
 #
 # The App targets link the Swift Package products in this repo. The iOS app links
 # ONLY the chat subset (no Tools / Permission / AgentKernel / Cowork).
 
-name: Intatis
+name: Councis
 
 options:
-  bundleIdPrefix: com.intatis
+  bundleIdPrefix: com.councis
   deploymentTarget:
     macOS: "13.0"
     iOS: "16.0"
@@ -45,6 +45,30 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Councis
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSHumanReadableCopyright: "Councis"
+
+  # ---- CLI: existing `councis` command ----
+  councis:
+    type: tool
+    platform: macOS
+    sources:
+      - Apps/intatis-cli/Sources
+    dependencies:
+      - package: Intatis
+        product: IntatisCore
+      - package: Intatis
+        product: IntatisProtocol
+      - package: Intatis
+        product: IntatisProviders
+      - package: Intatis
+        product: IntatisConversation
+      - package: Intatis
+        product: IntatisTools
+      - package: Intatis
+        product: IntatisPermission
+      - package: Intatis
+        product: IntatisAgentKernel
+      - package: Intatis
+        product: IntatisCowork
 
   # ---- macOS app: full Chat / Code / Cowork (links all 11 library products) ----
   IntatisMac:
@@ -124,6 +148,12 @@ schemes:
     build:
       targets:
         CouncisMac: all
+    run:
+      config: Debug
+  councis:
+    build:
+      targets:
+        councis: all
     run:
       config: Debug
   IntatisMac:
