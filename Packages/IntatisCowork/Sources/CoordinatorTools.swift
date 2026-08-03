@@ -3,13 +3,9 @@ import IntatisCore
 import IntatisProtocol
 import IntatisTools
 
-/// Coordinator tools (ARCHITECTURE.md §7). They let a lead agent build and steer
-/// a small team of sub-agents itself, instead of the user wiring everything up by
-/// hand. This mirrors the "supervisor / orchestrator-worker" pattern used by
-/// frameworks like LangGraph, CrewAI, AutoGen and OpenAI Swarm: one agent owns
-/// the plan and delegates concrete sub-tasks. All three are `readOnly` — they
-/// only touch the in-memory agent registry, never the filesystem; the agents they
-/// create still run under the normal permission gate.
+/// Coordinator tools (ARCHITECTURE.md §7). They let an explicit lead agent build
+/// and steer a small team of worker agents. Creating an agent expands the active
+/// workspace/capability boundary, so `spawn_agent` is intentionally not read-only.
 
 /// Create + attach a new sub-agent bound to a folder.
 public struct SpawnAgentTool: Tool {
@@ -18,9 +14,12 @@ public struct SpawnAgentTool: Tool {
     public static let descriptor = ToolDescriptor(
         name: "spawn_agent",
         description: "Create a new sub-agent bound to a folder so you can delegate work to it. "
-            + "Give it a short name and an absolute folder path; model is optional (defaults to "
-            + "yours). After spawning, talk to it with ask_agent.",
-        sideEffect: .readOnly,
+            + "Give it a short name and an absolute folder path. Omit both provider and model to "
+            + "select an unused compatible binding from the team worker pool; the parent model is "
+            + "never inherited. To request a specific binding, provide both provider and model. "
+            + "Set canCoordinate only when this sub-agent must manage lower-level agents. "
+            + "After spawning, assign work with delegate_task; the orchestrator recycles task-scoped agents when idle.",
+        sideEffect: .write,
         parameters: .object([
             "type": .string("object"),
             "properties": .object([
@@ -28,22 +27,47 @@ public struct SpawnAgentTool: Tool {
                                  "description": .string("short agent name, e.g. reviewer")]),
                 "path": .object(["type": .string("string"),
                                  "description": .string("absolute path to the agent's workspace folder")]),
+                "provider": .object(["type": .string("string"),
+                                     "description": .string("optional provider id; must be supplied together with model")]),
                 "model": .object(["type": .string("string"),
-                                  "description": .string("optional model id; defaults to your model")]),
+                                  "description": .string("optional model id; must be supplied together with provider")]),
+                "canCoordinate": .object(["type": .string("boolean"),
+                                           "description": .string("optional; true grants coordinator tools to this sub-agent")]),
             ]),
             "required": .array([.string("name"), .string("path")]),
+            "additionalProperties": .bool(false),
         ])
     )
 
-    struct Args: Decodable { let name: String; let path: String; let model: String? }
+    struct Args: Decodable {
+        let name: String
+        let path: String
+        let provider: String?
+        let model: String?
+        let canCoordinate: Bool?
+    }
 
     public func execute(_ args: ToolArgs, in context: ToolContext) async throws -> ToolObservation {
         let a = try args.decode(Args.self)
+        let provider = a.provider?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let model = a.model?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        guard (provider == nil) == (model == nil) else {
+            return ToolObservation(text: "error: provider and model must be supplied together")
+        }
         guard let manager = context.agentManager else {
             return ToolObservation(text: "agent management is not available in this session")
         }
-        return ToolObservation(text: await manager.spawnAgent(name: a.name, path: a.path, model: a.model))
+        return ToolObservation(text: await manager.spawnAgent(
+            name: a.name,
+            path: a.path,
+            provider: provider,
+            model: model,
+            canCoordinate: a.canCoordinate ?? false))
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 /// List the agents active in this conversation.
@@ -52,11 +76,12 @@ public struct ListAgentsTool: Tool {
 
     public static let descriptor = ToolDescriptor(
         name: "list_agents",
-        description: "List the agents currently active in this conversation (name, model, folder).",
+        description: "List active agents with name, model, coordinator/worker lease role, compact task state, and folder.",
         sideEffect: .readOnly,
         parameters: .object([
             "type": .string("object"),
             "properties": .object([:]),
+            "additionalProperties": .bool(false),
         ])
     )
 
@@ -74,8 +99,8 @@ public struct RemoveAgentTool: Tool {
 
     public static let descriptor = ToolDescriptor(
         name: "remove_agent",
-        description: "Remove a sub-agent you no longer need. You cannot remove @main.",
-        sideEffect: .readOnly,
+        description: "Remove a sub-agent early. Completed task-scoped sub-agents are recycled automatically. You cannot remove @main.",
+        sideEffect: .write,
         parameters: .object([
             "type": .string("object"),
             "properties": .object([
@@ -83,6 +108,7 @@ public struct RemoveAgentTool: Tool {
                                  "description": .string("the agent name to remove")]),
             ]),
             "required": .array([.string("name")]),
+            "additionalProperties": .bool(false),
         ])
     )
 

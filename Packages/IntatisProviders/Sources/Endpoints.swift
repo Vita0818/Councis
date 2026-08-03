@@ -9,14 +9,61 @@ public enum WireFormat: String, Codable, Sendable {
     // case anthropic, gemini, …  (later)
 }
 
-/// A reference to a secret in the OS keychain — never the secret itself. The
-/// app supplies a `SecretResolver`; the secret is fetched lazily at call time.
+/// A reference to a secret. `keychain` is retained as a legacy wire value, but
+/// app resolvers may map it to configuration files. New GUI provider configs use
+/// env vars, files, or auth JSON entries instead of OS credential stores.
+public enum SecretRefSource: String, Codable, Sendable {
+    case keychain
+    case environment
+    case file
+    case authFile
+    case providerConfig
+}
+
 public struct KeychainRef: Codable, Equatable, Sendable {
     public var service: String
     public var account: String
+    public var source: SecretRefSource
+
     public init(service: String, account: String) {
         self.service = service
         self.account = account
+        self.source = .keychain
+    }
+
+    public static func environment(_ name: String) -> KeychainRef {
+        KeychainRef(source: .environment, service: "environment", account: name)
+    }
+
+    public static func file(_ path: String) -> KeychainRef {
+        KeychainRef(source: .file, service: "file", account: path)
+    }
+
+    public static func authFile(providerID: String) -> KeychainRef {
+        KeychainRef(source: .authFile, service: "auth-file", account: providerID)
+    }
+
+    public static func providerConfig(path: String, providerID: String) -> KeychainRef {
+        KeychainRef(source: .providerConfig, service: path, account: providerID)
+    }
+
+    private init(source: SecretRefSource, service: String, account: String) {
+        self.service = service
+        self.account = account
+        self.source = source
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case service
+        case account
+        case source
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.service = try container.decode(String.self, forKey: .service)
+        self.account = try container.decode(String.self, forKey: .account)
+        self.source = try container.decodeIfPresent(SecretRefSource.self, forKey: .source) ?? .keychain
     }
 }
 
@@ -29,13 +76,57 @@ public protocol SecretResolver: Sendable {
 public struct ProviderEndpoint: Codable, Equatable, Sendable {
     public var id: String
     public var baseURL: URL
+    public var chatEndpoint: URL?
     public var apiKeyRef: KeychainRef
     public var wire: WireFormat
-    public init(id: String, baseURL: URL, apiKeyRef: KeychainRef, wire: WireFormat) {
+    public init(id: String, baseURL: URL, chatEndpoint: URL? = nil,
+                apiKeyRef: KeychainRef, wire: WireFormat) {
         self.id = id
         self.baseURL = baseURL
+        self.chatEndpoint = chatEndpoint
         self.apiKeyRef = apiKeyRef
         self.wire = wire
+    }
+
+    public var chatCompletionsURL: URL {
+        chatEndpoint ?? baseURL.appendingPathComponent("chat/completions")
+    }
+}
+
+extension ProviderEndpoint {
+    func validatedChatCompletionsURL(operation: String) throws -> URL {
+        let field = chatEndpoint == nil ? "Base URL" : "Chat endpoint"
+        return try Self.validatedHTTPURL(chatCompletionsURL,
+                                         endpointID: id,
+                                         field: field,
+                                         operation: operation)
+    }
+
+    func validatedBaseURLAppendingPathComponent(_ pathComponent: String,
+                                                operation: String) throws -> URL {
+        try Self.validatedHTTPURL(baseURL.appendingPathComponent(pathComponent),
+                                  endpointID: id,
+                                  field: "Base URL",
+                                  operation: operation)
+    }
+
+    private static func validatedHTTPURL(_ url: URL,
+                                         endpointID: String,
+                                         field: String,
+                                         operation: String) throws -> URL {
+        guard let scheme = url.scheme?.lowercased(), !scheme.isEmpty else {
+            throw IntatisError.config(
+                "invalid provider endpoint '\(endpointID)' for \(operation): \(field) is missing a URL scheme. Use an http:// or https:// URL with a host.")
+        }
+        guard scheme == "http" || scheme == "https" else {
+            throw IntatisError.config(
+                "invalid provider endpoint '\(endpointID)' for \(operation): \(field) scheme '\(scheme)' is not supported. Use an http:// or https:// URL with a host.")
+        }
+        guard let host = url.host, !host.isEmpty else {
+            throw IntatisError.config(
+                "invalid provider endpoint '\(endpointID)' for \(operation): \(field) host is missing. Check the Base URL or Chat endpoint.")
+        }
+        return url
     }
 }
 
@@ -46,6 +137,14 @@ public struct ModelRef: Codable, Equatable, Sendable {
     public init(endpoint: String, model: ModelID) {
         self.endpoint = endpoint
         self.model = model
+    }
+
+    public init(binding: AgentModelBinding) {
+        self.init(endpoint: binding.providerID, model: binding.modelID)
+    }
+
+    public func validatedAgentModelBinding() throws -> AgentModelBinding {
+        try AgentModelBinding(validatingProviderID: endpoint, modelID: model)
     }
 }
 

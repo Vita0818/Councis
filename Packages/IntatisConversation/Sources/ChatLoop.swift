@@ -30,9 +30,11 @@ public struct ChatLoop: Sendable {
     }
 
     /// Send one user message and stream the assistant reply into the log.
-    public func send(_ userText: String, images: [ImageAttachment] = []) async throws {
+    public func send(_ userText: String,
+                     images: [ImageAttachment] = [],
+                     userMessage: UserMessagePayload? = nil) async throws {
         let history = await buildHistory()
-        try await log.append(.userMessage(UserMessagePayload(text: userText)))
+        try await log.append(.userMessage(userMessage ?? UserMessagePayload(text: userText)))
 
         var messages: [ChatMessage] = []
         if let systemPrompt { messages.append(ChatMessage(role: .system, content: systemPrompt)) }
@@ -55,7 +57,7 @@ public struct ChatLoop: Sendable {
                     try await log.append(.messageDelta(
                         MessageDeltaPayload(messageId: assistantID, role: .assistant, textDelta: d)))
                 case .usage(let u):
-                    usage = u
+                    usage = Usage.merging(usage, with: u)
                 case .done:
                     break
                 }
@@ -64,7 +66,7 @@ public struct ChatLoop: Sendable {
                 MessageCompletedPayload(messageId: assistantID, role: .assistant, text: full)))
             await appendTurnStats(start: start, firstTokenAt: firstTokenAt, usage: usage)
         } catch {
-            try await log.append(.error(ErrorPayload(code: "provider", message: error.localizedDescription)))
+            try await log.append(.error(RuntimeErrorPresentation.payload(for: error, fallbackCode: "provider")))
             throw error
         }
     }
@@ -73,8 +75,10 @@ public struct ChatLoop: Sendable {
         let now = Date()
         try? await log.append(.turnStats(TurnStatsPayload(
             promptTokens: usage?.promptTokens,
+            cachedPromptTokens: usage?.cachedPromptTokens,
             completionTokens: usage?.completionTokens,
             totalTokens: usage?.totalTokens,
+            contextWindowTokens: usage?.contextWindowTokens,
             ttftMillis: firstTokenAt.map { Int($0.timeIntervalSince(start) * 1000) },
             totalMillis: Int(now.timeIntervalSince(start) * 1000),
             model: model.rawValue)))

@@ -1,32 +1,41 @@
 {
+  "schemaVersion": 2,
   "name": "smoke",
-  "candidates": [
-    {
-      "name": "Candidate A",
-      "model": "gpt-4o-mini",
-      "provider": "openai-compatible",
-      "required": false
-    },
-    {
-      "name": "Candidate B",
-      "model": "gpt-4o-mini",
-      "provider": "openai-compatible",
-      "required": false
-    }
-  ],
-  "judge": {
-    "name": "Judge",
-    "model": "gpt-4o-mini",
-    "provider": "openai-compatible",
+  "mode": "chat",
+  "main": {
+    "name": "Main",
+    "providerID": "openai-compatible",
+    "model": "fake-main",
     "required": true
   },
-  "mode": "chat",
-  "engine": "council",
-  "minSuccessfulCandidates": 1,
-  "failSoft": true,
-  "anonymizeCandidates": true,
-  "shuffleCandidates": true,
-  "tools": {
-    "filesystem": false
-  }
+  "judge": {
+    "name": "Judge",
+    "providerID": "openai-compatible",
+    "model": "fake-judge",
+    "required": true
+  },
+  "workerModelPool": [
+    {
+      "name": "Worker A",
+      "providerID": "openai-compatible",
+      "model": "fake-worker-a"
+    },
+    {
+      "name": "Worker B",
+      "providerID": "openai-compatible",
+      "model": "fake-worker-b"
+    }
+  ],
+  "modelAssignment": {
+    "strategy": "unique",
+    "onPoolExhaustion": "fail",
+    "excludeControlPlaneAgents": true
+  },
+  "providers": [
+    {
+      "id": "openai-compatible",
+      "displayName": "Offline fake provider",
+      "configHint": "Used by councis selftest; no credential is stored here"
+    }
+  ]
 }

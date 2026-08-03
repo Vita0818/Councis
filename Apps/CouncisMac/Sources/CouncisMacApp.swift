@@ -1,20 +1,22 @@
-#if canImport(SwiftUI)
+#if COUNCIS_APP && canImport(SwiftUI)
 import SwiftUI
 
 @main
 struct CouncisMacApp: App {
+    @StateObject private var env = AppEnvironment()
+
     var body: some Scene {
-        WindowGroup {
-            CouncisRootView()
+        WindowGroup(AppIdentity.displayName) {
+            IntatisMacRootView().environmentObject(env)
         }
-        .windowStyle(.automatic)
+        .defaultSize(width: 1100, height: 760)
     }
 }
-#else
+#elseif COUNCIS_APP
 @main
 struct CouncisMacApp {
     static func main() {
-        print("CouncisMac is a macOS SwiftUI app.")
+        print("CouncisMac is a macOS SwiftUI app and only runs on macOS.")
     }
 }
 #endif

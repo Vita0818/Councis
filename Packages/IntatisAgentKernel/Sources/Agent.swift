@@ -8,20 +8,41 @@ import IntatisPermission
 public struct Agent: Sendable {
     public var name: AgentID
     public var workspaceRoot: URL
-    public var model: ModelID
+    public var modelBinding: AgentModelBinding
+    /// Compatibility view used by the provider request and existing projections.
+    /// Provider selection must use `modelBinding`, not this model-only value.
+    public var model: ModelID { modelBinding.modelID }
     public var profile: PermissionProfile
-    /// May this agent build & steer its own sub-team (spawn_agent / ask_agent /
-    /// list_agents / remove_agent)? Only top-level coordinators (@main and
-    /// user-added agents) get this; tool-spawned workers do not, which keeps the
-    /// orchestrator-worker hierarchy two levels deep instead of recursing.
-    public var canCoordinate: Bool
+    /// Temporary compatibility fuse for Cowork coordination tools. Explicit
+    /// coordinators get the coordination tools while this is > 0; tool-spawned
+    /// children default to 0 and run as workers.
+    public var coordinationDepth: Int
 
-    public init(name: AgentID, workspaceRoot: URL, model: ModelID,
-                profile: PermissionProfile = .reviewed, canCoordinate: Bool = false) {
+    /// Default marker for a top-level coordinator (@main, user-added agents).
+    /// Phase 0 still uses this as a tool-exposure fuse, not as a task role model.
+    public static let defaultCoordinationDepth = 2
+
+    public init(name: AgentID, workspaceRoot: URL, modelBinding: AgentModelBinding,
+                profile: PermissionProfile = .reviewed, coordinationDepth: Int = 0) {
         self.name = name
         self.workspaceRoot = workspaceRoot
-        self.model = model
+        self.modelBinding = modelBinding
         self.profile = profile
-        self.canCoordinate = canCoordinate
+        self.coordinationDepth = coordinationDepth
+    }
+
+    /// Source-compatible bridge for pre-binding call sites. The sentinel cannot
+    /// resolve through `ProviderRegistry`; production attach/restore code must
+    /// replace it with a real provider binding before provider dispatch.
+    public init(name: AgentID, workspaceRoot: URL, model: ModelID,
+                profile: PermissionProfile = .reviewed, coordinationDepth: Int = 0) {
+        self.init(
+            name: name,
+            workspaceRoot: workspaceRoot,
+            modelBinding: AgentModelBinding(
+                trustedProviderID: AgentModelBinding.unresolvedLegacyProviderID,
+                modelID: model),
+            profile: profile,
+            coordinationDepth: coordinationDepth)
     }
 }

@@ -3,8 +3,8 @@ import IntatisCore
 import IntatisProtocol
 
 /// Layer A: pure, deterministic, model-free. Runs first and its `deny` is final
-/// (ARCHITECTURE.md §6.1–§6.2). Encodes the hard rules; everything contextual is
-/// left as `pass` for the reviewer (or, in v0.2, the user).
+/// (ARCHITECTURE.md §6.1–§6.2). Encodes hard rules and only returns `pass` for
+/// non-shell operations that remain eligible for an optional reviewer/user gate.
 public struct DeterministicPolicyGate: Sendable {
     public init() {}
 
@@ -24,14 +24,26 @@ public struct DeterministicPolicyGate: Sendable {
             }
         }
 
-        // 2. Network: never silently; denied in read-only.
+        // 2. Shell-backed tools must be checked for shell availability before
+        // generic network handling, otherwise an exec tool that also touches the
+        // network could bypass App Store / read-only shell denial.
+        if call.sideEffect == .exec {
+            return evaluateShell(call, ctx)
+        }
+
+        // 3. Network: never silently; denied in read-only.
         if call.risksNetwork {
+            if call.sideEffect == .destructive {
+                return ctx.profile == .readOnly
+                    ? .deny(reason: "network not allowed in read_only", risk: .high)
+                    : .ask(reason: "destructive network operation requested", risk: .high)
+            }
             return ctx.profile == .readOnly
                 ? .deny(reason: "network not allowed in read_only", risk: .medium)
                 : .ask(reason: "network access requested", risk: .medium)
         }
 
-        // 3. By side effect.
+        // 4. By side effect.
         switch call.sideEffect {
         case .readOnly:
             return .allow(reason: "read-only operation within workspace", risk: .low)
@@ -61,6 +73,9 @@ public struct DeterministicPolicyGate: Sendable {
         if ctx.profile == .readOnly {
             return .deny(reason: "shell not allowed in read_only", risk: .high)
         }
+        if call.risksNetwork {
+            return .ask(reason: "browser or shell-backed network access requested", risk: .high)
+        }
         let command = Self.shellCommand(from: call.rawArgs)
         if ShellInspector.isDangerous(command) {
             return .deny(reason: "dangerous shell command", risk: .high)
@@ -68,17 +83,15 @@ public struct DeterministicPolicyGate: Sendable {
         if ShellInspector.risksNetworkOrInstall(command) {
             return .ask(reason: "shell command may access network or install packages", risk: .high)
         }
-        if ShellInspector.isReadOnlyCommand(command) {
-            return .allow(reason: "read-only shell command", risk: .low)
+        switch ShellInspector.inspectReadOnlyCommand(command, workspaceRoot: ctx.workspaceRoot) {
+        case .allow(let reason):
+            return .allow(reason: reason, risk: .low)
+        case .deny(let reason):
+            return .deny(reason: reason, risk: .high)
+        case .ask:
+            break
         }
-        switch ctx.profile {
-        case .manual:
-            return .ask(reason: "run shell command", risk: .medium)
-        case .reviewed, .autopilot:
-            return .pass(reason: "shell command", risk: .medium)
-        case .readOnly, .locked:
-            return .deny(reason: "shell not allowed", risk: .high)
-        }
+        return .ask(reason: "run shell command", risk: .medium)
     }
 
     private func evaluateWrite(_ call: ToolCallContext, _ ctx: PermissionContext) -> GateResult {
@@ -89,10 +102,8 @@ public struct DeterministicPolicyGate: Sendable {
             return .ask(reason: "modifies lockfile / CI / build config", risk: .high)
         }
         switch ctx.profile {
-        case .manual:
+        case .manual, .reviewed, .autopilot:
             return .ask(reason: "write to workspace", risk: .medium)
-        case .reviewed, .autopilot:
-            return .pass(reason: "write within workspace", risk: .low)
         case .readOnly, .locked:
             return .deny(reason: "writes not allowed", risk: .medium)
         }

@@ -17,7 +17,10 @@ final class IntatisProtocolTests: XCTestCase {
         let s = SessionID(rawValue: "sess_x")
         let m = MessageID(rawValue: "msg_1")
         try roundTrip(Envelope(seq: 1, ts: Date(timeIntervalSince1970: 1_700_000_000), session: s,
-                               event: .userMessage(.init(text: "hi", to: AgentID(rawValue: "Rokurics")))))
+                               event: .userMessage(.init(text: "hi",
+                                                         to: AgentID(rawValue: "Rokurics"),
+                                                         tags: ["Goal"],
+                                                         goal: "hi"))))
         try roundTrip(Envelope(seq: 2, ts: Date(timeIntervalSince1970: 1_700_000_001), session: s,
                                event: .messageDelta(.init(messageId: m, role: .assistant, textDelta: "he"))))
         try roundTrip(Envelope(seq: 3, ts: Date(timeIntervalSince1970: 1_700_000_002), session: s,
@@ -39,6 +42,74 @@ final class IntatisProtocolTests: XCTestCase {
         let payload = try XCTUnwrap(json["payload"] as? [String: Any])
         XCTAssertEqual(payload["textDelta"] as? String, "x")
         XCTAssertEqual(payload["role"] as? String, "assistant")
+    }
+
+    func testLegacyUserMessageWithoutGoalMetadataDecodes() throws {
+        let json = """
+        {"seq":1,"ts":"2023-11-14T22:13:20Z","session":"sess_legacy","v":1,"type":"user_message","payload":{"text":"hi"}}
+        """
+
+        let envelope = try dec.decode(Envelope.self, from: Data(json.utf8))
+
+        guard case .userMessage(let payload) = envelope.event else {
+            return XCTFail("expected user_message")
+        }
+        XCTAssertEqual(payload.text, "hi")
+        XCTAssertNil(payload.tags)
+        XCTAssertNil(payload.goal)
+    }
+
+    func testNewCoworkLifecycleEventsRoundTripThroughEnvelope() throws {
+        let session = SessionID(rawValue: "sess_cowork_lifecycle")
+        let agent = AgentID(rawValue: "worker")
+        let taskID = TaskID(rawValue: "task_1")
+        let messageID = MessageID(rawValue: "msg_1")
+        let metadata = CoworkEventMetadata(
+            taskID: taskID,
+            agentID: agent,
+            scope: .task,
+            visibility: .task,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let cases: [(event: Event, wireType: String)] = [
+            (
+                .agentMessageConsumed(.init(
+                    messageID: messageID,
+                    agent: agent,
+                    taskID: taskID,
+                    metadata: metadata)),
+                "agent_message_consumed"
+            ),
+            (
+                .workspaceLeaseRevoked(.init(
+                    agent: agent,
+                    leaseID: WorkspaceLeaseID(rawValue: "wlease_1"),
+                    reason: "task completed",
+                    metadata: metadata)),
+                "workspace_lease_revoked"
+            ),
+            (
+                .taskCancelled(.init(
+                    taskID: taskID,
+                    agent: agent,
+                    reason: "cancelled by user",
+                    attempt: 2,
+                    metadata: metadata)),
+                "task_cancelled"
+            ),
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            let envelope = Envelope(
+                seq: index,
+                ts: Date(timeIntervalSince1970: 1_700_000_100 + Double(index)),
+                session: session,
+                event: testCase.event)
+            let data = try enc.encode(envelope)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+            XCTAssertEqual(json["type"] as? String, testCase.wireType)
+            XCTAssertEqual(try dec.decode(Envelope.self, from: data), envelope)
+        }
     }
 
     func testCommandRoundTrip() throws {

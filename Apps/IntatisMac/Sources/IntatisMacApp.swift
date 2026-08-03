@@ -1,6 +1,7 @@
 #if canImport(SwiftUI)
 import SwiftUI
 import Combine
+import Foundation
 import IntatisCore
 import IntatisProviders
 import IntatisConversation
@@ -8,270 +9,615 @@ import IntatisArtifacts
 import IntatisMultimodal
 import IntatisSharedUI
 
-/// Wires the v0.1 stack: keychain-backed provider registry + per-session event
-/// log + chat view model. Held by the App as a `@StateObject`.
+/// Wires provider config + per-session event log + chat view model. Held by
+/// the App as a `@StateObject`.
 @MainActor
 final class AppEnvironment: ObservableObject {
-    let registry: ProviderRegistry
-    let log: EventLog
-    let viewModel: ChatViewModel
-    let multimodal: MultimodalService
+    @Published private(set) var registry: ProviderRegistry
+    @Published private(set) var providerCatalog: AppProviderCatalog
+    @Published private(set) var chatSessionID: SessionID
+    @Published private(set) var viewModel: ChatViewModel
+    @Published private(set) var chatSessionError: String?
+    private(set) var log: EventLog
+    private(set) var multimodal: MultimodalService
     @Published var needsAPIKey: Bool
 
-    private let keychain: KeychainStore
+    private let secrets: ConfigSecretResolver
 
     init() {
         PlatformProfile.current = AppConfig.platformProfile
 
-        self.keychain = KeychainStore(service: AppConfig.keychainService)
-        self.registry = ProviderRegistry(
-            config: AppConfig.providerConfig(),
-            resolver: KeychainSecretResolver()
-        )
+        self.secrets = ConfigSecretResolver()
+        self.providerCatalog = AppConfig.providerCatalog
+        let initialRegistry = Self.makeProviderRegistry(resolver: secrets)
+        self.registry = initialRegistry
+        let initialSession = AppConfig.recentSessions(kind: .chat).first?.id ?? AppConfig.defaultSession
+        self.chatSessionID = initialSession
         do {
-            self.log = try EventLog(session: AppConfig.defaultSession,
-                                    fileURL: AppConfig.sessionFile(AppConfig.defaultSession))
+            self.log = try EventLog(session: initialSession,
+                                    fileURL: AppConfig.sessionFile(initialSession))
         } catch {
             fatalError("Failed to open event log: \(error)")
         }
         let store: ArtifactStore
         do {
-            store = try ArtifactStore(root: AppConfig.appSupportDir()
-                .appendingPathComponent(AppConfig.defaultSession.rawValue, isDirectory: true)
-                .appendingPathComponent("artifacts", isDirectory: true))
+            store = try ArtifactStore(root: AppConfig.artifactsDir(initialSession))
         } catch {
             fatalError("Failed to open artifact store: \(error)")
         }
         self.multimodal = MultimodalService(log: log, store: store)
-        self.viewModel = ChatViewModel(log: log, registry: registry)
-        self.needsAPIKey = (try? keychain.get(account: AppConfig.keychainAccount)) == nil
+        self.viewModel = ChatViewModel(log: log, registry: initialRegistry)
+        self.needsAPIKey = !Self.hasAPIKey(ref: AppConfig.selectedAPIKeyRef)
 
-        // Wire image generation: prompt → MultimodalService → artifact_added → UI.
-        let reg = registry
-        let mm = multimodal
-        viewModel.onGenerateImage = { prompt in
-            Task { @MainActor in
-                guard let provider = try? await reg.defaultImageProvider(),
-                      let model = await reg.imageModel() else { return }
-                _ = try? await mm.generateImage(using: provider, model: model, prompt: prompt)
-            }
+        wireImageGeneration()
+    }
+
+    func startNewChatSession() {
+        do {
+            try switchChatSession(to: SessionID.new())
+        } catch {
+            chatSessionError = "Could not start chat session: \(error.localizedDescription)"
         }
+    }
+
+    func resumeChatSession(_ session: AppSessionSummary) {
+        do {
+            try switchChatSession(to: session.id)
+        } catch {
+            chatSessionError = "Could not resume chat session: \(error.localizedDescription)"
+        }
+    }
+
+    func recentChatSessions() -> [AppSessionSummary] {
+        AppConfig.recentSessions(kind: .chat)
     }
 
     func saveAPIKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        try? keychain.set(trimmed, account: AppConfig.keychainAccount)
+        let providerID = providerCatalog.selectedProvider?.id ?? "default"
+        do {
+            try AppConfig.writeEditableProviderConfig(
+                catalog: providerCatalog,
+                apiKeysByProviderID: [providerID: trimmed])
+        } catch {
+            return
+        }
+        secrets.cache(trimmed, for: .authFile(providerID: providerID))
+        providerCatalog = AppConfig.providerCatalog
         needsAPIKey = false
+        refreshProviderRegistry()
+    }
+
+    func hasAPIKey(account: String) -> Bool {
+        Self.hasAPIKey(ref: .authFile(providerID: account))
+    }
+
+    func hasAPIKey(for provider: AppProviderSettings) -> Bool {
+        Self.hasAPIKey(ref: AppConfig.apiKeyRef(for: provider))
+    }
+
+    func saveSettings(catalog rawCatalog: AppProviderCatalog,
+                      apiKeysByProviderID: [String: String]) throws {
+        var catalog = AppConfig.normalizedCatalog(rawCatalog)
+        var enteredAPIKeys: [String: String] = [:]
+        for index in catalog.providers.indices {
+            let provider = catalog.providers[index]
+            let key = apiKeysByProviderID[provider.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !key.isEmpty else { continue }
+            enteredAPIKeys[provider.id] = key
+            catalog.providers[index].apiKeySource = nil
+        }
+        if !enteredAPIKeys.isEmpty {
+            try AppConfig.writeEditableProviderConfig(
+                catalog: catalog,
+                apiKeysByProviderID: enteredAPIKeys)
+            for (providerID, key) in enteredAPIKeys {
+                secrets.cache(key, for: .authFile(providerID: providerID))
+            }
+        }
+        AppConfig.providerCatalog = catalog
+        providerCatalog = AppConfig.providerCatalog
+        needsAPIKey = !Self.hasAPIKey(ref: catalog.selectedProvider.map(AppConfig.apiKeyRef(for:))
+                                      ?? .authFile(providerID: "default"))
+
+        refreshProviderRegistry()
+    }
+
+    func selectProviderModel(providerID: String, modelID: String) {
+        let catalog = AppConfig.selectProviderModel(providerID: providerID, modelID: modelID)
+        providerCatalog = catalog
+        needsAPIKey = !Self.hasAPIKey(ref: catalog.selectedProvider.map(AppConfig.apiKeyRef(for:))
+                                      ?? .authFile(providerID: "default"))
+        refreshProviderRegistry()
+    }
+
+    func healthCheckSelectedProvider() async -> [ProviderHealthReport] {
+        let options = ProviderHealthCheckOptions(timeoutSeconds: 15)
+        let chat = await registry.healthCheck(role: .chat, options: options)
+        let agent = await registry.healthCheck(role: .agent, options: options)
+        return [chat, agent]
     }
 
     /// Build a fresh Code session bound to the chosen workspace folder.
-    func makeCodeViewModel(workspace: URL) -> CodeViewModel? {
+    func makeCodeViewModel(workspace: URL) throws -> CodeViewModel {
         let session = SessionID(rawValue: IDGen.random(prefix: "code"))
-        guard let codeLog = try? EventLog(session: session, fileURL: AppConfig.sessionFile(session)) else {
-            return nil
-        }
-        return CodeViewModel(workspaceRoot: workspace, log: codeLog, registry: registry)
+        WorkspaceAccess.remember(workspace, for: session)
+        return try makeCodeViewModel(session: session, workspace: workspace)
     }
 
-    /// Build a fresh multi-agent Cowork session.
-    func makeCoworkViewModel() -> CoworkViewModel? {
+    func makeCodeViewModel(session: SessionID, workspace: URL) throws -> CodeViewModel {
+        WorkspaceAccess.remember(workspace, for: session)
+        let codeLog = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
+        return CodeViewModel(sessionID: session, workspaceRoot: workspace, log: codeLog, registry: registry)
+    }
+
+    /// Build a fresh multi-agent Cowork project session bound to a primary workspace.
+    func makeCoworkViewModel(primaryWorkspace: URL) throws -> CoworkViewModel {
         let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
-        guard let coworkLog = try? EventLog(session: session, fileURL: AppConfig.sessionFile(session)) else {
-            return nil
+        WorkspaceAccess.remember(primaryWorkspace, for: session)
+        let settings = try CoworkProjectSettings.fresh(
+            sessionID: session,
+            primaryWorkspace: primaryWorkspace,
+            catalog: providerCatalog)
+        CoworkProjectSettingsStore.save(settings)
+        return try makeCoworkViewModel(session: session, projectSettings: settings)
+    }
+
+    func makeCoworkViewModel(session: SessionID) throws -> CoworkViewModel {
+        let settings = try CoworkProjectSettingsStore.load(
+            sessionID: session,
+            catalog: providerCatalog)
+        return try makeCoworkViewModel(session: session, projectSettings: settings)
+    }
+
+    private func makeCoworkViewModel(session: SessionID,
+                                     projectSettings: CoworkProjectSettings) throws -> CoworkViewModel {
+        let coworkLog = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
+        return CoworkViewModel(
+            sessionID: session,
+            log: coworkLog,
+            registry: registry,
+            projectSettings: projectSettings)
+    }
+
+    func recentCodeSessions() -> [AppSessionSummary] {
+        AppConfig.recentSessions(kind: .code)
+    }
+
+    func recentCoworkSessions() -> [AppSessionSummary] {
+        AppConfig.recentSessions(kind: .cowork)
+    }
+
+    private func switchChatSession(to session: SessionID) throws {
+        viewModel.stop()
+        let log = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
+        let store = try ArtifactStore(root: AppConfig.artifactsDir(session))
+        let model = ChatViewModel(log: log, registry: registry)
+        self.log = log
+        self.multimodal = MultimodalService(log: log, store: store)
+        self.viewModel = model
+        self.chatSessionID = session
+        self.chatSessionError = nil
+        wireImageGeneration()
+        model.start()
+    }
+
+    private static func makeProviderRegistry(resolver: ConfigSecretResolver) -> ProviderRegistry {
+        ProviderRegistry(config: AppConfig.providerConfig(), resolver: resolver)
+    }
+
+    private func refreshProviderRegistry() {
+        secrets.clearCache()
+        let updated = Self.makeProviderRegistry(resolver: secrets)
+        registry = updated
+        viewModel.updateProviderRegistry(updated)
+        wireImageGeneration()
+    }
+
+    private static func hasAPIKey(ref: KeychainRef) -> Bool {
+        ConfigSecretResolver.exists(ref)
+    }
+
+    private func wireImageGeneration() {
+        viewModel.onGenerateImage = { [weak self] prompt in
+            guard let self else { throw IntatisError.cancelled }
+            guard let provider = try await self.registry.defaultImageProvider(),
+                  let model = await self.registry.imageModel() else {
+                throw IntatisError.config("image generation is not configured")
+            }
+            _ = try await self.multimodal.generateImage(using: provider, model: model, prompt: prompt)
         }
-        return CoworkViewModel(log: coworkLog, registry: registry)
     }
 }
 
-enum AppMode: Hashable { case chat, code, cowork }
+// The shell lives in IntatisMacRootView; root-owned session state feeds the
+// reusable workspace home and session views below.
 
-struct RootView: View {
-    @EnvironmentObject var env: AppEnvironment
-    @State private var showSettings = false
-    @State private var keyInput = ""
-    @State private var baseURLInput = AppConfig.baseURL
-    @State private var modelInput = AppConfig.chatModelName
-    @State private var mode: AppMode = .chat
+struct WorkspaceSessionHome: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let primaryTitle: String
+    let primarySystemImage: String
+    let primaryShortcut: KeyEquivalent?
+    let error: String?
+    let sessionsTitle: String
+    let sessions: [AppSessionSummary]
+    let workspacePath: (SessionID) -> String?
+    let onPrimary: () -> Void
+    let onResume: (AppSessionSummary) -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    init(title: String,
+         subtitle: String,
+         icon: String,
+         primaryTitle: String,
+         primarySystemImage: String,
+         primaryShortcut: KeyEquivalent? = nil,
+         error: String?,
+         sessionsTitle: String,
+         sessions: [AppSessionSummary],
+         workspacePath: @escaping (SessionID) -> String?,
+         onPrimary: @escaping () -> Void,
+         onResume: @escaping (AppSessionSummary) -> Void) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.primaryTitle = primaryTitle
+        self.primarySystemImage = primarySystemImage
+        self.primaryShortcut = primaryShortcut
+        self.error = error
+        self.sessionsTitle = sessionsTitle
+        self.sessions = sessions
+        self.workspacePath = workspacePath
+        self.onPrimary = onPrimary
+        self.onResume = onResume
+    }
 
     var body: some View {
-        Group {
-            switch mode {
-            case .chat: ThreeColumnShell(model: env.viewModel)
-            case .code: CodeContainer(env: env)
-            case .cowork: CoworkContainer(env: env)
-            }
-        }
-        .toolbar {
-            if PlatformProfile.current.supports(.code) || PlatformProfile.current.supports(.cowork) {
-                ToolbarItem(placement: .principal) {
-                    Picker("Mode", selection: $mode) {
-                        Text("Chat").tag(AppMode.chat)
-                        if PlatformProfile.current.supports(.code) { Text("Code").tag(AppMode.code) }
-                        if PlatformProfile.current.supports(.cowork) { Text("Cowork").tag(AppMode.cowork) }
+        GeometryReader { proxy in
+            let layout = IntatisMacScreenLayout(rawWidth: proxy.size.width)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    IntatisPageHeader(title: title, subtitle: subtitle)
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(IntatisTheme.goldDeep)
+                            .frame(width: 64, height: 64)
+                            .background(IntatisTheme.goldSoft.opacity(scheme == .dark ? 0.22 : 0.34),
+                                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        Text(primaryTitle)
+                            .font(IntatisType.title(20))
+                            .foregroundStyle(IntatisTheme.deepText(scheme))
+                        primaryButton
+                        if let error {
+                            Text(error)
+                                .font(IntatisType.caption(12))
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    .pickerStyle(.segmented)
+                    .padding(20)
+                    .frame(maxWidth: 620, alignment: .leading)
+                    .intatisGlassCard(cornerRadius: 22)
+
+                    if !sessions.isEmpty {
+                        RecentSessionList(
+                            title: sessionsTitle,
+                            sessions: sessions,
+                            workspacePath: workspacePath,
+                            actionTitle: "Resume",
+                            onAction: onResume)
+                    }
+
+                    Spacer(minLength: 0)
                 }
+                .padding(.horizontal, layout.horizontalPadding)
+                .padding(.top, 26)
+                .padding(.bottom, 30)
+                .frame(maxWidth: layout.settingsMaxWidth, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            ToolbarItem {
-                Button { showSettings = true } label: { Image(systemName: "key") }
-                    .help("API key")
-            }
+            .scrollContentBackground(.hidden)
         }
-        .sheet(isPresented: $showSettings) { settingsSheet }
-        .task { if env.needsAPIKey { showSettings = true } }
     }
 
-    private var settingsSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Endpoint & model").font(.headline)
-            Text("Works with any OpenAI-compatible API — OpenAI, Ollama, vLLM, OpenRouter, DeepSeek, …")
-                .font(.caption).foregroundStyle(.secondary)
-            LabeledContent("Base URL") {
-                TextField(AppConfig.defaultBaseURL, text: $baseURLInput).textFieldStyle(.roundedBorder)
-            }
-            LabeledContent("Model") {
-                TextField(AppConfig.defaultModel, text: $modelInput).textFieldStyle(.roundedBorder)
-            }
-            LabeledContent("API key") {
-                SecureField("sk-… (any non-empty for local servers)", text: $keyInput).textFieldStyle(.roundedBorder)
-            }
-            Text("Key is stored in your macOS keychain. Endpoint/model changes take effect on relaunch.")
-                .font(.caption2).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Cancel") { showSettings = false }
-                Button("Save") {
-                    AppConfig.baseURL = baseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                    AppConfig.chatModelName = modelInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !keyInput.isEmpty { env.saveAPIKey(keyInput) }
-                    keyInput = ""
-                    showSettings = false
-                }
-                .keyboardShortcut(.defaultAction)
-            }
+    @ViewBuilder private var primaryButton: some View {
+        let button = Button(action: onPrimary) {
+            Label(primaryTitle, systemImage: primarySystemImage)
+                .font(IntatisType.body(14, .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(IntatisTheme.accentGradient, in: Capsule())
         }
-        .padding(20)
-        .frame(width: 460)
-    }
-}
+        .buttonStyle(.plain)
 
-struct CodeContainer: View {
-    @ObservedObject var env: AppEnvironment
-    @State private var codeVM: CodeViewModel?
-
-    var body: some View {
-        if let vm = codeVM {
-            CodeSessionView(vm: vm)
+        if let primaryShortcut {
+            button.keyboardShortcut(primaryShortcut)
         } else {
-            VStack(spacing: 12) {
-                Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundStyle(.secondary)
-                Text("Open a folder to start a Code session").font(.headline)
-                Button("Choose Workspace…") {
-                    if let url = WorkspaceAccess.choose() {
-                        codeVM = env.makeCodeViewModel(workspace: url)
-                    }
-                }
-                .keyboardShortcut("o")
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            button
         }
+    }
+}
+
+private struct RecentSessionList: View {
+    let title: String
+    let sessions: [AppSessionSummary]
+    let workspacePath: (SessionID) -> String?
+    let actionTitle: String
+    let onAction: (AppSessionSummary) -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(IntatisType.caption(12, .semibold))
+                .foregroundStyle(IntatisTheme.softText(scheme))
+            ForEach(sessions) { session in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(session.id.rawValue)
+                            .font(IntatisType.caption(12, .semibold))
+                            .foregroundStyle(IntatisTheme.deepText(scheme))
+                            .lineLimit(1)
+                        Text(metadata(for: session))
+                            .font(IntatisType.caption(11, .regular))
+                            .foregroundStyle(IntatisTheme.softText(scheme))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                    Button(actionTitle) { onAction(session) }
+                        .buttonStyle(.borderless)
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .background(IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.25 : 0.62),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(IntatisTheme.glassStroke(scheme).opacity(scheme == .dark ? 0.36 : 0.70), lineWidth: 1)
+                }
+            }
+        }
+        .padding(.top, 8)
+        .frame(maxWidth: 760, alignment: .leading)
+    }
+
+    private func metadata(for session: AppSessionSummary) -> String {
+        let timestamp = session.updatedAt == .distantPast
+            ? "Unknown date"
+            : session.updatedAt.formatted(date: .abbreviated, time: .shortened)
+        let workspace = workspacePath(session.id).map { " · \($0)" } ?? ""
+        return "\(session.eventCount) events · \(timestamp)\(workspace)"
     }
 }
 
 struct CodeSessionView: View {
     @ObservedObject var vm: CodeViewModel
+    let catalog: AppProviderCatalog
+    let onSelectModel: (String, String) -> Void
+    let onShowSessions: () -> Void
+    let onNewSession: () -> Void
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         CodeShell(items: vm.items,
                   pending: vm.pendingPermission,
+                  permissionNotice: vm.permissionNotice,
+                  latestTurnStats: vm.latestTurnStats,
                   isWorking: vm.isWorking,
                   workspaceName: vm.workspaceName,
                   agentState: vm.agentState,
+                  composerError: vm.composerError,
+                  threadStyle: .intatisMac(scheme),
+                  onShowSessions: onShowSessions,
+                  onNewSession: onNewSession,
+                  composerAccessory: AnyView(IntatisComposerAccessory(
+                    catalog: catalog,
+                    isBusy: vm.isWorking,
+                    latestTurnStats: vm.latestTurnStats,
+                    contextLabel: contextLabel,
+                    onSelectModel: onSelectModel)),
                   input: $vm.input,
                   onSend: { vm.send() },
                   onResolve: { vm.resolvePermission($0) })
             .task { vm.start() }
     }
-}
 
-struct CoworkContainer: View {
-    @ObservedObject var env: AppEnvironment
-    @State private var coworkVM: CoworkViewModel?
-
-    var body: some View {
-        if let vm = coworkVM {
-            CoworkSessionView(vm: vm)
-        } else {
-            VStack(spacing: 12) {
-                Image(systemName: "person.2").font(.largeTitle).foregroundStyle(.secondary)
-                Text("Start a Cowork session").font(.headline)
-                Button("New Cowork Session") { coworkVM = env.makeCoworkViewModel() }
-                    .keyboardShortcut("n")
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+    private var contextLabel: String? {
+        guard let promptTokens = vm.latestTurnStats?.promptTokens else { return nil }
+        let formatted = Self.numberFormatter.string(from: NSNumber(value: promptTokens)) ?? "\(promptTokens)"
+        return "Context \(formatted) tok"
     }
+
+    private static let numberFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
 }
 
 struct CoworkSessionView: View {
     @ObservedObject var vm: CoworkViewModel
-    @State private var showAdd = false
-    @State private var agentName = ""
+    let catalog: AppProviderCatalog
+    let onSelectModel: (String, String) -> Void
+    let onShowSessions: () -> Void
+    let onNewSession: () -> Void
+    @State private var showProjectSettings = false
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        CoworkShell(items: vm.items,
-                    agents: vm.agents,
-                    pending: vm.pendingPermission,
-                    isWorking: vm.isWorking,
-                    input: $vm.input,
-                    onSend: { vm.send() },
-                    onResolve: { vm.resolvePermission($0) },
-                    onAddAgent: { showAdd = true })
-            .task { vm.start() }
-            .sheet(isPresented: $showAdd) { addAgentSheet }
+        VStack(spacing: 0) {
+            permissionReviewerBanner
+            CoworkShell(items: vm.items,
+                        agents: vm.agents,
+                        pending: vm.pendingPermission,
+                        permissionNotice: vm.permissionNotice,
+                        latestTurnStats: vm.latestTurnStats,
+                        summary: vm.summary,
+                        project: vm.project,
+                        composerError: vm.composerError,
+                        isWorking: vm.isWorking,
+                        threadStyle: .intatisMac(scheme),
+                        onShowSessions: onShowSessions,
+                        onNewSession: onNewSession,
+                        onShowProjectSettings: { showProjectSettings = true },
+                        composerAccessory: AnyView(IntatisComposerAccessory(
+                            catalog: catalog,
+                            isBusy: vm.isWorking,
+                            latestTurnStats: vm.latestTurnStats,
+                            contextLabel: contextLabel,
+                            onSelectModel: onSelectModel)),
+                        input: $vm.input,
+                        onSend: { vm.send() },
+                        onResolve: { vm.resolvePermission($0) },
+                        onRemoveAgent: { vm.removeAgent(name: $0) },
+                        onRetryTask: { vm.retryFailedTask(id: $0) })
+        }
+        .task { vm.start() }
+        .sheet(isPresented: $showProjectSettings) { projectSettingsSheet }
     }
 
-    private var addAgentSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Add agent").font(.headline)
-            TextField("Name (e.g. Rokurics)", text: $agentName).textFieldStyle(.roundedBorder)
-            HStack {
-                Spacer()
-                Button("Cancel") { showAdd = false }
-                Button("Choose Folder & Add") {
-                    let name = agentName.trimmingCharacters(in: .whitespaces)
-                    if !name.isEmpty, let url = WorkspaceAccess.choose() {
-                        vm.addAgent(name: name, workspace: url)
-                    }
-                    agentName = ""
-                    showAdd = false
-                }
-                .keyboardShortcut(.defaultAction)
+    private var permissionReviewerBanner: some View {
+        let presentation = permissionReviewerPresentation
+        return HStack(spacing: 9) {
+            if presentation.isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+                    .accessibilityLabel("Starting permission reviewer")
+            } else {
+                Image(systemName: presentation.systemImage)
+                    .foregroundStyle(presentation.tint)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+            }
+            Text(presentation.title)
+                .font(.caption.bold())
+                .foregroundStyle(presentation.tint)
+            Text(presentation.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            if vm.permissionReviewerStatus.canRetry {
+                Button("Retry") { vm.retryAutomaticPermissionReview() }
+                    .buttonStyle(.borderless)
+                    .font(.caption.bold())
             }
         }
-        .padding(20)
-        .frame(width: 360)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(presentation.tint.opacity(scheme == .dark ? 0.10 : 0.07))
+        .overlay(alignment: .bottom) { Divider().opacity(0.45) }
+        .help("\(presentation.title): \(presentation.detail)")
+    }
+
+    private var permissionReviewerPresentation: (
+        title: String,
+        detail: String,
+        systemImage: String,
+        tint: Color,
+        isBusy: Bool
+    ) {
+        switch vm.permissionReviewerStatus {
+        case .disabled:
+            return (
+                "Permission reviewer disabled",
+                "Automatic review is not active; permission requests require user approval.",
+                "shield.slash",
+                .secondary,
+                false)
+        case .enabling:
+            return (
+                "Starting permission reviewer…",
+                "Automatic review is not active until startup succeeds.",
+                "shield",
+                .secondary,
+                true)
+        case .enabled(let reviewer):
+            return (
+                "@\(reviewer.rawValue) enabled",
+                "Eligible requests are reviewed automatically; hard policy denials remain final.",
+                "checkmark.shield.fill",
+                .green,
+                false)
+        case .fallback(let reason):
+            return (
+                "Manual permission fallback",
+                reason,
+                "person.crop.circle.badge.questionmark",
+                .orange,
+                false)
+        case .degraded(let reason):
+            return (
+                "Permission reviewer degraded",
+                reason,
+                "exclamationmark.shield.fill",
+                .orange,
+                false)
+        case .failed(let reason):
+            return (
+                "Permission reviewer failed",
+                "\(reason) Permission requests will fall back to user approval.",
+                "exclamationmark.shield.fill",
+                .red,
+                false)
+        }
+    }
+
+    private var contextLabel: String? {
+        guard let promptTokens = vm.latestTurnStats?.promptTokens else { return nil }
+        let formatted = Self.numberFormatter.string(from: NSNumber(value: promptTokens)) ?? "\(promptTokens)"
+        return "Context \(formatted) tok"
+    }
+
+    private static let numberFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
+
+    private var projectSettingsSheet: some View {
+        CoworkProjectSettingsSheet(
+            vm: vm,
+            catalog: catalog,
+            onAddWorkspace: {
+                if let url = WorkspaceAccess.choose(prompt: "Choose Project Workspace") {
+                    vm.addProjectWorkspace(url)
+                }
+            })
     }
 }
 
+#if !COUNCIS_APP
 @main
 struct IntatisMacApp: App {
     @StateObject private var env = AppEnvironment()
 
     var body: some Scene {
         WindowGroup {
-            RootView().environmentObject(env)
+            IntatisMacRootView().environmentObject(env)
         }
+        .defaultSize(width: 1100, height: 760)
     }
 }
+#endif
 #else
 // Non-Apple platforms (e.g. Linux CI building the whole package): provide a
 // trivial entry point so the executable target still links.
+#if !COUNCIS_APP
 @main
 struct IntatisMacApp {
     static func main() {
         print("IntatisMac is a macOS SwiftUI app and only runs on macOS.")
     }
 }
+#endif
 #endif

@@ -26,6 +26,7 @@ let package = Package(
         .library(name: "IntatisPermission", targets: ["IntatisPermission"]),
         .library(name: "IntatisAgentKernel", targets: ["IntatisAgentKernel"]),
         .library(name: "IntatisCowork", targets: ["IntatisCowork"]),
+        .library(name: "IntatisMacTeamSupport", targets: ["IntatisMacTeamSupport"]),
         .library(name: "IntatisMultimodal", targets: ["IntatisMultimodal"]),
         .library(name: "IntatisSharedUI", targets: ["IntatisSharedUI"]),
         // The CLI IS a SwiftPM executable (no Xcode needed): `swift run councis chat`.
@@ -92,6 +93,11 @@ let package = Package(
             ],
             path: "Packages/IntatisCowork/Sources"
         ),
+        .target(
+            name: "IntatisMacTeamSupport",
+            dependencies: ["IntatisCore", "IntatisCowork"],
+            path: "Apps/IntatisMac/TeamSupport"
+        ),
         // v0.4 — Multimodal: image/video generation + transcription → artifacts.
         .target(
             name: "IntatisMultimodal",
@@ -119,7 +125,23 @@ let package = Package(
         ),
         .executableTarget(
             name: "CouncisMac",
-            path: "Apps/CouncisMac/Sources"
+            dependencies: [
+                "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisConversation",
+                "IntatisArtifacts", "IntatisMultimodal", "IntatisSharedUI", "IntatisTools",
+                "IntatisPermission", "IntatisAgentKernel", "IntatisCowork", "IntatisMacTeamSupport",
+            ],
+            path: "Apps",
+            exclude: [
+                "intatis-cli", "IntatisiOS",
+                "CouncisMac/CouncisMac.DeveloperID.entitlements",
+                "IntatisMac/Info.plist",
+                "IntatisMac/IntatisMac.AppStore.entitlements",
+                "IntatisMac/IntatisMac.DeveloperID.entitlements",
+                "IntatisMac/TeamSupport",
+                "IntatisMac/TeamSupportTests",
+            ],
+            sources: ["CouncisMac/Sources", "IntatisMac/Sources"],
+            swiftSettings: [.define("COUNCIS_APP")]
         ),
         // GUI app targets (IntatisMac macOS app, IntatisiOS iOS app) are defined in
         // the Xcode project generated from project.yml — they link these library
@@ -184,6 +206,11 @@ let package = Package(
                 "IntatisArtifacts", "IntatisConversation",
             ],
             path: "Packages/IntatisMultimodal/Tests"
+        ),
+        .testTarget(
+            name: "IntatisMacTeamSupportTests",
+            dependencies: ["IntatisMacTeamSupport", "IntatisCore", "IntatisCowork"],
+            path: "Apps/IntatisMac/TeamSupportTests"
         ),
     ]
 )

@@ -9,7 +9,7 @@ BINDIR ?= /usr/local/bin
 # Generate the Xcode project and open it (apps build/run from Xcode).
 app:
 	xcodegen generate
-	open Intatis.xcodeproj
+	open Councis.xcodeproj
 
 # Library/logic layer: build + run the XCTest suites (no Xcode needed).
 test:
@@ -19,7 +19,7 @@ build:
 	swift build
 
 clean:
-	rm -rf .build Intatis.xcodeproj
+	rm -rf .build Councis.xcodeproj
 
 # Optimized standalone binary at .build/release/councis (no sudo).
 release:

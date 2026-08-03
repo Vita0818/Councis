@@ -30,4 +30,46 @@ final class IntatisCoreTests: XCTestCase {
         XCTAssertTrue(SessionKind.code.usesWorkspace)
         XCTAssertTrue(SessionKind.cowork.usesWorkspace)
     }
+
+    func testAgentModelBindingValidatesNormalizesAndRoundTrips() throws {
+        let binding = try AgentModelBinding(
+            validatingProviderID: "  provider-a  ",
+            modelID: ModelID(rawValue: "  vendor/model-a  "))
+
+        XCTAssertEqual(binding.providerID, "provider-a")
+        XCTAssertEqual(binding.modelID, ModelID(rawValue: "vendor/model-a"))
+        XCTAssertTrue(binding.isResolved)
+
+        let data = try JSONEncoder().encode(binding)
+        XCTAssertEqual(try JSONDecoder().decode(AgentModelBinding.self, from: data), binding)
+    }
+
+    func testAgentModelBindingRejectsEmptyIdentifiersIncludingDuringDecode() {
+        XCTAssertThrowsError(try AgentModelBinding(
+            validatingProviderID: " \n ",
+            modelID: ModelID(rawValue: "model")))
+        XCTAssertThrowsError(try AgentModelBinding(
+            validatingProviderID: "provider",
+            modelID: ModelID(rawValue: " \t ")))
+
+        let invalidJSON = Data(#"{"providerID":"provider","modelID":" "}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(AgentModelBinding.self, from: invalidJSON))
+    }
+
+    func testAgentModelBindingHashIncludesProviderAndModel() {
+        let first = AgentModelBinding(
+            providerID: "provider-a",
+            modelID: ModelID(rawValue: "model"))
+        let differentProvider = AgentModelBinding(
+            providerID: "provider-b",
+            modelID: ModelID(rawValue: "model"))
+        let differentModel = AgentModelBinding(
+            providerID: "provider-a",
+            modelID: ModelID(rawValue: "other"))
+
+        XCTAssertEqual(Set([first, first, differentProvider, differentModel]).count, 3)
+        XCTAssertFalse(AgentModelBinding(
+            providerID: AgentModelBinding.unresolvedLegacyProviderID,
+            modelID: ModelID(rawValue: "model")).isResolved)
+    }
 }

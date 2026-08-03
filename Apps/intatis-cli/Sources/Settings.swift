@@ -48,10 +48,17 @@ func runSettings() throws {
             }
         case "5":
             out("Default mode [chat|work]: ")
-            if let v = readLine() { cfg["mode"] = v.trimmingCharacters(in: .whitespaces).lowercased() }
+            if let v = readLine() {
+                let raw = v.trimmingCharacters(in: .whitespaces).lowercased()
+                if let mode = Mode.parse(raw) {
+                    cfg["mode"] = mode.rawValue
+                } else if !raw.isEmpty {
+                    out("Unknown mode; keeping \(cfg["mode"] ?? "chat").\n")
+                }
+            }
         case "s":
             try ConfigFile.write(cfg.filter { !$0.value.isEmpty })
-            out("\n\(green)Saved.\(reset) Now just run `councis` (or `councis chat`).\n")
+            out("\n\(green)Saved.\(reset) Now run `councis` (or `councis work`).\n")
             return
         case "q", "":
             out("\nNo changes saved.\n")

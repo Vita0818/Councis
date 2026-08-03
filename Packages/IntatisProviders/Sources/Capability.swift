@@ -4,7 +4,7 @@ import Foundation
 /// completion shaped" (ARCHITECTURE.md §3.3, §9.2). v0.1 only exercises `.chat`,
 /// but the vocabulary is fixed so multimodal providers slot in later without
 /// reshaping the registry.
-public enum Capability: String, Codable, Sendable, CaseIterable {
+public enum Capability: String, Codable, Hashable, Sendable, CaseIterable {
     case chat
     case toolCalling = "tool_calling"
     case visionInput = "vision_input"

@@ -2,22 +2,20 @@
 
 ## Clean-room statement
 
-Intatis is a clean-room implementation. All names, protocols, prompts, code, and
-UI assets are original to this project. Intatis does **not** copy, link against, or
-run the source code, private prompts, icons, trademarks, or brand copy of DeepCode,
-Codex / Codex CLI, Claude Code, OpenCode, or any other product. Public product
-capabilities and interaction patterns may have informed the design; the internal
-architecture, code, naming, and wire protocol are independent.
+Councis and Intatis are covered by the same clean-room boundary. Councis is a first-party product wrapper over the Intatis source and runtime; copying or adapting code between those two first-party trees does not import third-party implementation material.
+
+All Councis/Intatis protocols, prompts, code, names, and UI assets are original to this project. Neither product copies, links against, or runs the source code, private prompts, icons, trademarks, or brand copy of DeepCode, Codex / Codex CLI, Claude Code, OpenCode, or any other product. Public capabilities and interaction patterns may inform product requirements, but the implementation, naming, assets, and wire protocol remain independent.
+
+The frozen `Upstream/Intatis` directory is retained solely as provenance for the first-party wrapper work. It must not be confused with a third-party dependency or a nested repository.
 
 ## Third-party dependencies
 
-### v0.1
-- None. Only the Swift standard library, Foundation, and (on Apple platforms)
-  SwiftUI / AppKit / Security, which ship with the OS toolchain.
+### Current
 
-### Planned (later milestones — listed for transparency, not yet vendored)
-- **libgit2 / SwiftGit2** (v0.2): in-process git so `git_status` / `git_diff` /
-  `apply_patch` work inside the App Store sandbox without spawning `git`.
-  License: libgit2 is GPLv2-with-linking-exception. To be reviewed before adoption.
+- None. The project uses the Swift standard library, Foundation, and Apple-platform SwiftUI / AppKit / Security supplied by the OS toolchain.
 
-Update this file whenever a dependency is added.
+### Planned, not vendored
+
+- **libgit2 / SwiftGit2**: considered for in-process Git inside an App Store sandbox. libgit2 is GPLv2 with a linking exception; adoption requires a separate license review.
+
+Update this file whenever a dependency or clean-room boundary changes.

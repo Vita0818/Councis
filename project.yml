@@ -10,11 +10,12 @@
 name: Councis
 
 options:
-  bundleIdPrefix: com.councis
+  bundleIdPrefix: com.Vita0818
   deploymentTarget:
     macOS: "13.0"
     iOS: "16.0"
   createIntermediateGroups: true
+  localPackagesGroup: "Internal Modules"
 
 packages:
   Intatis:
@@ -32,62 +33,23 @@ settings:
 
 targets:
 
-  # ---- macOS app: Councis v0.2 Chat / Work shell ----
+  # ---- macOS app: branded wrapper that links the shared runtime but exposes strict Cowork only ----
   CouncisMac:
     type: application
     platform: macOS
     sources:
       - Apps/CouncisMac/Sources
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.councis.app
-        GENERATE_INFOPLIST_FILE: "YES"
-        INFOPLIST_KEY_CFBundleDisplayName: Councis
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Councis"
-
-  # ---- CLI: existing `councis` command ----
-  councis:
-    type: tool
-    platform: macOS
-    sources:
-      - Apps/intatis-cli/Sources
-    dependencies:
-      - package: Intatis
-        product: IntatisCore
-      - package: Intatis
-        product: IntatisProtocol
-      - package: Intatis
-        product: IntatisProviders
-      - package: Intatis
-        product: IntatisConversation
-      - package: Intatis
-        product: IntatisTools
-      - package: Intatis
-        product: IntatisPermission
-      - package: Intatis
-        product: IntatisAgentKernel
-      - package: Intatis
-        product: IntatisCowork
-
-  # ---- macOS app: full Chat / Code / Cowork (links all 11 library products) ----
-  IntatisMac:
-    type: application
-    platform: macOS
-    sources:
       - Apps/IntatisMac/Sources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.intatis.app
-        # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
+        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.CouncisMac
         GENERATE_INFOPLIST_FILE: "YES"
-        INFOPLIST_KEY_CFBundleDisplayName: Intatis
+        INFOPLIST_KEY_CFBundleDisplayName: Councis
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Intatis — clean-room. See NOTICE.md."
-        CODE_SIGN_ENTITLEMENTS: Apps/IntatisMac/IntatisMac.AppStore.entitlements
-        # For full Code/Cowork with shell + git, use the non-sandboxed build:
-        #   CODE_SIGN_ENTITLEMENTS: Apps/IntatisMac/IntatisMac.DeveloperID.entitlements
-        #   and set AppConfig.platformProfile = .macDeveloperID
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Councis — clean-room. See NOTICE.md."
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) COUNCIS_APP"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        CODE_SIGN_ENTITLEMENTS: Apps/CouncisMac/CouncisMac.DeveloperID.entitlements
     dependencies:
       - package: Intatis
         product: IntatisCore
@@ -111,6 +73,79 @@ targets:
         product: IntatisAgentKernel
       - package: Intatis
         product: IntatisCowork
+      - package: Intatis
+        product: IntatisMacTeamSupport
+
+  # ---- CLI: existing `councis` command ----
+  councis:
+    type: tool
+    platform: macOS
+    sources:
+      - Apps/intatis-cli/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Councis
+    dependencies:
+      - package: Intatis
+        product: IntatisCore
+      - package: Intatis
+        product: IntatisProtocol
+      - package: Intatis
+        product: IntatisProviders
+      - package: Intatis
+        product: IntatisConversation
+      - package: Intatis
+        product: IntatisTools
+      - package: Intatis
+        product: IntatisPermission
+      - package: Intatis
+        product: IntatisAgentKernel
+      - package: Intatis
+        product: IntatisCowork
+
+  # ---- macOS app: full Chat / Code / Cowork (11 shared Intatis modules + TeamSupport) ----
+  IntatisMac:
+    type: application
+    platform: macOS
+    sources:
+      - Apps/IntatisMac/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.IntatisMac
+        # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleDisplayName: Intatis
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Intatis — clean-room. See NOTICE.md."
+        ENABLE_HARDENED_RUNTIME: "YES"
+        CODE_SIGN_ENTITLEMENTS: Apps/IntatisMac/IntatisMac.DeveloperID.entitlements
+        # AppStore/chat-only builds can switch back to the sandboxed entitlement
+        # together with AppConfig.platformProfile = .macAppStore.
+    dependencies:
+      - package: Intatis
+        product: IntatisCore
+      - package: Intatis
+        product: IntatisProtocol
+      - package: Intatis
+        product: IntatisProviders
+      - package: Intatis
+        product: IntatisConversation
+      - package: Intatis
+        product: IntatisArtifacts
+      - package: Intatis
+        product: IntatisMultimodal
+      - package: Intatis
+        product: IntatisSharedUI
+      - package: Intatis
+        product: IntatisTools
+      - package: Intatis
+        product: IntatisPermission
+      - package: Intatis
+        product: IntatisAgentKernel
+      - package: Intatis
+        product: IntatisCowork
+      - package: Intatis
+        product: IntatisMacTeamSupport
 
   # ---- iOS app: chat-only SUBSET (deliberately no workspace stack) ----
   IntatisiOS:
@@ -120,7 +155,7 @@ targets:
       - Apps/IntatisiOS/Sources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.intatis.ios
+        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Intatis
         TARGETED_DEVICE_FAMILY: "1,2"
         # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
         GENERATE_INFOPLIST_FILE: "YES"

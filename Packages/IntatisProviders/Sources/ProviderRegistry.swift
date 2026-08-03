@@ -37,6 +37,62 @@ public actor ProviderRegistry {
         try await chatProvider(for: config.models.chat)
     }
 
+    /// Runs a minimal model-backed request and returns a user-facing diagnostic
+    /// without exposing secrets. This is intended for Settings/CLI health checks,
+    /// not for normal chat history.
+    public func healthCheck(role: ProviderHealthRole = .chat,
+                            options: ProviderHealthCheckOptions = ProviderHealthCheckOptions()) async -> ProviderHealthReport {
+        let start = Date()
+        let ref = role == .agent ? (config.models.agent ?? config.models.chat) : config.models.chat
+        guard let endpoint = config.endpoint(id: ref.endpoint) else {
+            return ProviderHealthChecker.failed(
+                role: role,
+                endpointID: ref.endpoint,
+                model: ref.model,
+                wire: nil,
+                code: "config",
+                message: "unknown endpoint '\(ref.endpoint)'",
+                startedAt: start)
+        }
+
+        do {
+            let apiKey = try await resolver.secret(for: endpoint.apiKeyRef)
+            switch endpoint.wire {
+            case .openai:
+                let provider = OpenAIWireProvider(endpoint: endpoint, apiKey: apiKey, http: http)
+                switch role {
+                case .chat:
+                    var report = await ProviderHealthChecker.checkChat(
+                        provider: provider,
+                        endpoint: endpoint,
+                        model: ref.model,
+                        options: options,
+                        startedAt: start)
+                    report.endpointID = endpoint.id
+                    report.wire = endpoint.wire
+                    return report
+                case .agent:
+                    var report = await ProviderHealthChecker.checkAgent(
+                        provider: provider,
+                        endpoint: endpoint,
+                        model: ref.model,
+                        options: options,
+                        startedAt: start)
+                    report.endpointID = endpoint.id
+                    report.wire = endpoint.wire
+                    return report
+                }
+            }
+        } catch {
+            return ProviderHealthChecker.failed(
+                role: role,
+                endpoint: endpoint,
+                model: ref.model,
+                error: error,
+                startedAt: start)
+        }
+    }
+
     /// The model id bound to the chat role.
     public func chatModel() -> ModelID {
         config.models.chat.model
@@ -48,6 +104,24 @@ public actor ProviderRegistry {
     }
 
     // MARK: Tool-calling (v0.2)
+
+    /// Resolves a stable agent binding without reading credentials or starting a
+    /// network request. Unknown providers fail at this boundary.
+    public func validateAgentBinding(_ binding: AgentModelBinding) throws -> ModelRef {
+        let validated = try binding.validated()
+        guard validated.isResolved else {
+            throw IntatisError.config("agent model binding has no resolved provider")
+        }
+        guard config.endpoint(id: validated.providerID) != nil else {
+            throw IntatisError.config("unknown endpoint '\(validated.providerID)'")
+        }
+        return ModelRef(binding: validated)
+    }
+
+    public func agentProvider(for binding: AgentModelBinding) async throws -> ToolCallingProvider {
+        let ref = try validateAgentBinding(binding)
+        return try await agentProvider(for: ref)
+    }
 
     public func agentProvider(for ref: ModelRef) async throws -> ToolCallingProvider {
         guard let endpoint = config.endpoint(id: ref.endpoint) else {

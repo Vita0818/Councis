@@ -11,14 +11,33 @@ public enum MessageRole: String, Codable, Sendable {
 
 // MARK: - Event payloads (v0.1 chat scope)
 
+/// Whether a persisted user-message event belongs in a user-facing thread.
+/// The optional field on `UserMessagePayload` keeps old JSONL decodable; strict
+/// review projections fail closed and show only explicitly user-visible input.
+public enum UserMessagePresentation: String, Codable, Equatable, Sendable {
+    case userVisible = "user_visible"
+    case internalContext = "internal_context"
+}
+
 public struct UserMessagePayload: Codable, Equatable, Sendable {
     public var text: String
     public var attachments: [ArtifactID]?
     public var to: AgentID?
-    public init(text: String, attachments: [ArtifactID]? = nil, to: AgentID? = nil) {
+    public var tags: [String]?
+    public var goal: String?
+    public var presentation: UserMessagePresentation?
+    public init(text: String,
+                attachments: [ArtifactID]? = nil,
+                to: AgentID? = nil,
+                tags: [String]? = nil,
+                goal: String? = nil,
+                presentation: UserMessagePresentation? = nil) {
         self.text = text
         self.attachments = attachments
         self.to = to
+        self.tags = tags
+        self.goal = goal
+        self.presentation = presentation
     }
 }
 
@@ -108,14 +127,16 @@ public struct PermissionRequestPayload: Codable, Equatable, Sendable {
     public var args: String
     public var risk: RiskLevel
     public var reason: String
+    public var context: PermissionRequestContext?
     public init(requestId: RequestID, agent: AgentID? = nil, tool: String, args: String,
-                risk: RiskLevel, reason: String) {
+                risk: RiskLevel, reason: String, context: PermissionRequestContext? = nil) {
         self.requestId = requestId
         self.agent = agent
         self.tool = tool
         self.args = args
         self.risk = risk
         self.reason = reason
+        self.context = context
     }
 }
 
@@ -160,6 +181,211 @@ public struct AgentStatusPayload: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Event payloads (v0.10: task contracts)
+
+public struct TaskCreatedPayload: Codable, Equatable, Sendable {
+    public var contract: TaskContract
+    public var metadata: CoworkEventMetadata?
+    public init(contract: TaskContract, metadata: CoworkEventMetadata? = nil) {
+        self.contract = contract
+        self.metadata = metadata
+    }
+}
+
+public struct TaskAssignedPayload: Codable, Equatable, Sendable {
+    public var contract: TaskContract
+    public var metadata: CoworkEventMetadata?
+    public init(contract: TaskContract, metadata: CoworkEventMetadata? = nil) {
+        self.contract = contract
+        self.metadata = metadata
+    }
+}
+
+public struct TaskQueuedPayload: Codable, Equatable, Sendable {
+    public var contract: TaskContract
+    public var rootTaskID: TaskID?
+    public var parentTaskID: TaskID?
+    public var issuer: AgentID?
+    public var assignee: AgentID
+    public var causalParentID: TaskID?
+    public var hopCount: Int
+    public var visitedAgents: [AgentID]
+    public var attempt: Int?
+    public var reason: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(contract: TaskContract,
+                rootTaskID: TaskID? = nil,
+                parentTaskID: TaskID? = nil,
+                issuer: AgentID? = nil,
+                assignee: AgentID,
+                causalParentID: TaskID? = nil,
+                hopCount: Int,
+                visitedAgents: [AgentID],
+                attempt: Int? = nil,
+                reason: String? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.contract = contract
+        self.rootTaskID = rootTaskID
+        self.parentTaskID = parentTaskID
+        self.issuer = issuer
+        self.assignee = assignee
+        self.causalParentID = causalParentID
+        self.hopCount = hopCount
+        self.visitedAgents = visitedAgents
+        self.attempt = attempt
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct TaskStartedPayload: Codable, Equatable, Sendable {
+    public var taskID: TaskID
+    public var agent: AgentID
+    public var attempt: Int?
+    public var metadata: CoworkEventMetadata?
+
+    public init(taskID: TaskID,
+                agent: AgentID,
+                attempt: Int? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.taskID = taskID
+        self.agent = agent
+        self.attempt = attempt
+        self.metadata = metadata
+    }
+}
+
+public struct TaskReportPayload: Codable, Equatable, Sendable {
+    public var taskID: TaskID
+    public var agent: AgentID
+    public var status: TaskStatus
+    public var objective: String
+    public var expectedDeliverable: String
+    public var summary: String
+    public var detail: String?
+    public var error: String?
+    public var attempt: Int?
+    public var reportedAt: Date
+
+    public init(taskID: TaskID,
+                agent: AgentID,
+                status: TaskStatus,
+                objective: String,
+                expectedDeliverable: String,
+                summary: String,
+                detail: String? = nil,
+                error: String? = nil,
+                attempt: Int? = nil,
+                reportedAt: Date = Date()) {
+        self.taskID = taskID
+        self.agent = agent
+        self.status = status
+        self.objective = objective
+        self.expectedDeliverable = expectedDeliverable
+        self.summary = summary
+        self.detail = detail
+        self.error = error
+        self.attempt = attempt
+        self.reportedAt = reportedAt
+    }
+}
+
+public struct TaskCompletedPayload: Codable, Equatable, Sendable {
+    public var taskID: TaskID
+    public var agent: AgentID
+    public var result: String
+    public var report: TaskReportPayload?
+    public var attempt: Int?
+    public var metadata: CoworkEventMetadata?
+
+    public init(taskID: TaskID,
+                agent: AgentID,
+                result: String,
+                report: TaskReportPayload? = nil,
+                attempt: Int? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.taskID = taskID
+        self.agent = agent
+        self.result = result
+        self.report = report
+        self.attempt = attempt
+        self.metadata = metadata
+    }
+}
+
+public struct TaskFailedPayload: Codable, Equatable, Sendable {
+    public var taskID: TaskID
+    public var agent: AgentID
+    public var error: String
+    public var report: TaskReportPayload?
+    public var attempt: Int?
+    public var metadata: CoworkEventMetadata?
+
+    public init(taskID: TaskID,
+                agent: AgentID,
+                error: String,
+                report: TaskReportPayload? = nil,
+                attempt: Int? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.taskID = taskID
+        self.agent = agent
+        self.error = error
+        self.report = report
+        self.attempt = attempt
+        self.metadata = metadata
+    }
+}
+
+public struct TaskCancelledPayload: Codable, Equatable, Sendable {
+    public var taskID: TaskID
+    public var agent: AgentID
+    public var reason: String
+    public var report: TaskReportPayload?
+    public var attempt: Int?
+    public var metadata: CoworkEventMetadata?
+
+    public init(taskID: TaskID,
+                agent: AgentID,
+                reason: String,
+                report: TaskReportPayload? = nil,
+                attempt: Int? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.taskID = taskID
+        self.agent = agent
+        self.reason = reason
+        self.report = report
+        self.attempt = attempt
+        self.metadata = metadata
+    }
+}
+
+public struct TaskRejectedPayload: Codable, Equatable, Sendable {
+    public var contract: TaskContract?
+    public var requester: AgentID?
+    public var assignee: AgentID?
+    public var objective: String
+    public var reason: String
+    public var violationKind: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(contract: TaskContract? = nil,
+                requester: AgentID? = nil,
+                assignee: AgentID? = nil,
+                objective: String,
+                reason: String,
+                violationKind: String? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.contract = contract
+        self.requester = requester
+        self.assignee = assignee
+        self.objective = objective
+        self.reason = reason
+        self.violationKind = violationKind
+        self.metadata = metadata
+    }
+}
+
 // MARK: - Event
 
 /// A single entry in the append-only conversation event log. This is *both* the
@@ -173,16 +399,50 @@ public enum Event: Equatable, Sendable {
     // v0.2
     case toolCall(ToolCallPayload)
     case toolResult(ToolResultPayload)
+    case toolExecutionPrepared(ToolExecutionPreparedPayload)
+    case toolExecutionSettled(ToolExecutionSettledPayload)
     case permissionRequest(PermissionRequestPayload)
     case permissionResolved(PermissionResolvedPayload)
     case patchProposed(PatchProposedPayload)
     case agentStatus(AgentStatusPayload)
     // v0.3 (Cowork)
     case agentAttached(AgentAttachedPayload)
+    case agentAttachRequested(AgentAttachRequestedPayload)
     case agentDetached(AgentDetachedPayload)
+    case agentSpawnRequested(AgentSpawnRequestedPayload)
+    case agentSpawned(AgentSpawnedPayload)
+    case agentModelBound(AgentModelBoundPayload)
     case agentMessage(AgentMessagePayload)
+    case agentMessageConsumed(AgentMessageConsumedPayload)
     case agentToAgentMessage(AgentToAgentMessagePayload)
+    case informationRequested(InformationRequestedPayload)
+    case informationReplied(InformationRepliedPayload)
+    case delegationRequested(DelegationRequestedPayload)
+    case delegationApproved(DelegationApprovedPayload)
+    case delegationRejected(DelegationRejectedPayload)
+    case taskDelegated(TaskDelegatedPayload)
+    case workspaceLeaseRequested(WorkspaceLeaseRequestedPayload)
+    case workspaceLeaseGranted(WorkspaceLeaseGrantedPayload)
+    case workspaceLeaseDenied(WorkspaceLeaseDeniedPayload)
+    case workspaceLeaseRevoked(WorkspaceLeaseRevokedPayload)
+    case capabilityLeaseCreated(CapabilityLeaseCreatedPayload)
+    case capabilityLeaseRevoked(CapabilityLeaseRevokedPayload)
     case permissionReview(PermissionReviewPayload)
+    case permissionReviewRequested(PermissionReviewRequestedPayload)
+    case permissionReviewSettled(PermissionReviewSettledPayload)
+    // v0.10 (Cowork task contracts)
+    case taskCreated(TaskCreatedPayload)
+    case taskAssigned(TaskAssignedPayload)
+    case taskQueued(TaskQueuedPayload)
+    case taskStarted(TaskStartedPayload)
+    case taskCompleted(TaskCompletedPayload)
+    case taskFailed(TaskFailedPayload)
+    case taskCancelled(TaskCancelledPayload)
+    case taskRejected(TaskRejectedPayload)
+    // Bounded, scheduler-backed quality review of a root task.
+    case taskReviewRequested(TaskReviewRequestedPayload)
+    case taskReviewSettled(TaskReviewSettledPayload)
+    case taskReviewExhausted(TaskReviewExhaustedPayload)
     // v0.4 (Multimodal)
     case artifactAdded(ArtifactAddedPayload)
     case artifactProgress(ArtifactProgressPayload)
@@ -197,15 +457,47 @@ public enum Event: Equatable, Sendable {
         case error = "error"
         case toolCall = "tool_call"
         case toolResult = "tool_result"
+        case toolExecutionPrepared = "tool_execution_prepared"
+        case toolExecutionSettled = "tool_execution_settled"
         case permissionRequest = "permission_request"
         case permissionResolved = "permission_resolved"
         case patchProposed = "patch_proposed"
         case agentStatus = "agent_status"
         case agentAttached = "agent_attached"
+        case agentAttachRequested = "agent_attach_requested"
         case agentDetached = "agent_detached"
+        case agentSpawnRequested = "agent_spawn_requested"
+        case agentSpawned = "agent_spawned"
+        case agentModelBound = "agent_model_bound"
         case agentMessage = "agent_message"
+        case agentMessageConsumed = "agent_message_consumed"
         case agentToAgentMessage = "agent_to_agent_message"
+        case informationRequested = "information_requested"
+        case informationReplied = "information_replied"
+        case delegationRequested = "delegation_requested"
+        case delegationApproved = "delegation_approved"
+        case delegationRejected = "delegation_rejected"
+        case taskDelegated = "task_delegated"
+        case workspaceLeaseRequested = "workspace_lease_requested"
+        case workspaceLeaseGranted = "workspace_lease_granted"
+        case workspaceLeaseDenied = "workspace_lease_denied"
+        case workspaceLeaseRevoked = "workspace_lease_revoked"
+        case capabilityLeaseCreated = "capability_lease_created"
+        case capabilityLeaseRevoked = "capability_lease_revoked"
         case permissionReview = "permission_review"
+        case permissionReviewRequested = "permission_review_requested"
+        case permissionReviewSettled = "permission_review_settled"
+        case taskCreated = "task_created"
+        case taskAssigned = "task_assigned"
+        case taskQueued = "task_queued"
+        case taskStarted = "task_started"
+        case taskCompleted = "task_completed"
+        case taskFailed = "task_failed"
+        case taskCancelled = "task_cancelled"
+        case taskRejected = "task_rejected"
+        case taskReviewRequested = "task_review_requested"
+        case taskReviewSettled = "task_review_settled"
+        case taskReviewExhausted = "task_review_exhausted"
         case artifactAdded = "artifact_added"
         case artifactProgress = "artifact_progress"
         case turnStats = "turn_stats"
@@ -219,15 +511,47 @@ public enum Event: Equatable, Sendable {
         case .error:              return .error
         case .toolCall:           return .toolCall
         case .toolResult:         return .toolResult
+        case .toolExecutionPrepared: return .toolExecutionPrepared
+        case .toolExecutionSettled: return .toolExecutionSettled
         case .permissionRequest:  return .permissionRequest
         case .permissionResolved: return .permissionResolved
         case .patchProposed:      return .patchProposed
         case .agentStatus:        return .agentStatus
         case .agentAttached:       return .agentAttached
+        case .agentAttachRequested: return .agentAttachRequested
         case .agentDetached:       return .agentDetached
+        case .agentSpawnRequested: return .agentSpawnRequested
+        case .agentSpawned:        return .agentSpawned
+        case .agentModelBound:     return .agentModelBound
         case .agentMessage:        return .agentMessage
+        case .agentMessageConsumed: return .agentMessageConsumed
         case .agentToAgentMessage: return .agentToAgentMessage
+        case .informationRequested: return .informationRequested
+        case .informationReplied:   return .informationReplied
+        case .delegationRequested:  return .delegationRequested
+        case .delegationApproved:   return .delegationApproved
+        case .delegationRejected:   return .delegationRejected
+        case .taskDelegated:        return .taskDelegated
+        case .workspaceLeaseRequested: return .workspaceLeaseRequested
+        case .workspaceLeaseGranted:   return .workspaceLeaseGranted
+        case .workspaceLeaseDenied:    return .workspaceLeaseDenied
+        case .workspaceLeaseRevoked:   return .workspaceLeaseRevoked
+        case .capabilityLeaseCreated:  return .capabilityLeaseCreated
+        case .capabilityLeaseRevoked:  return .capabilityLeaseRevoked
         case .permissionReview:    return .permissionReview
+        case .permissionReviewRequested: return .permissionReviewRequested
+        case .permissionReviewSettled: return .permissionReviewSettled
+        case .taskCreated:         return .taskCreated
+        case .taskAssigned:        return .taskAssigned
+        case .taskQueued:          return .taskQueued
+        case .taskStarted:         return .taskStarted
+        case .taskCompleted:       return .taskCompleted
+        case .taskFailed:          return .taskFailed
+        case .taskCancelled:       return .taskCancelled
+        case .taskRejected:        return .taskRejected
+        case .taskReviewRequested: return .taskReviewRequested
+        case .taskReviewSettled:   return .taskReviewSettled
+        case .taskReviewExhausted: return .taskReviewExhausted
         case .artifactAdded:       return .artifactAdded
         case .artifactProgress:    return .artifactProgress
         case .turnStats:           return .turnStats

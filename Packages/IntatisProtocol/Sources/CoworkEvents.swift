@@ -4,32 +4,550 @@ import IntatisCore
 // Event payloads for v0.3 (Cowork): multi-agent attach, agent messages,
 // mediated agent-to-agent messages, and reviewer audit records.
 
+public enum CoworkEventScope: String, Codable, Equatable, Sendable {
+    case thread
+    case task
+    case agent
+    case workspace
+    case capability
+}
+
+public enum CoworkEventVisibility: String, Codable, Equatable, Sendable {
+    case global
+    case task
+    case agent
+    case privateAgent = "private_agent"
+}
+
+public struct CoworkEventMetadata: Codable, Equatable, Sendable {
+    public var threadID: ThreadID?
+    public var taskID: TaskID?
+    public var rootTaskID: TaskID?
+    public var parentTaskID: TaskID?
+    public var sender: AgentID?
+    public var recipient: AgentID?
+    public var agentID: AgentID?
+    public var issuer: AgentID?
+    public var assignee: AgentID?
+    public var workspaceID: WorkspaceID?
+    public var workspaceLeaseID: WorkspaceLeaseID?
+    public var capabilityLeaseID: CapabilityLeaseID?
+    public var causalParentID: TaskID?
+    public var scope: CoworkEventScope
+    public var visibility: CoworkEventVisibility
+    public var createdAt: Date
+
+    public init(threadID: ThreadID? = nil,
+                taskID: TaskID? = nil,
+                rootTaskID: TaskID? = nil,
+                parentTaskID: TaskID? = nil,
+                sender: AgentID? = nil,
+                recipient: AgentID? = nil,
+                agentID: AgentID? = nil,
+                issuer: AgentID? = nil,
+                assignee: AgentID? = nil,
+                workspaceID: WorkspaceID? = nil,
+                workspaceLeaseID: WorkspaceLeaseID? = nil,
+                capabilityLeaseID: CapabilityLeaseID? = nil,
+                causalParentID: TaskID? = nil,
+                scope: CoworkEventScope = .thread,
+                visibility: CoworkEventVisibility = .global,
+                createdAt: Date = Date()) {
+        self.threadID = threadID
+        self.taskID = taskID
+        self.rootTaskID = rootTaskID
+        self.parentTaskID = parentTaskID
+        self.sender = sender
+        self.recipient = recipient
+        self.agentID = agentID
+        self.issuer = issuer
+        self.assignee = assignee
+        self.workspaceID = workspaceID
+        self.workspaceLeaseID = workspaceLeaseID
+        self.capabilityLeaseID = capabilityLeaseID
+        self.causalParentID = causalParentID
+        self.scope = scope
+        self.visibility = visibility
+        self.createdAt = createdAt
+    }
+}
+
+public struct AgentAttachRequestedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID
+    public var path: String
+    public var model: ModelID
+    public var providerID: String?
+    public var profile: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID,
+                path: String,
+                providerID: String? = nil,
+                model: ModelID,
+                profile: String,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.path = path
+        self.model = model
+        self.providerID = providerID
+        self.profile = profile
+        self.metadata = metadata
+    }
+}
+
 public struct AgentAttachedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var path: String
     public var model: ModelID
+    public var providerID: String?
     public var profile: String
-    public init(agent: AgentID, path: String, model: ModelID, profile: String) {
+    public var metadata: CoworkEventMetadata?
+    public init(agent: AgentID, path: String,
+                providerID: String? = nil, model: ModelID, profile: String,
+                metadata: CoworkEventMetadata? = nil) {
         self.agent = agent
         self.path = path
         self.model = model
+        self.providerID = providerID
         self.profile = profile
+        self.metadata = metadata
     }
 }
 
 public struct AgentDetachedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
-    public init(agent: AgentID) { self.agent = agent }
+    public var reason: String?
+    public var metadata: CoworkEventMetadata?
+    public init(agent: AgentID, reason: String? = nil, metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct AgentSpawnRequestedPayload: Codable, Equatable, Sendable {
+    public var requestedBy: AgentID?
+    public var agent: AgentID
+    public var path: String
+    public var model: ModelID?
+    public var providerID: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestedBy: AgentID? = nil,
+                agent: AgentID,
+                path: String,
+                providerID: String? = nil,
+                model: ModelID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestedBy = requestedBy
+        self.agent = agent
+        self.path = path
+        self.model = model
+        self.providerID = providerID
+        self.metadata = metadata
+    }
+}
+
+public struct AgentSpawnedPayload: Codable, Equatable, Sendable {
+    public var requestedBy: AgentID?
+    public var agent: AgentID
+    public var path: String
+    public var model: ModelID
+    public var providerID: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestedBy: AgentID? = nil,
+                agent: AgentID,
+                path: String,
+                providerID: String? = nil,
+                model: ModelID,
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestedBy = requestedBy
+        self.agent = agent
+        self.path = path
+        self.model = model
+        self.providerID = providerID
+        self.metadata = metadata
+    }
+}
+
+/// Additive audit record that resolves or explicitly rebinds an agent's full
+/// provider/model identity. Older lifecycle events retain their model-only
+/// shape and may be completed by this event during migration.
+public struct AgentModelBoundPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID
+    public var providerID: String
+    public var model: ModelID
+    public var reason: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID,
+                providerID: String,
+                model: ModelID,
+                reason: String? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        let binding = AgentModelBinding(providerID: providerID, modelID: model)
+        self.agent = agent
+        self.providerID = binding.providerID
+        self.model = binding.modelID
+        self.reason = reason
+        self.metadata = metadata
+    }
+
+    public init(agent: AgentID,
+                binding: AgentModelBinding,
+                reason: String? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.init(
+            agent: agent,
+            providerID: binding.providerID,
+            model: binding.modelID,
+            reason: reason,
+            metadata: metadata)
+    }
+
+    public var binding: AgentModelBinding {
+        AgentModelBinding(providerID: providerID, modelID: model)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agent
+        case providerID
+        case model
+        case reason
+        case metadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let binding = try AgentModelBinding(
+            validatingProviderID: container.decode(String.self, forKey: .providerID),
+            modelID: container.decode(ModelID.self, forKey: .model))
+        self.agent = try container.decode(AgentID.self, forKey: .agent)
+        self.providerID = binding.providerID
+        self.model = binding.modelID
+        self.reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        self.metadata = try container.decodeIfPresent(CoworkEventMetadata.self, forKey: .metadata)
+    }
 }
 
 public struct AgentMessagePayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var messageId: MessageID
     public var content: String
+    public var from: AgentID?
+    public var to: AgentID?
+    public var kind: AgentCommunicationKind?
+    public var taskID: TaskID?
+    public var inReplyTo: MessageID?
+    public var mediated: Bool?
+    public var metadata: CoworkEventMetadata?
     public init(agent: AgentID, messageId: MessageID, content: String) {
         self.agent = agent
         self.messageId = messageId
         self.content = content
+        self.from = nil
+        self.to = nil
+        self.kind = nil
+        self.taskID = nil
+        self.inReplyTo = nil
+        self.mediated = nil
+        self.metadata = nil
+    }
+    public init(from: AgentID,
+                to: AgentID,
+                content: String,
+                kind: AgentCommunicationKind,
+                messageId: MessageID = MessageID.new(),
+                taskID: TaskID? = nil,
+                inReplyTo: MessageID? = nil,
+                mediated: Bool = true,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = from
+        self.messageId = messageId
+        self.content = content
+        self.from = from
+        self.to = to
+        self.kind = kind
+        self.taskID = taskID
+        self.inReplyTo = inReplyTo
+        self.mediated = mediated
+        self.metadata = metadata
+    }
+}
+
+public enum AgentCommunicationKind: String, Codable, Sendable {
+    case sendMessage = "send_message"
+    case requestInformation = "request_information"
+    case replyMessage = "reply_message"
+}
+
+public struct InformationRequestedPayload: Codable, Equatable, Sendable {
+    public var requestID: MessageID
+    public var from: AgentID
+    public var to: AgentID
+    public var question: String
+    public var mediated: Bool
+    public var taskID: TaskID?
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestID: MessageID = MessageID.new(),
+                from: AgentID,
+                to: AgentID,
+                question: String,
+                mediated: Bool,
+                taskID: TaskID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestID = requestID
+        self.from = from
+        self.to = to
+        self.question = question
+        self.mediated = mediated
+        self.taskID = taskID
+        self.metadata = metadata
+    }
+}
+
+public struct InformationRepliedPayload: Codable, Equatable, Sendable {
+    public var replyID: MessageID
+    public var inReplyTo: MessageID?
+    public var from: AgentID
+    public var to: AgentID
+    public var content: String
+    public var mediated: Bool
+    public var taskID: TaskID?
+    public var metadata: CoworkEventMetadata?
+
+    public init(replyID: MessageID = MessageID.new(),
+                inReplyTo: MessageID? = nil,
+                from: AgentID,
+                to: AgentID,
+                content: String,
+                mediated: Bool,
+                taskID: TaskID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.replyID = replyID
+        self.inReplyTo = inReplyTo
+        self.from = from
+        self.to = to
+        self.content = content
+        self.mediated = mediated
+        self.taskID = taskID
+        self.metadata = metadata
+    }
+}
+
+/// Durable acknowledgement that a mailbox item was projected into an agent
+/// invocation. The original message remains append-only; replay removes only
+/// its pending marker.
+public struct AgentMessageConsumedPayload: Codable, Equatable, Sendable {
+    public var messageID: MessageID
+    public var agent: AgentID
+    public var taskID: TaskID?
+    public var metadata: CoworkEventMetadata?
+
+    public init(messageID: MessageID,
+                agent: AgentID,
+                taskID: TaskID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.messageID = messageID
+        self.agent = agent
+        self.taskID = taskID
+        self.metadata = metadata
+    }
+}
+
+public struct DelegationRequestedPayload: Codable, Equatable, Sendable {
+    public var requestID: RequestID
+    public var requester: AgentID
+    public var recipient: AgentID?
+    public var objective: String
+    public var reason: String
+    public var parentTaskID: TaskID?
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestID: RequestID = RequestID.new(),
+                requester: AgentID,
+                recipient: AgentID? = nil,
+                objective: String,
+                reason: String,
+                parentTaskID: TaskID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestID = requestID
+        self.requester = requester
+        self.recipient = recipient
+        self.objective = objective
+        self.reason = reason
+        self.parentTaskID = parentTaskID
+        self.metadata = metadata
+    }
+}
+
+public struct DelegationApprovedPayload: Codable, Equatable, Sendable {
+    public var requestID: RequestID?
+    public var contract: TaskContract
+    public var reason: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestID: RequestID? = nil,
+                contract: TaskContract,
+                reason: String = "delegation approved",
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestID = requestID
+        self.contract = contract
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct DelegationRejectedPayload: Codable, Equatable, Sendable {
+    public var requestID: RequestID?
+    public var requester: AgentID
+    public var assignee: AgentID?
+    public var objective: String
+    public var reason: String
+    public var violationKind: String?
+    public var metadata: CoworkEventMetadata?
+
+    public init(requestID: RequestID? = nil,
+                requester: AgentID,
+                assignee: AgentID? = nil,
+                objective: String,
+                reason: String,
+                violationKind: String? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.requestID = requestID
+        self.requester = requester
+        self.assignee = assignee
+        self.objective = objective
+        self.reason = reason
+        self.violationKind = violationKind
+        self.metadata = metadata
+    }
+}
+
+public struct TaskDelegatedPayload: Codable, Equatable, Sendable {
+    public var contract: TaskContract
+    public var issuer: AgentID?
+    public var assignee: AgentID
+    public var metadata: CoworkEventMetadata?
+
+    public init(contract: TaskContract, metadata: CoworkEventMetadata? = nil) {
+        self.contract = contract
+        self.issuer = contract.issuer
+        self.assignee = contract.assignee
+        self.metadata = metadata
+    }
+}
+
+public struct WorkspaceLeaseRequestedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var workspaceID: WorkspaceID?
+    public var workspaceLeaseID: WorkspaceLeaseID?
+    public var rootPath: String
+    public var access: WorkspaceAccess
+    public var reason: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                workspaceID: WorkspaceID? = nil,
+                workspaceLeaseID: WorkspaceLeaseID? = nil,
+                rootPath: String,
+                access: WorkspaceAccess,
+                reason: String,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.workspaceID = workspaceID
+        self.workspaceLeaseID = workspaceLeaseID
+        self.rootPath = rootPath
+        self.access = access
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct WorkspaceLeaseGrantedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var lease: WorkspaceLease
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                lease: WorkspaceLease,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.lease = lease
+        self.metadata = metadata
+    }
+}
+
+public struct WorkspaceLeaseDeniedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var workspaceID: WorkspaceID?
+    public var workspaceLeaseID: WorkspaceLeaseID?
+    public var rootPath: String
+    public var reason: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                workspaceID: WorkspaceID? = nil,
+                workspaceLeaseID: WorkspaceLeaseID? = nil,
+                rootPath: String,
+                reason: String,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.workspaceID = workspaceID
+        self.workspaceLeaseID = workspaceLeaseID
+        self.rootPath = rootPath
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct WorkspaceLeaseRevokedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var leaseID: WorkspaceLeaseID
+    public var reason: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                leaseID: WorkspaceLeaseID,
+                reason: String,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.leaseID = leaseID
+        self.reason = reason
+        self.metadata = metadata
+    }
+}
+
+public struct CapabilityLeaseCreatedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var lease: CapabilityLease
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                lease: CapabilityLease,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.lease = lease
+        self.metadata = metadata
+    }
+}
+
+public struct CapabilityLeaseRevokedPayload: Codable, Equatable, Sendable {
+    public var agent: AgentID?
+    public var leaseID: CapabilityLeaseID
+    public var reason: String
+    public var metadata: CoworkEventMetadata?
+
+    public init(agent: AgentID? = nil,
+                leaseID: CapabilityLeaseID,
+                reason: String,
+                metadata: CoworkEventMetadata? = nil) {
+        self.agent = agent
+        self.leaseID = leaseID
+        self.reason = reason
+        self.metadata = metadata
     }
 }
 
@@ -49,7 +567,7 @@ public struct AgentToAgentMessagePayload: Codable, Equatable, Sendable {
     }
 }
 
-/// Audit record of an automatic permission decision (gate `pass` → reviewer).
+/// Audit record of an automatic permission decision or mediated agent exchange.
 public struct PermissionReviewPayload: Codable, Equatable, Sendable {
     public var agent: AgentID?
     public var tool: String

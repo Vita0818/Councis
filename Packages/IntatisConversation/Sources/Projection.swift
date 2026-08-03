@@ -10,13 +10,26 @@ public struct ChatMessageView: Identifiable, Equatable, Sendable {
     public var agent: AgentID?
     public var text: String
     public var isComplete: Bool
+    public var tags: [String]
+    public var goal: String?
+    public var recoveryAdvice: RuntimeRecoveryAdvice?
 
-    public init(id: MessageID, role: MessageRole, agent: AgentID? = nil, text: String, isComplete: Bool) {
+    public init(id: MessageID,
+                role: MessageRole,
+                agent: AgentID? = nil,
+                text: String,
+                isComplete: Bool,
+                tags: [String] = [],
+                goal: String? = nil,
+                recoveryAdvice: RuntimeRecoveryAdvice? = nil) {
         self.id = id
         self.role = role
         self.agent = agent
         self.text = text
         self.isComplete = isComplete
+        self.tags = tags
+        self.goal = goal
+        self.recoveryAdvice = recoveryAdvice
     }
 }
 
@@ -28,13 +41,24 @@ public struct ConversationProjection: Equatable, Sendable {
     public init() {}
 
     public mutating func apply(_ envelope: Envelope) {
-        apply(envelope.event)
+        apply(envelope.event) { suffix in
+            MessageID(rawValue: "msg_\(envelope.session.rawValue)_\(envelope.seq)_\(suffix)")
+        }
     }
 
     public mutating func apply(_ event: Event) {
+        apply(event) { _ in MessageID.new() }
+    }
+
+    private mutating func apply(_ event: Event, syntheticID: (String) -> MessageID) {
         switch event {
         case .userMessage(let p):
-            messages.append(ChatMessageView(id: MessageID.new(), role: .user, text: p.text, isComplete: true))
+            messages.append(ChatMessageView(id: syntheticID("user"),
+                                            role: .user,
+                                            text: p.text,
+                                            isComplete: true,
+                                            tags: p.tags ?? [],
+                                            goal: p.goal))
 
         case .messageDelta(let p):
             if let i = messages.firstIndex(where: { $0.id == p.messageId }) {
@@ -54,18 +78,30 @@ public struct ConversationProjection: Equatable, Sendable {
             }
 
         case .error(let p):
-            messages.append(ChatMessageView(id: MessageID.new(), role: .system,
-                                            text: "⚠️ \(p.message)", isComplete: true))
+            markCurrentPartialMessageStopped(with: p)
+            messages.append(ChatMessageView(id: syntheticID("error"), role: .system,
+                                            text: "⚠️ \(p.message)", isComplete: true,
+                                            recoveryAdvice: RuntimeErrorPresentation.recoveryAdvice(for: p)))
 
         case .artifactAdded(let p):
-            messages.append(ChatMessageView(id: MessageID.new(), role: .system,
+            messages.append(ChatMessageView(id: syntheticID("artifact"), role: .system,
                                             text: "📎 \(p.kind) artifact" + (p.prompt.map { ": \($0)" } ?? ""),
                                             isComplete: true))
 
-        case .toolCall, .toolResult, .permissionRequest, .permissionResolved, .patchProposed, .agentStatus,
-             .agentAttached, .agentDetached, .agentMessage, .agentToAgentMessage, .permissionReview,
+        case .toolCall, .toolResult, .toolExecutionPrepared, .toolExecutionSettled,
+             .permissionRequest, .permissionResolved, .patchProposed, .agentStatus,
+             .agentAttached, .agentAttachRequested, .agentDetached, .agentSpawnRequested, .agentSpawned,
+             .agentModelBound,
+             .agentMessage, .agentMessageConsumed, .agentToAgentMessage, .permissionReview,
+             .permissionReviewRequested, .permissionReviewSettled,
+             .informationRequested, .informationReplied,
+             .delegationRequested, .delegationApproved, .delegationRejected, .taskDelegated,
+             .workspaceLeaseRequested, .workspaceLeaseGranted, .workspaceLeaseDenied, .workspaceLeaseRevoked,
+             .capabilityLeaseCreated, .capabilityLeaseRevoked,
+             .taskCreated, .taskAssigned, .taskQueued, .taskStarted, .taskCompleted, .taskFailed, .taskCancelled, .taskRejected,
+             .taskReviewRequested, .taskReviewSettled, .taskReviewExhausted,
              .artifactProgress, .turnStats:
-            break   // tool/permission/agent/progress/stats events are not shown in the chat text view
+            break   // tool/permission/agent/task/progress/stats events are not shown in the chat text view
         }
     }
 
@@ -74,5 +110,16 @@ public struct ConversationProjection: Equatable, Sendable {
         var p = ConversationProjection()
         for e in envelopes { p.apply(e) }
         return p
+    }
+
+    private mutating func markCurrentPartialMessageStopped(with payload: ErrorPayload) {
+        guard let index = messages.indices.last else { return }
+        guard !messages[index].isComplete else { return }
+        switch messages[index].role {
+        case .assistant, .agent:
+            messages[index].recoveryAdvice = RuntimeErrorPresentation.partialResponseAdvice(for: payload)
+        case .user, .system:
+            break
+        }
     }
 }
