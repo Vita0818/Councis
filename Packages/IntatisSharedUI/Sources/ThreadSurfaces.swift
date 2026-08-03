@@ -3,72 +3,1704 @@ import Foundation
 import SwiftUI
 import IntatisCore
 import IntatisConversation
+import IntatisProtocol
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 
 public struct IntatisThreadStyle {
     public var primaryText: Color
     public var secondaryText: Color
     public var tertiaryText: Color
     public var accent: Color
-    public var accentSoft: Color
-    public var surface: Color
     public var stroke: Color
-    public var userBubble: Color
-    public var assistantBubble: Color
-    public var cardSurface: Color
     public var cardStroke: Color
-    public var warningSurface: Color
-    public var warningStroke: Color
     public var error: Color
-    public var material: Material
 
     public init(primaryText: Color,
                 secondaryText: Color,
                 tertiaryText: Color,
                 accent: Color,
-                accentSoft: Color,
-                surface: Color,
                 stroke: Color,
-                userBubble: Color,
-                assistantBubble: Color,
-                cardSurface: Color,
                 cardStroke: Color,
-                warningSurface: Color,
-                warningStroke: Color,
-                error: Color = .red,
-                material: Material = .ultraThinMaterial) {
+                error: Color = .red) {
         self.primaryText = primaryText
         self.secondaryText = secondaryText
         self.tertiaryText = tertiaryText
         self.accent = accent
-        self.accentSoft = accentSoft
-        self.surface = surface
         self.stroke = stroke
-        self.userBubble = userBubble
-        self.assistantBubble = assistantBubble
-        self.cardSurface = cardSurface
         self.cardStroke = cardStroke
-        self.warningSurface = warningSurface
-        self.warningStroke = warningStroke
         self.error = error
-        self.material = material
     }
 
-    public static func standard(_ scheme: ColorScheme) -> IntatisThreadStyle {
-        let surface = scheme == .dark ? Color(red: 0.12, green: 0.12, blue: 0.12) : .white
+    public static func standard(_: ColorScheme) -> IntatisThreadStyle {
+        let stroke = intatisPlatformSeparator
         return IntatisThreadStyle(
             primaryText: .primary,
             secondaryText: .secondary,
             tertiaryText: .secondary.opacity(0.72),
             accent: .accentColor,
-            accentSoft: .accentColor.opacity(0.16),
-            surface: surface,
-            stroke: .secondary.opacity(scheme == .dark ? 0.25 : 0.16),
-            userBubble: .accentColor.opacity(scheme == .dark ? 0.18 : 0.12),
-            assistantBubble: surface.opacity(scheme == .dark ? 0.30 : 0.70),
-            cardSurface: surface.opacity(scheme == .dark ? 0.26 : 0.62),
-            cardStroke: .secondary.opacity(scheme == .dark ? 0.22 : 0.14),
-            warningSurface: .yellow.opacity(scheme == .dark ? 0.14 : 0.10),
-            warningStroke: .yellow.opacity(0.38))
+            stroke: stroke,
+            cardStroke: stroke,
+            error: .red)
+    }
+}
+
+/// User bubbles are already identified by their trailing alignment and
+/// Material surface, so repeating a sender label adds noise without adding
+/// information. Other message roles keep their structured identity header.
+public enum IntatisMessageHeaderPolicy {
+    public static func showsIdentity(for role: MessageRole) -> Bool {
+        switch role {
+        case .user:
+            return false
+        case .assistant, .agent, .system:
+            return true
+        }
+    }
+}
+
+/// Formats the stable event time shown beside an assistant or agent name.
+/// The thresholds are rolling durations; the rendered value follows the
+/// user's current locale, calendar, time zone, and 12/24-hour preference.
+public enum IntatisMessageTimestampPresentation {
+    private static let oneDay: TimeInterval = 24 * 60 * 60
+    private static let oneWeek: TimeInterval = 7 * oneDay
+
+    public static func string(for timestamp: Date,
+                              relativeTo referenceDate: Date = Date()) -> String {
+        let age = max(0, referenceDate.timeIntervalSince(timestamp))
+        if age < oneDay {
+            return timeFormatter.string(from: timestamp)
+        }
+        if age < oneWeek {
+            return weekdayTimeFormatter.string(from: timestamp)
+        }
+        return dateTimeFormatter.string(from: timestamp)
+    }
+
+    private static func formatter(configure: (DateFormatter) -> Void) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.calendar = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        configure(formatter)
+        return formatter
+    }
+
+    private static let timeFormatter = formatter {
+        $0.dateStyle = .none
+        $0.timeStyle = .short
+    }
+
+    private static let weekdayTimeFormatter = formatter {
+        $0.setLocalizedDateFormatFromTemplate("EEEEjm")
+    }
+
+    private static let dateTimeFormatter = formatter {
+        $0.dateStyle = .medium
+        $0.timeStyle = .short
+    }
+}
+
+/// Window-local identity for one visible thread presentation. This is never a
+/// runtime key and is never persisted; it only scopes SwiftUI identity,
+/// bottom anchors, and cancellable UI work.
+public struct IntatisThreadPresentationScope: Hashable, Sendable {
+    public let kind: String
+    public let sessionID: String
+    public let presentationID: String
+
+    public init(
+        kind: SessionKind,
+        sessionID: SessionID,
+        presentationID: String = "thread"
+    ) {
+        self.kind = kind.rawValue
+        self.sessionID = sessionID.rawValue
+        self.presentationID = presentationID
+    }
+
+    public init(
+        kind: String,
+        sessionID: String,
+        presentationID: String = "thread"
+    ) {
+        self.kind = kind
+        self.sessionID = sessionID
+        self.presentationID = presentationID
+    }
+
+    public func historyWindowScope(
+        requestedUpperBound: Int?
+    ) -> Self {
+        let windowID = requestedUpperBound.map(String.init) ?? "latest"
+        return Self(
+            kind: kind,
+            sessionID: sessionID,
+            presentationID:
+                "\(presentationID):history-window:\(windowID)")
+    }
+}
+
+public struct IntatisThreadBottomAnchorID: Hashable, Sendable {
+    public let scope: IntatisThreadPresentationScope
+
+    public init(scope: IntatisThreadPresentationScope) {
+        self.scope = scope
+    }
+}
+
+struct IntatisThreadViewportFrames: Equatable {
+    var viewport: CGRect?
+    var bottomAnchor: CGRect?
+
+    init(viewport: CGRect? = nil, bottomAnchor: CGRect? = nil) {
+        self.viewport = viewport
+        self.bottomAnchor = bottomAnchor
+    }
+
+    static func isBottomAnchorVisible(
+        _ frames: Self,
+        tolerance: CGFloat = 1
+    ) -> Bool? {
+        guard let viewport = frames.viewport,
+              let bottomAnchor = frames.bottomAnchor,
+              viewport.width > 0,
+              viewport.height > 0 else {
+            return nil
+        }
+        return bottomAnchor.minY >= viewport.minY - tolerance
+            && bottomAnchor.maxY <= viewport.maxY + tolerance
+    }
+}
+
+struct IntatisThreadViewportFramesPreferenceKey: PreferenceKey {
+    static let defaultValue = IntatisThreadViewportFrames()
+
+    static func reduce(
+        value: inout IntatisThreadViewportFrames,
+        nextValue: () -> IntatisThreadViewportFrames
+    ) {
+        let next = nextValue()
+        if let viewport = next.viewport {
+            value.viewport = viewport
+        }
+        if let bottomAnchor = next.bottomAnchor {
+            value.bottomAnchor = bottomAnchor
+        }
+    }
+}
+
+extension View {
+    func intatisThreadViewportFrameProbe() -> some View {
+        background {
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: IntatisThreadViewportFramesPreferenceKey.self,
+                    value: IntatisThreadViewportFrames(
+                        viewport: geometry.frame(in: .global)))
+            }
+        }
+    }
+
+    func intatisThreadBottomAnchorFrameProbe() -> some View {
+        background {
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: IntatisThreadViewportFramesPreferenceKey.self,
+                    value: IntatisThreadViewportFrames(
+                        bottomAnchor: geometry.frame(in: .global)))
+            }
+        }
+    }
+}
+
+enum IntatisThreadScrollReason: Equatable, Sendable {
+    case initialRestore
+    case liveUpdate
+    case completion
+    case richHeightCorrection
+    case jumpToLatest
+
+    var requiresBottomFollowing: Bool {
+        self != .initialRestore && self != .jumpToLatest
+    }
+
+    var isAnimated: Bool {
+        false
+    }
+
+    var flushesCadence: Bool {
+        self != .liveUpdate
+    }
+
+    var diagnosticReason: IntatisScrollDiagnosticReason {
+        switch self {
+        case .initialRestore:
+            return .initialRestore
+        case .liveUpdate:
+            return .liveContent
+        case .completion:
+            return .completion
+        case .richHeightCorrection:
+            return .richSettle
+        case .jumpToLatest:
+            return .manualJump
+        }
+    }
+}
+
+struct IntatisThreadScrollRequest: Equatable, Sendable {
+    let scope: IntatisThreadPresentationScope
+    let generation: UInt64
+    let reason: IntatisThreadScrollReason
+    let animated: Bool
+    let wasBottomFollowing: Bool
+}
+
+struct IntatisThreadScrollSignature: Equatable, Sendable {
+    let visibleItemCount: Int
+    let lastItemID: String?
+    let lastBodyUTF8Count: Int
+    let lastItemComplete: Bool
+    let isWorking: Bool
+    let showsThinkingIndicator: Bool
+}
+
+struct IntatisThreadScrollGeometry: Equatable, Sendable {
+    let isAtBottom: Bool
+    let contentHeight: CGFloat
+
+    /// `onScrollGeometryChange` uses `Equatable` as its admission key. The
+    /// content height is payload for the rare bottom-threshold transition, not
+    /// a reason to run the SwiftUI action for every streaming layout pass.
+    /// Apple documents that scroll geometry changes frequently and recommends
+    /// transforming it to the smallest value the action needs. Bottom
+    /// proximity is that semantic value here; exact height-only churn is
+    /// intentionally coalesced before it reaches the action.
+    static func == (
+        lhs: IntatisThreadScrollGeometry,
+        rhs: IntatisThreadScrollGeometry
+    ) -> Bool {
+        lhs.isAtBottom == rhs.isAtBottom
+    }
+
+    static func measure(
+        contentOffsetY: CGFloat,
+        containerHeight: CGFloat,
+        bottomInset: CGFloat,
+        contentHeight: CGFloat,
+        tolerance: CGFloat = 24
+    ) -> Self {
+        Self(
+            isAtBottom: contentOffsetY
+                + containerHeight
+                + bottomInset
+                >= contentHeight - tolerance,
+            contentHeight: contentHeight)
+    }
+
+    func hasMaterialHeightChange(
+        from previous: Self,
+        epsilon: CGFloat = 1
+    ) -> Bool {
+        abs(contentHeight - previous.contentHeight) >= epsilon
+    }
+}
+
+enum IntatisThreadFollowState: Equatable, Sendable {
+    case followingBottom
+    case gestureSuspended
+    case detachedByUser
+}
+
+/// Render admission is independent of bottom-following. Lazy thread entry
+/// suspends new rich work until either the raw bottom anchor is visibly
+/// restored or a newer native scroll-geometry observation confirms the same
+/// post-restore bottom state.
+/// Every message then owns its own 150 ms dwell for that stable epoch, so a
+/// row materialized later while the user scrolls still waits before starting
+/// rich work. The epoch is intentionally not republished for every gesture:
+/// doing so invalidates already-mounted native Markdown selection views.
+public enum IntatisMessageViewportAdmission: Equatable, Sendable {
+    case immediate
+    case suspended(generation: UInt64)
+    case idleDwell(generation: UInt64)
+
+    var allowsImmediateRichAdmission: Bool {
+        self == .immediate
+    }
+}
+
+private struct IntatisMessageViewportAdmissionEnvironmentKey: EnvironmentKey {
+    static let defaultValue = IntatisMessageViewportAdmission.immediate
+}
+
+extension EnvironmentValues {
+    public var intatisMessageViewportAdmission:
+        IntatisMessageViewportAdmission {
+        get { self[IntatisMessageViewportAdmissionEnvironmentKey.self] }
+        set { self[IntatisMessageViewportAdmissionEnvironmentKey.self] = newValue }
+    }
+}
+
+enum IntatisThreadRichSettleToken: Hashable, Sendable {
+    case finalDocument(
+        messageID: String,
+        contentUTF8Count: Int,
+        contentHash: Int,
+        appearance: String,
+        typography: String,
+        configurationRevision: Int)
+    case width(Int)
+}
+
+struct IntatisThreadRichSettleSource: Equatable, Sendable {
+    let scope: IntatisThreadPresentationScope
+    let activationGeneration: UInt64
+}
+
+private struct IntatisThreadScrollCoordinatorEnvironmentKey: EnvironmentKey {
+    static let defaultValue: IntatisThreadScrollCoordinator? = nil
+}
+
+private struct IntatisThreadRichSettleSourceEnvironmentKey: EnvironmentKey {
+    static let defaultValue: IntatisThreadRichSettleSource? = nil
+}
+
+extension EnvironmentValues {
+    var intatisThreadScrollCoordinator: IntatisThreadScrollCoordinator? {
+        get { self[IntatisThreadScrollCoordinatorEnvironmentKey.self] }
+        set { self[IntatisThreadScrollCoordinatorEnvironmentKey.self] = newValue }
+    }
+
+    var intatisThreadRichSettleSource: IntatisThreadRichSettleSource? {
+        get { self[IntatisThreadRichSettleSourceEnvironmentKey.self] }
+        set { self[IntatisThreadRichSettleSourceEnvironmentKey.self] = newValue }
+    }
+}
+
+/// Pure fixed-window leading/trailing cadence. Runtime sleeping lives in the
+/// coordinator; tests can advance this model with explicit monotonic times.
+struct IntatisThreadScrollCadenceModel: Sendable {
+    static let intervalNanoseconds: UInt64 = 100_000_000
+
+    struct Wake: Equatable, Sendable {
+        let deadlineNanoseconds: UInt64
+    }
+
+    struct Fire: Equatable, Sendable {
+        let request: IntatisThreadScrollRequest
+        let nextWake: Wake?
+    }
+
+    /// The request already admitted to the single serial executor. It is not
+    /// an accumulator entry: the one wake task owns this request until fire.
+    private(set) var executorRequest: IntatisThreadScrollRequest?
+    /// The only pending request. New live updates replace this exact slot.
+    private(set) var pendingRequest: IntatisThreadScrollRequest?
+    private(set) var executorDeadlineNanoseconds: UInt64?
+    private(set) var windowDeadlineNanoseconds: UInt64?
+
+    var pendingCount: Int {
+        pendingRequest == nil ? 0 : 1
+    }
+
+    var outstandingRequests: [IntatisThreadScrollRequest] {
+        [executorRequest, pendingRequest].compactMap { $0 }
+    }
+
+    mutating func submit(
+        _ request: IntatisThreadScrollRequest,
+        nowNanoseconds: UInt64
+    ) -> Wake? {
+        if request.reason.flushesCadence {
+            executorRequest = request
+            pendingRequest = nil
+            executorDeadlineNanoseconds = nowNanoseconds
+            windowDeadlineNanoseconds = nil
+            return Wake(deadlineNanoseconds: nowNanoseconds)
+        }
+
+        if windowDeadlineNanoseconds == nil
+            || nowNanoseconds >= windowDeadlineNanoseconds! {
+            windowDeadlineNanoseconds = nowNanoseconds
+                &+ Self.intervalNanoseconds
+            if let executorDeadlineNanoseconds,
+               executorDeadlineNanoseconds <= nowNanoseconds {
+                // Preserve the first request already owned by the serial
+                // executor and keep only the newest request in the one
+                // pending slot.
+                pendingRequest = request
+                return Wake(deadlineNanoseconds: executorDeadlineNanoseconds)
+            }
+            executorRequest = request
+            executorDeadlineNanoseconds = nowNanoseconds
+            return Wake(deadlineNanoseconds: nowNanoseconds)
+        }
+
+        let deadline = windowDeadlineNanoseconds!
+        if executorRequest != nil,
+           let executorDeadlineNanoseconds,
+           executorDeadlineNanoseconds < deadline {
+            // A leading request is already owned by the executor. It remains
+            // first; the sole pending slot is replaced without spawning
+            // another task.
+            pendingRequest = request
+            return Wake(deadlineNanoseconds: executorDeadlineNanoseconds)
+        }
+
+        // There is either no executor request or it is the trailing edge for
+        // this window. Keep only the newest exact executor request.
+        executorRequest = request
+        executorDeadlineNanoseconds = deadline
+        return Wake(deadlineNanoseconds: deadline)
+    }
+
+    mutating func fire(nowNanoseconds: UInt64) -> Fire? {
+        guard let request = executorRequest,
+              let deadline = executorDeadlineNanoseconds,
+              nowNanoseconds >= deadline else {
+            return nil
+        }
+
+        executorRequest = nil
+        executorDeadlineNanoseconds = nil
+        if request.reason == .liveUpdate {
+            windowDeadlineNanoseconds = nowNanoseconds
+                &+ Self.intervalNanoseconds
+        } else {
+            windowDeadlineNanoseconds = nil
+        }
+
+        var nextWake: Wake?
+        if let pendingRequest {
+            self.pendingRequest = nil
+            executorRequest = pendingRequest
+            let nextDeadline = request.reason == .liveUpdate
+                ? windowDeadlineNanoseconds!
+                : nowNanoseconds
+            executorDeadlineNanoseconds = nextDeadline
+            nextWake = Wake(deadlineNanoseconds: nextDeadline)
+        }
+        return Fire(request: request, nextWake: nextWake)
+    }
+
+    mutating func reset() {
+        executorRequest = nil
+        pendingRequest = nil
+        executorDeadlineNanoseconds = nil
+        windowDeadlineNanoseconds = nil
+    }
+}
+
+/// Pure one-shot quiet/hard-cap settle epoch. Geometry updates only mutate
+/// observations; the runtime wake checks this model later and closes the epoch
+/// before it asks the scroll cadence for one correction.
+struct IntatisThreadRichSettleModel: Sendable {
+    static let quietNanoseconds: UInt64 = 100_000_000
+    static let hardCapNanoseconds: UInt64 = 500_000_000
+    static let materialHeightEpsilon: CGFloat = 1
+
+    struct Epoch: Equatable, Sendable {
+        let token: IntatisThreadRichSettleToken
+        let openedNanoseconds: UInt64
+        let hardDeadlineNanoseconds: UInt64
+        var lastMaterialChangeNanoseconds: UInt64
+        var lastMaterialHeight: CGFloat?
+    }
+
+    enum Check: Equatable, Sendable {
+        case inactive
+        case wait(untilNanoseconds: UInt64)
+        case settled(token: IntatisThreadRichSettleToken)
+    }
+
+    private(set) var epoch: Epoch?
+    private(set) var lastOpenedToken: IntatisThreadRichSettleToken?
+
+    mutating func open(
+        token: IntatisThreadRichSettleToken,
+        contentHeight: CGFloat?,
+        nowNanoseconds: UInt64
+    ) -> Check {
+        guard token != lastOpenedToken else { return .inactive }
+        lastOpenedToken = token
+        epoch = Epoch(
+            token: token,
+            openedNanoseconds: nowNanoseconds,
+            hardDeadlineNanoseconds: nowNanoseconds
+                &+ Self.hardCapNanoseconds,
+            lastMaterialChangeNanoseconds: nowNanoseconds,
+            lastMaterialHeight: contentHeight)
+        return nextCheck(nowNanoseconds: nowNanoseconds)
+    }
+
+    mutating func observe(
+        contentHeight: CGFloat,
+        nowNanoseconds: UInt64
+    ) {
+        guard var epoch else { return }
+        if let previous = epoch.lastMaterialHeight,
+           abs(contentHeight - previous) < Self.materialHeightEpsilon {
+            return
+        }
+        epoch.lastMaterialHeight = contentHeight
+        epoch.lastMaterialChangeNanoseconds = nowNanoseconds
+        self.epoch = epoch
+    }
+
+    mutating func check(nowNanoseconds: UInt64) -> Check {
+        guard let epoch else { return .inactive }
+        let quietDeadline = epoch.lastMaterialChangeNanoseconds
+            &+ Self.quietNanoseconds
+        if nowNanoseconds >= quietDeadline
+            || nowNanoseconds >= epoch.hardDeadlineNanoseconds {
+            // Close before returning the settlement. Later geometry cannot
+            // reopen or retrigger this exact epoch.
+            self.epoch = nil
+            return .settled(token: epoch.token)
+        }
+        return nextCheck(nowNanoseconds: nowNanoseconds)
+    }
+
+    mutating func close() {
+        epoch = nil
+    }
+
+    mutating func reset() {
+        epoch = nil
+        lastOpenedToken = nil
+    }
+
+    private func nextCheck(nowNanoseconds: UInt64) -> Check {
+        guard let epoch else { return .inactive }
+        let quietDeadline = epoch.lastMaterialChangeNanoseconds
+            &+ Self.quietNanoseconds
+        return .wait(untilNanoseconds: min(
+            quietDeadline,
+            epoch.hardDeadlineNanoseconds))
+    }
+}
+
+/// One coordinator belongs to one visible SwiftUI thread subtree. Geometry is
+/// observation-only: it never calls `scrollTo` or publishes SwiftUI state.
+/// Semantic content, explicit user actions, and one-shot rich settle epochs are
+/// the only sources of automatic scrolling.
+@MainActor
+final class IntatisThreadScrollCoordinator: ObservableObject {
+    private struct PendingEntryRichAdmission: Equatable {
+        let scope: IntatisThreadPresentationScope
+        let admissionGeneration: UInt64
+        var restoreRequestGeneration: UInt64?
+        var geometryObservationCountAtRestore: Int?
+    }
+
+    private struct GeometryObservation {
+        let isAtBottom: Bool
+        let contentHeight: CGFloat
+        let scope: IntatisThreadPresentationScope
+    }
+
+    private struct BottomAnchorVisibilityObservation {
+        let isVisible: Bool
+        let scope: IntatisThreadPresentationScope
+    }
+
+    private(set) var activeScope: IntatisThreadPresentationScope?
+    private(set) var generation: UInt64 = 0
+    private(set) var pendingRequest: IntatisThreadScrollRequest?
+    private(set) var executionCount = 0
+    private(set) var cancellationCount = 0
+    private(set) var staleRejectionCount = 0
+    private(set) var geometryObservationCount = 0
+    private(set) var richSettleExecutionCount = 0
+    @Published private(set) var followState: IntatisThreadFollowState =
+        .followingBottom
+    @Published private(set) var viewportAdmission:
+        IntatisMessageViewportAdmission = .suspended(generation: 0)
+    @Published private(set) var richSettleSource:
+        IntatisThreadRichSettleSource? = nil
+
+    private var pendingTask: Task<Void, Never>?
+    private var pendingWakeDeadlineNanoseconds: UInt64?
+    private var pendingWakeToken: UInt64 = 0
+    private var cadence = IntatisThreadScrollCadenceModel()
+    private var scrollExecutor:
+        (@MainActor (IntatisThreadScrollRequest) -> Void)?
+    private var viewportGeneration: UInt64 = 0
+    private var activationGeneration: UInt64 = 0
+    private var pendingEntryRichAdmission: PendingEntryRichAdmission?
+    private var interactionReleasesEntryAdmission = false
+    private var entryConfirmationTask: Task<Void, Never>?
+    private var entryConfirmationTaskToken: UInt64 = 0
+    private var latestIsAtBottom = true
+    private var latestContentHeight: CGFloat?
+    private var isBottomAnchorVisible = false
+    private var pendingBottomAnchorVisibility:
+        BottomAnchorVisibilityObservation?
+    private var bottomAnchorVisibilityTask: Task<Void, Never>?
+    private var bottomAnchorVisibilityTaskToken: UInt64 = 0
+    private var pendingGeometryObservation: GeometryObservation?
+    private var geometryObservationTask: Task<Void, Never>?
+    private var geometryObservationTaskToken: UInt64 = 0
+    private var richSettle = IntatisThreadRichSettleModel()
+    private var richSettleTask: Task<Void, Never>?
+    private var richSettleTaskToken: UInt64 = 0
+    private let performanceDiagnostics: IntatisPerformanceDiagnostics
+
+    init(
+        performanceDiagnostics: IntatisPerformanceDiagnostics = .shared
+    ) {
+        self.performanceDiagnostics = performanceDiagnostics
+    }
+
+    var isFollowingBottom: Bool {
+        followState == .followingBottom
+    }
+
+    var isUserInteracting: Bool {
+        followState == .gestureSuspended
+    }
+
+    /// Returns an admission value that is safe for the subtree's first frame.
+    /// A new lazy scope must not inherit `.immediate` or an idle epoch from the
+    /// previously visible scope before its outer `onAppear` can call
+    /// `activate`. Small eager threads keep their existing immediate behavior.
+    func effectiveViewportAdmission(
+        for scope: IntatisThreadPresentationScope,
+        defersUntilInitialRestore: Bool
+    ) -> IntatisMessageViewportAdmission {
+        guard activeScope == scope else {
+            return defersUntilInitialRestore
+                ? .suspended(generation: viewportGeneration &+ 1)
+                : .immediate
+        }
+        return viewportAdmission
+    }
+
+    func effectiveRichSettleSource(
+        for scope: IntatisThreadPresentationScope
+    ) -> IntatisThreadRichSettleSource? {
+        guard activeScope == scope else { return nil }
+        return richSettleSource
+    }
+
+    func activate(
+        scope: IntatisThreadPresentationScope,
+        defersRichUntilInitialRestore: Bool = false
+    ) {
+        guard activeScope != scope else { return }
+        invalidatePending()
+        invalidateGeometryObservation()
+        invalidateBottomAnchorVisibility()
+        closeRichSettleEpoch()
+        pendingEntryRichAdmission = nil
+        interactionReleasesEntryAdmission = false
+        activeScope = scope
+        followState = .followingBottom
+        latestIsAtBottom = true
+        latestContentHeight = nil
+        isBottomAnchorVisible = false
+        richSettle.reset()
+        activationGeneration &+= 1
+        richSettleSource = IntatisThreadRichSettleSource(
+            scope: scope,
+            activationGeneration: activationGeneration)
+        viewportGeneration &+= 1
+        if defersRichUntilInitialRestore {
+            pendingEntryRichAdmission = PendingEntryRichAdmission(
+                scope: scope,
+                admissionGeneration: viewportGeneration,
+                restoreRequestGeneration: nil,
+                geometryObservationCountAtRestore: nil)
+            viewportAdmission = .suspended(generation: viewportGeneration)
+        } else {
+            viewportAdmission = .immediate
+        }
+    }
+
+    func deactivate(scope: IntatisThreadPresentationScope) {
+        guard activeScope == scope else { return }
+        invalidatePending()
+        invalidateGeometryObservation()
+        invalidateBottomAnchorVisibility()
+        closeRichSettleEpoch()
+        pendingEntryRichAdmission = nil
+        interactionReleasesEntryAdmission = false
+        activeScope = nil
+        scrollExecutor = nil
+        richSettleSource = nil
+        viewportGeneration &+= 1
+        viewportAdmission = .suspended(generation: viewportGeneration)
+    }
+
+    func installScrollExecutor(
+        scope: IntatisThreadPresentationScope,
+        perform: @escaping @MainActor (IntatisThreadScrollRequest) -> Void
+    ) {
+        guard activeScope == scope else { return }
+        scrollExecutor = perform
+    }
+
+    /// The production `onScrollGeometryChange` entry point. SwiftUI can
+    /// produce several geometry values inside one update cycle while native
+    /// Markdown views are mounting. Keep only the latest exact observation
+    /// and apply it after yielding out of that layout callback. This prevents
+    /// a synchronous geometry-action feedback cycle without creating one task
+    /// per sample or weakening the observation-only boundary.
+    func enqueueGeometryObservation(
+        _ isAtBottom: Bool,
+        contentHeight: CGFloat,
+        scope: IntatisThreadPresentationScope
+    ) {
+        guard activeScope == scope,
+              contentHeight.isFinite else {
+            return
+        }
+        pendingGeometryObservation = GeometryObservation(
+            isAtBottom: isAtBottom,
+            contentHeight: contentHeight,
+            scope: scope)
+        guard geometryObservationTask == nil else { return }
+
+        geometryObservationTaskToken &+= 1
+        let token = geometryObservationTaskToken
+        geometryObservationTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  let self,
+                  self.geometryObservationTaskToken == token else {
+                return
+            }
+            self.geometryObservationTask = nil
+            self.applyPendingGeometryObservation()
+        }
+    }
+
+    /// Bottom-anchor visibility is a stronger entry-restoration signal than
+    /// the synchronous return of `ScrollViewProxy.scrollTo`. Coalesce it out
+    /// of SwiftUI's layout callback before it can publish admission state.
+    func enqueueBottomAnchorVisibility(
+        _ isVisible: Bool,
+        scope: IntatisThreadPresentationScope
+    ) {
+        guard activeScope == scope else { return }
+        pendingBottomAnchorVisibility =
+            BottomAnchorVisibilityObservation(
+                isVisible: isVisible,
+                scope: scope)
+        guard bottomAnchorVisibilityTask == nil else { return }
+
+        bottomAnchorVisibilityTaskToken &+= 1
+        let token = bottomAnchorVisibilityTaskToken
+        bottomAnchorVisibilityTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  let self,
+                  self.bottomAnchorVisibilityTaskToken == token else {
+                return
+            }
+            self.bottomAnchorVisibilityTask = nil
+            self.applyPendingBottomAnchorVisibility()
+        }
+    }
+
+    /// Deterministic primitive for tests. Production callbacks use the
+    /// coalescing entry point above.
+    func observeBottomAnchorVisibility(
+        _ isVisible: Bool,
+        scope: IntatisThreadPresentationScope
+    ) {
+        guard activeScope == scope else { return }
+        isBottomAnchorVisible = isVisible
+        confirmEntryRichAdmissionIfPossible(scope: scope)
+    }
+
+    /// Deterministic observation primitive used by tests and compatibility
+    /// callers. It never publishes, schedules a scroll request, or invokes the
+    /// executor.
+    func observeGeometry(
+        _ isAtBottom: Bool,
+        contentHeight: CGFloat,
+        scope: IntatisThreadPresentationScope
+    ) {
+        guard activeScope == scope,
+              contentHeight.isFinite else {
+            return
+        }
+        geometryObservationCount += 1
+        latestIsAtBottom = isAtBottom
+        latestContentHeight = contentHeight
+        richSettle.observe(
+            contentHeight: contentHeight,
+            nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        confirmEntryRichAdmissionIfPossible(scope: scope)
+    }
+
+    /// Compatibility spelling for existing callers/tests. This remains
+    /// observation-only and intentionally cannot request a correction.
+    func updateBottomProximity(
+        _ isAtBottom: Bool,
+        contentHeight: CGFloat? = nil,
+        scope: IntatisThreadPresentationScope
+    ) {
+        observeGeometry(
+            isAtBottom,
+            contentHeight: contentHeight ?? latestContentHeight ?? 0,
+            scope: scope)
+    }
+
+    func userInteractionDidBegin(scope: IntatisThreadPresentationScope) {
+        guard activeScope == scope else { return }
+        guard followState != .gestureSuspended else { return }
+        interactionReleasesEntryAdmission =
+            pendingEntryRichAdmission != nil
+        pendingEntryRichAdmission = nil
+        invalidateEntryConfirmation()
+        followState = .gestureSuspended
+        invalidatePending()
+        closeRichSettleEpoch()
+    }
+
+    func userInteractionDidEnd(scope: IntatisThreadPresentationScope) {
+        guard activeScope == scope,
+              followState == .gestureSuspended else { return }
+        // The idle phase callback can arrive in the same update cycle as the
+        // final geometry sample. Consume that already-enqueued private value
+        // before deciding whether the user detached from the bottom.
+        applyPendingGeometryObservation()
+        followState = latestIsAtBottom
+            ? .followingBottom
+            : .detachedByUser
+        if interactionReleasesEntryAdmission {
+            interactionReleasesEntryAdmission = false
+            viewportGeneration &+= 1
+            viewportAdmission = .idleDwell(generation: viewportGeneration)
+        }
+        if followState == .detachedByUser {
+            invalidatePending()
+        }
+    }
+
+    func jumpToLatest(
+        scope: IntatisThreadPresentationScope,
+        perform: @escaping @MainActor (IntatisThreadScrollRequest) -> Void
+    ) {
+        guard activeScope == scope else {
+            staleRejectionCount += 1
+            performanceDiagnostics.recordScrollRequest(
+                reason: IntatisThreadScrollReason.jumpToLatest.diagnosticReason,
+                outcome: .stale,
+                pendingCount: cadence.pendingCount)
+            return
+        }
+        followState = .followingBottom
+        latestIsAtBottom = true
+        request(
+            scope: scope,
+            reason: .jumpToLatest,
+            perform: perform)
+    }
+
+    @discardableResult
+    func request(
+        scope: IntatisThreadPresentationScope,
+        reason: IntatisThreadScrollReason,
+        perform: @escaping @MainActor (IntatisThreadScrollRequest) -> Void
+    ) -> IntatisThreadScrollRequest? {
+        guard activeScope == scope else {
+            staleRejectionCount += 1
+            performanceDiagnostics.recordScrollRequest(
+                reason: reason.diagnosticReason,
+                outcome: .stale,
+                pendingCount: cadence.pendingCount)
+            return nil
+        }
+        guard !reason.requiresBottomFollowing ||
+                (followState == .followingBottom) else {
+            performanceDiagnostics.recordScrollRequest(
+                reason: reason.diagnosticReason,
+                outcome: .cancelled,
+                pendingCount: cadence.pendingCount)
+            return nil
+        }
+
+        scrollExecutor = perform
+        generation &+= 1
+        let request = IntatisThreadScrollRequest(
+            scope: scope,
+            generation: generation,
+            reason: reason,
+            animated: reason.isAnimated,
+            wasBottomFollowing: followState == .followingBottom)
+        let previouslyOutstanding = cadence.outstandingRequests
+        _ = cadence.submit(
+            request,
+            nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        let currentlyOutstanding = cadence.outstandingRequests
+        performanceDiagnostics.recordScrollRequest(
+            reason: request.reason.diagnosticReason,
+            outcome: .requested,
+            pendingCount: cadence.pendingCount)
+        for replaced in previouslyOutstanding
+        where !currentlyOutstanding.contains(replaced) {
+            performanceDiagnostics.recordScrollRequest(
+                reason: replaced.reason.diagnosticReason,
+                outcome: .cancelled,
+                pendingCount: cadence.pendingCount)
+        }
+        pendingRequest = cadence.pendingRequest
+        synchronizeCadenceWake()
+        return request
+    }
+
+    func openWidthSettleEpoch(
+        scope: IntatisThreadPresentationScope,
+        width: CGFloat,
+        perform: @escaping @MainActor (IntatisThreadScrollRequest) -> Void
+    ) {
+        guard activeScope == scope,
+              followState == .followingBottom,
+              pendingEntryRichAdmission == nil,
+              width.isFinite,
+              width > 0 else {
+            return
+        }
+        scrollExecutor = perform
+        openRichSettleEpoch(
+            scope: scope,
+            token: .width(Int((width * 1_000).rounded())))
+    }
+
+    func richDocumentDidCommit(
+        token: IntatisThreadRichSettleToken,
+        source: IntatisThreadRichSettleSource
+    ) {
+        guard let activeScope,
+              activeScope == source.scope,
+              richSettleSource == source else {
+            return
+        }
+        applyPendingGeometryObservation()
+        openRichSettleEpoch(scope: activeScope, token: token)
+    }
+
+    private func openRichSettleEpoch(
+        scope: IntatisThreadPresentationScope,
+        token: IntatisThreadRichSettleToken
+    ) {
+        guard activeScope == scope,
+              followState == .followingBottom,
+              scrollExecutor != nil else {
+            return
+        }
+        let result = richSettle.open(
+            token: token,
+            contentHeight: latestContentHeight,
+            nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
+        synchronizeRichSettleWake(result)
+    }
+
+    private func synchronizeCadenceWake() {
+        guard let deadline = cadence.executorDeadlineNanoseconds else {
+            if pendingTask != nil {
+                pendingTask?.cancel()
+                cancellationCount += 1
+            }
+            pendingTask = nil
+            pendingWakeDeadlineNanoseconds = nil
+            pendingRequest = cadence.pendingRequest
+            return
+        }
+        if pendingTask != nil,
+           pendingWakeDeadlineNanoseconds == deadline {
+            pendingRequest = cadence.pendingRequest
+            return
+        }
+
+        if pendingTask != nil {
+            pendingTask?.cancel()
+            cancellationCount += 1
+        }
+        pendingWakeToken &+= 1
+        let wakeToken = pendingWakeToken
+        pendingWakeDeadlineNanoseconds = deadline
+        pendingRequest = cadence.pendingRequest
+        pendingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if deadline > now {
+                do {
+                    try await Task.sleep(
+                        nanoseconds: deadline - now)
+                } catch {
+                    return
+                }
+            } else {
+                await Task.yield()
+            }
+            guard !Task.isCancelled,
+                  self.pendingWakeToken == wakeToken else {
+                return
+            }
+            self.pendingTask = nil
+            self.pendingWakeDeadlineNanoseconds = nil
+            self.fireCadence()
+        }
+    }
+
+    private func fireCadence() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard let fire = cadence.fire(nowNanoseconds: now) else {
+            synchronizeCadenceWake()
+            return
+        }
+        pendingRequest = cadence.pendingRequest
+        let request = fire.request
+        guard activeScope == request.scope else {
+            staleRejectionCount += 1
+            performanceDiagnostics.recordScrollRequest(
+                reason: request.reason.diagnosticReason,
+                outcome: .stale,
+                pendingCount: cadence.pendingCount)
+            synchronizeCadenceWake()
+            return
+        }
+        guard !request.reason.requiresBottomFollowing
+                || followState == .followingBottom else {
+            staleRejectionCount += 1
+            performanceDiagnostics.recordScrollRequest(
+                reason: request.reason.diagnosticReason,
+                outcome: .stale,
+                pendingCount: cadence.pendingCount)
+            synchronizeCadenceWake()
+            return
+        }
+        executionCount += 1
+        performanceDiagnostics.recordScrollRequest(
+            reason: request.reason.diagnosticReason,
+            outcome: .executed,
+            pendingCount: cadence.pendingCount)
+        let executor = scrollExecutor
+        executor?(request)
+        if executor != nil {
+            markEntryRawBottomPlacementExecuted(request)
+        }
+        synchronizeCadenceWake()
+    }
+
+    /// The scroll executor is deliberately invoked while admission is still
+    /// suspended. Its `Void` return is not treated as proof that SwiftUI
+    /// resolved the anchor. Rich rows enter their existing per-row idle dwell
+    /// only after a raw-layout geometry sample confirms the active scope is at
+    /// the bottom.
+    private func markEntryRawBottomPlacementExecuted(
+        _ request: IntatisThreadScrollRequest
+    ) {
+        guard var pendingEntryRichAdmission,
+              pendingEntryRichAdmission.scope == request.scope,
+              activeScope == request.scope,
+              followState == .followingBottom,
+              viewportAdmission == .suspended(
+                generation:
+                    pendingEntryRichAdmission.admissionGeneration) else {
+            return
+        }
+        pendingEntryRichAdmission.restoreRequestGeneration =
+            request.generation
+        pendingEntryRichAdmission.geometryObservationCountAtRestore =
+            geometryObservationCount
+        self.pendingEntryRichAdmission = pendingEntryRichAdmission
+        scheduleEntryGeometryConfirmation(
+            scope: request.scope,
+            requestGeneration: request.generation)
+    }
+
+    private func scheduleEntryGeometryConfirmation(
+        scope: IntatisThreadPresentationScope,
+        requestGeneration: UInt64
+    ) {
+        invalidateEntryConfirmation()
+        entryConfirmationTaskToken &+= 1
+        let token = entryConfirmationTaskToken
+        entryConfirmationTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  let self,
+                  self.entryConfirmationTaskToken == token,
+                  let pending = self.pendingEntryRichAdmission,
+                  pending.scope == scope,
+                  pending.restoreRequestGeneration == requestGeneration else {
+                return
+            }
+            self.entryConfirmationTask = nil
+            self.confirmEntryRichAdmissionIfPossible(scope: scope)
+        }
+    }
+
+    private func confirmEntryRichAdmissionIfPossible(
+        scope: IntatisThreadPresentationScope
+    ) {
+        guard let pendingEntryRichAdmission,
+              pendingEntryRichAdmission.scope == scope,
+              pendingEntryRichAdmission.restoreRequestGeneration != nil,
+              activeScope == scope,
+              followState == .followingBottom,
+              viewportAdmission == .suspended(
+                generation:
+                    pendingEntryRichAdmission.admissionGeneration) else {
+            return
+        }
+        let confirmsPostRestoreScrollGeometry =
+            pendingEntryRichAdmission.geometryObservationCountAtRestore
+                .map { geometryObservationCount > $0 } == true
+            && latestIsAtBottom
+            && latestContentHeight.map { $0.isFinite && $0 > 0 } == true
+        guard isBottomAnchorVisible
+                || confirmsPostRestoreScrollGeometry else {
+            return
+        }
+        invalidateEntryConfirmation()
+        self.pendingEntryRichAdmission = nil
+        viewportGeneration &+= 1
+        viewportAdmission = .idleDwell(generation: viewportGeneration)
+    }
+
+    private func synchronizeRichSettleWake(
+        _ check: IntatisThreadRichSettleModel.Check
+    ) {
+        switch check {
+        case .inactive:
+            return
+        case let .settled(token):
+            guard richSettle.epoch == nil,
+                  followState == .followingBottom,
+                  let scope = activeScope,
+                  let scrollExecutor else {
+                return
+            }
+            richSettleExecutionCount += 1
+            request(
+                scope: scope,
+                reason: .richHeightCorrection,
+                perform: scrollExecutor)
+            _ = token
+        case let .wait(deadline):
+            richSettleTaskToken &+= 1
+            let token = richSettleTaskToken
+            richSettleTask?.cancel()
+            richSettleTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline > now {
+                    do {
+                        try await Task.sleep(
+                            nanoseconds: deadline - now)
+                    } catch {
+                        return
+                    }
+                } else {
+                    await Task.yield()
+                }
+                guard !Task.isCancelled,
+                      self.richSettleTaskToken == token else {
+                    return
+                }
+                self.richSettleTask = nil
+                let next = self.richSettle.check(
+                    nowNanoseconds: DispatchTime.now().uptimeNanoseconds)
+                self.synchronizeRichSettleWake(next)
+            }
+        }
+    }
+
+    private func closeRichSettleEpoch() {
+        richSettle.close()
+        if richSettleTask != nil {
+            richSettleTask?.cancel()
+        }
+        richSettleTask = nil
+        richSettleTaskToken &+= 1
+    }
+
+    private func applyPendingGeometryObservation() {
+        guard let observation = pendingGeometryObservation else { return }
+        pendingGeometryObservation = nil
+        observeGeometry(
+            observation.isAtBottom,
+            contentHeight: observation.contentHeight,
+            scope: observation.scope)
+    }
+
+    private func invalidateGeometryObservation() {
+        geometryObservationTask?.cancel()
+        geometryObservationTask = nil
+        pendingGeometryObservation = nil
+        geometryObservationTaskToken &+= 1
+    }
+
+    private func applyPendingBottomAnchorVisibility() {
+        guard let observation = pendingBottomAnchorVisibility else { return }
+        pendingBottomAnchorVisibility = nil
+        observeBottomAnchorVisibility(
+            observation.isVisible,
+            scope: observation.scope)
+    }
+
+    private func invalidateBottomAnchorVisibility() {
+        bottomAnchorVisibilityTask?.cancel()
+        bottomAnchorVisibilityTask = nil
+        pendingBottomAnchorVisibility = nil
+        bottomAnchorVisibilityTaskToken &+= 1
+    }
+
+    private func invalidateEntryConfirmation() {
+        entryConfirmationTask?.cancel()
+        entryConfirmationTask = nil
+        entryConfirmationTaskToken &+= 1
+    }
+
+    private func invalidatePending() {
+        invalidateEntryConfirmation()
+        let cancelledRequests = cadence.outstandingRequests
+        if pendingTask != nil {
+            pendingTask?.cancel()
+            cancellationCount += 1
+        }
+        pendingTask = nil
+        pendingWakeDeadlineNanoseconds = nil
+        pendingRequest = nil
+        cadence.reset()
+        pendingWakeToken &+= 1
+        generation &+= 1
+        for request in cancelledRequests {
+            performanceDiagnostics.recordScrollRequest(
+                reason: request.reason.diagnosticReason,
+                outcome: .cancelled,
+                pendingCount: 0)
+        }
+    }
+}
+
+public struct IntatisJumpToLatestButton: View {
+    private let accessibilityIdentifier: String
+    private let action: () -> Void
+
+    public init(
+        accessibilityIdentifier: String,
+        action: @escaping () -> Void
+    ) {
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Label(
+                IntatisLocalization.string("Jump to latest"),
+                systemImage: "arrow.down.to.line")
+                .font(.caption.bold())
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier(accessibilityIdentifier)
+        .padding(12)
+    }
+}
+
+public enum IntatisThreadHistoryWindowPolicy {
+    public static let capacity = 16
+}
+
+enum IntatisThreadRichEntryPolicy {
+    static let immediateRowLimit = 4
+
+    static func defersUntilInitialRestore(richRowCount: Int) -> Bool {
+        richRowCount > immediateRowLimit
+    }
+}
+
+struct IntatisThreadHistorySelection: Equatable {
+    let scope: IntatisThreadPresentationScope
+    let requestedUpperBound: Int?
+
+    func upperBound(
+        for currentScope: IntatisThreadPresentationScope
+    ) -> Int? {
+        scope == currentScope ? requestedUpperBound : nil
+    }
+}
+
+public struct IntatisThreadHistoryWindow<Element> {
+    public let items: [Element]
+    public let lowerBound: Int
+    public let upperBound: Int
+    public let totalCount: Int
+    public let capacity: Int
+
+    public static func resolve(
+        allItems: [Element],
+        requestedUpperBound: Int?,
+        capacity: Int = IntatisThreadHistoryWindowPolicy.capacity
+    ) -> Self {
+        let boundedCapacity = max(capacity, 1)
+        let totalCount = allItems.count
+        let upperBound = min(
+            max(requestedUpperBound ?? totalCount, 0),
+            totalCount)
+        let lowerBound = max(upperBound - boundedCapacity, 0)
+
+        return Self(
+            items: Array(allItems[lowerBound..<upperBound]),
+            lowerBound: lowerBound,
+            upperBound: upperBound,
+            totalCount: totalCount,
+            capacity: boundedCapacity)
+    }
+
+    public var hasEarlier: Bool {
+        lowerBound > 0
+    }
+
+    public var hasLater: Bool {
+        upperBound < totalCount
+    }
+
+    public var isLatest: Bool {
+        !hasLater
+    }
+
+    public var earlierRequestedUpperBound: Int? {
+        hasEarlier ? lowerBound : nil
+    }
+
+    public var newerRequestedUpperBound: Int? {
+        guard hasLater else { return nil }
+        let nextUpperBound = min(totalCount, upperBound + capacity)
+        return nextUpperBound == totalCount ? nil : nextUpperBound
+    }
+}
+
+public struct IntatisThreadHistoryPager: View {
+    private let lowerBound: Int
+    private let upperBound: Int
+    private let totalCount: Int
+    private let hasEarlier: Bool
+    private let hasLater: Bool
+    private let accessibilityPrefix: String
+    private let onEarlier: () -> Void
+    private let onNewer: () -> Void
+    private let onLatest: () -> Void
+
+    public init(
+        lowerBound: Int,
+        upperBound: Int,
+        totalCount: Int,
+        hasEarlier: Bool,
+        hasLater: Bool,
+        accessibilityPrefix: String,
+        onEarlier: @escaping () -> Void,
+        onNewer: @escaping () -> Void,
+        onLatest: @escaping () -> Void
+    ) {
+        self.lowerBound = lowerBound
+        self.upperBound = upperBound
+        self.totalCount = totalCount
+        self.hasEarlier = hasEarlier
+        self.hasLater = hasLater
+        self.accessibilityPrefix = accessibilityPrefix
+        self.onEarlier = onEarlier
+        self.onNewer = onNewer
+        self.onLatest = onLatest
+    }
+
+    public var body: some View {
+        HStack(spacing: 8) {
+            if hasEarlier {
+                Button(action: onEarlier) {
+                    Label(
+                        IntatisLocalization.string("Earlier"),
+                        systemImage: "chevron.up")
+                }
+                .accessibilityIdentifier("\(accessibilityPrefix).earlier")
+            }
+
+            Text(rangeLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            Spacer(minLength: 8)
+
+            if hasLater {
+                Button(action: onNewer) {
+                    Label(
+                        IntatisLocalization.string("Newer"),
+                        systemImage: "chevron.down")
+                }
+                .accessibilityIdentifier("\(accessibilityPrefix).newer")
+
+                Button(action: onLatest) {
+                    Label(
+                        IntatisLocalization.string("Latest"),
+                        systemImage: "arrow.down.to.line")
+                }
+                .accessibilityIdentifier("\(accessibilityPrefix).latest")
+            }
+        }
+        .font(.caption.bold())
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var rangeLabel: String {
+        IntatisLocalization.format(
+            "Messages %lld–%lld of %lld",
+            Int64(totalCount == 0 ? 0 : lowerBound + 1),
+            Int64(upperBound),
+            Int64(totalCount))
+    }
+}
+
+enum IntatisThreadStackLayoutMode: Equatable {
+    case eager
+    case lazy
+
+    static let eagerRowLimit = 4
+
+    static func resolve(visibleRowCount: Int) -> Self {
+        visibleRowCount <= eagerRowLimit ? .eager : .lazy
+    }
+}
+
+/// A small thread does not benefit from top-level row virtualization, and a
+/// single very tall row can make `LazyVStack` expose only estimated scroll
+/// ranges. Larger threads retain the production lazy layout and its measured
+/// interaction characteristics.
+public struct IntatisAdaptiveThreadStack<Content: View>: View {
+    private let visibleRowCount: Int
+    private let alignment: HorizontalAlignment
+    private let spacing: CGFloat?
+    private let content: Content
+
+    public init(
+        visibleRowCount: Int,
+        alignment: HorizontalAlignment = .center,
+        spacing: CGFloat? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.visibleRowCount = visibleRowCount
+        self.alignment = alignment
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    @ViewBuilder public var body: some View {
+        switch IntatisThreadStackLayoutMode.resolve(
+            visibleRowCount: visibleRowCount) {
+        case .eager:
+            VStack(alignment: alignment, spacing: spacing) {
+                content
+            }
+        case .lazy:
+            LazyVStack(alignment: alignment, spacing: spacing) {
+                content
+            }
+        }
+    }
+}
+
+// MARK: - System materials and Liquid Glass
+
+private var intatisPlatformSeparator: Color {
+    #if canImport(AppKit)
+    return Color(nsColor: .separatorColor)
+    #elseif canImport(UIKit)
+    return Color(uiColor: .separator)
+    #else
+    return .secondary.opacity(0.28)
+    #endif
+}
+
+private struct IntatisContentSurfaceModifier: ViewModifier {
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(.regularMaterial, in: shape)
+            .overlay {
+                shape.stroke(intatisPlatformSeparator, lineWidth: 1)
+            }
+    }
+}
+
+private struct IntatisSubtleContentSurfaceModifier: ViewModifier {
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(.regularMaterial, in: shape)
+            .overlay {
+                shape.stroke(
+                    intatisPlatformSeparator.opacity(0.55),
+                    lineWidth: 0.5)
+            }
+    }
+}
+
+private struct IntatisLiquidGlassModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let isInteractive: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            content.glassEffect(
+                isInteractive ? .regular.interactive() : .regular,
+                in: .rect(cornerRadius: cornerRadius))
+        } else {
+            fallback(content)
+        }
+        #else
+        fallback(content)
+        #endif
+    }
+
+    private func fallback(_ content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return content
+            .background(.regularMaterial, in: shape)
+            .overlay {
+                shape.stroke(intatisPlatformSeparator, lineWidth: 1)
+            }
+    }
+}
+
+private struct IntatisGlassButtonModifier: ViewModifier {
+    let isProminent: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            if isProminent {
+                content.buttonStyle(.glassProminent)
+            } else {
+                content.buttonStyle(.glass)
+            }
+        } else {
+            fallback(content)
+        }
+        #else
+        fallback(content)
+        #endif
+    }
+
+    @ViewBuilder private func fallback(_ content: Content) -> some View {
+        if isProminent {
+            content.buttonStyle(.borderedProminent)
+        } else {
+            content.buttonStyle(.bordered)
+        }
+    }
+}
+
+public extension View {
+    /// Standard Material for content-layer cards and read-only information.
+    func intatisContentSurface(cornerRadius: CGFloat = 16) -> some View {
+        modifier(IntatisContentSurfaceModifier(cornerRadius: cornerRadius))
+    }
+
+    /// A quieter Material surface for transient, compact status and review UI.
+    /// It preserves a system-resolved boundary without competing with the
+    /// conversation content or using a semantic color as a full-card outline.
+    func intatisSubtleContentSurface(cornerRadius: CGFloat = 12) -> some View {
+        modifier(IntatisSubtleContentSurfaceModifier(cornerRadius: cornerRadius))
+    }
+
+    /// Native Liquid Glass on current systems, with semantic Material fallback.
+    func intatisLiquidGlass(cornerRadius: CGFloat = 16,
+                            interactive: Bool = false) -> some View {
+        modifier(IntatisLiquidGlassModifier(
+            cornerRadius: cornerRadius,
+            isInteractive: interactive))
+    }
+
+    /// Native glass button artwork on current systems, native bordered fallback.
+    func intatisGlassButton(prominent: Bool = false) -> some View {
+        modifier(IntatisGlassButtonModifier(isProminent: prominent))
+    }
+
+    /// Shared geometry for compact icon-only actions. The visual treatment is
+    /// still supplied by SwiftUI's native glass/bordered button styles.
+    func intatisCompactIconButton(prominent: Bool = false) -> some View {
+        labelStyle(.iconOnly)
+            .controlSize(.regular)
+            .buttonBorderShape(.circle)
+            .intatisGlassButton(prominent: prominent)
+    }
+
+    /// A native Menu owns selection and keyboard behavior while its label
+    /// supplies the same interactive Liquid Glass surface as the composer.
+    func intatisComposerSelectionMenu() -> some View {
+        buttonStyle(.plain)
+    }
+
+    /// Shared 40-point capsule geometry for the model/profile Menu label.
+    func intatisComposerSelectionLabel() -> some View {
+        padding(
+            .horizontal,
+            IntatisComposerControlMetrics.selectionHorizontalPadding)
+            .frame(
+                height: IntatisComposerControlMetrics.controlHeight,
+                alignment: .leading)
+            .frame(
+                maxWidth: IntatisComposerControlMetrics.selectionMaxWidth,
+                alignment: .leading)
+            .intatisLiquidGlass(
+                cornerRadius: IntatisComposerControlMetrics.controlHeight / 2,
+                interactive: true)
+    }
+
+    /// Gives native compact glass buttons a stable visual diameter instead of
+    /// leaving their size to each SF Symbol's intrinsic bounds.
+    func intatisComposerIconLabel() -> some View {
+        font(.system(size: 15, weight: .semibold))
+            .frame(
+                width: IntatisComposerControlMetrics.iconLabelExtent,
+                height: IntatisComposerControlMetrics.iconLabelExtent)
+    }
+}
+
+public struct IntatisGlassEffectGroup<Content: View>: View {
+    private let spacing: CGFloat?
+    private let content: Content
+
+    public init(spacing: CGFloat? = nil,
+                @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    @ViewBuilder public var body: some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content
+            }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }
 
@@ -94,11 +1726,7 @@ public struct IntatisTurnStatsSummaryView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(style.cardSurface.opacity(0.72), in: Capsule(style: .continuous))
-        .overlay {
-            Capsule(style: .continuous)
-                .stroke(style.cardStroke.opacity(0.75), lineWidth: 1)
-        }
+        .intatisContentSurface(cornerRadius: 14)
         .help(summary)
     }
 
@@ -115,23 +1743,36 @@ public struct IntatisTurnStatsSummaryView: View {
             values.append(formatDuration(totalMillis))
         }
         if let ttftMillis = stats.ttftMillis {
-            values.append("ttft \(formatDuration(ttftMillis))")
+            values.append(IntatisLocalization.format(
+                "ttft %@",
+                formatDuration(ttftMillis)))
         }
         return values
     }
 
     private var tokenPart: String? {
         if let totalTokens = stats.totalTokens {
-            let total = "\(formatNumber(totalTokens)) tok"
+            let total = IntatisLocalization.format(
+                "%@ tok",
+                formatNumber(totalTokens))
             if let promptTokens = stats.promptTokens,
                let cachedPromptTokens = stats.cachedPromptTokens,
                let completionTokens = stats.completionTokens {
                 let uncachedPromptTokens = max(promptTokens - cachedPromptTokens, 0)
-                return "\(total) (\(formatNumber(uncachedPromptTokens)) input + \(formatNumber(cachedPromptTokens)) cached / \(formatNumber(completionTokens)) output)"
+                return IntatisLocalization.format(
+                    "%@ (%@ input + %@ cached / %@ output)",
+                    total,
+                    formatNumber(uncachedPromptTokens),
+                    formatNumber(cachedPromptTokens),
+                    formatNumber(completionTokens))
             }
             if let promptTokens = stats.promptTokens,
                let completionTokens = stats.completionTokens {
-                return "\(total) (\(formatNumber(promptTokens)) in / \(formatNumber(completionTokens)) out)"
+                return IntatisLocalization.format(
+                    "%@ (%@ in / %@ out)",
+                    total,
+                    formatNumber(promptTokens),
+                    formatNumber(completionTokens))
             }
             return total
         }
@@ -140,17 +1781,28 @@ public struct IntatisTurnStatsSummaryView: View {
         if let promptTokens = stats.promptTokens,
            let cachedPromptTokens = stats.cachedPromptTokens {
             let uncachedPromptTokens = max(promptTokens - cachedPromptTokens, 0)
-            pieces.append("\(formatNumber(uncachedPromptTokens)) input")
-            pieces.append("\(formatNumber(cachedPromptTokens)) cached")
+            pieces.append(IntatisLocalization.format(
+                "%@ input",
+                formatNumber(uncachedPromptTokens)))
+            pieces.append(IntatisLocalization.format(
+                "%@ cached",
+                formatNumber(cachedPromptTokens)))
         } else if let promptTokens = stats.promptTokens {
-            pieces.append("\(formatNumber(promptTokens)) in")
+            pieces.append(IntatisLocalization.format(
+                "%@ in",
+                formatNumber(promptTokens)))
         }
         if let completionTokens = stats.completionTokens {
-            pieces.append("\(formatNumber(completionTokens)) out")
+            pieces.append(IntatisLocalization.format(
+                "%@ out",
+                formatNumber(completionTokens)))
         }
         if let promptTokens = stats.promptTokens,
            let contextWindowTokens = stats.contextWindowTokens {
-            pieces.append("ctx \(formatNumber(promptTokens))/\(formatNumber(contextWindowTokens))")
+            pieces.append(IntatisLocalization.format(
+                "ctx %@/%@",
+                formatNumber(promptTokens),
+                formatNumber(contextWindowTokens)))
         }
         return pieces.isEmpty ? nil : pieces.joined(separator: " / ")
     }
@@ -176,65 +1828,108 @@ public struct IntatisTurnStatsSummaryView: View {
     }()
 }
 
-public struct IntatisModeTab: Identifiable, Hashable {
-    public var id: String
-    public var title: String
-    public var systemImage: String
-
-    public init(id: String, title: String, systemImage: String) {
-        self.id = id
-        self.title = title
-        self.systemImage = systemImage
-    }
-}
-
-public struct IntatisModeSegmentedControl: View {
-    private let tabs: [IntatisModeTab]
-    @Binding private var selectionID: String
+/// Low-noise, composer-local usage metadata. Unlike action controls, it is
+/// deliberately not glass-backed and occupies the trailing side of the
+/// composer's read-only first row.
+public struct IntatisComposerUsageStrip: View {
+    private let stats: TurnStatsSnapshot?
     private let style: IntatisThreadStyle
 
-    public init(tabs: [IntatisModeTab],
-                selectionID: Binding<String>,
-                style: IntatisThreadStyle) {
-        self.tabs = tabs
-        self._selectionID = selectionID
+    public init(stats: TurnStatsSnapshot?, style: IntatisThreadStyle) {
+        self.stats = stats
         self.style = style
     }
 
-    public var body: some View {
-        HStack(spacing: 4) {
-            ForEach(tabs) { tab in
-                Button {
-                    selectionID = tab.id
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: tab.systemImage)
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(tab.title)
-                            .font(.system(size: 11, weight: .semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
+    @ViewBuilder public var body: some View {
+        if let stats, stats.hasDisplayableMetrics {
+            ScrollView(.horizontal) {
+                HStack(spacing: 18) {
+                    if let contextValue = contextValue(for: stats) {
+                        metric(IntatisLocalization.string("Context"), value: contextValue)
                     }
-                    .foregroundStyle(selectionID == tab.id ? style.accent : style.secondaryText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(selectionID == tab.id ? style.accentSoft : Color.clear)
+                    if let promptTokens = stats.promptTokens {
+                        let cachedTokens = stats.cachedPromptTokens ?? 0
+                        metric(
+                            IntatisLocalization.string("Input"),
+                            value: formatNumber(max(promptTokens - cachedTokens, 0)))
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    if let cachedPromptTokens = stats.cachedPromptTokens {
+                        metric(
+                            IntatisLocalization.string("Cached"),
+                            value: formatNumber(cachedPromptTokens))
+                    }
+                    if let completionTokens = stats.completionTokens {
+                        metric(
+                            IntatisLocalization.string("Output"),
+                            value: formatNumber(completionTokens))
+                    }
+                    if stats.promptTokens == nil,
+                       stats.completionTokens == nil,
+                       let totalTokens = stats.totalTokens {
+                        metric(
+                            IntatisLocalization.string("Total"),
+                            value: formatNumber(totalTokens))
+                    }
+                    if let totalMillis = stats.totalMillis {
+                        metric(
+                            IntatisLocalization.string("Time"),
+                            value: formatDuration(totalMillis))
+                    }
                 }
-                .buttonStyle(.plain)
-                .help(tab.title)
+                .padding(.horizontal, 2)
             }
-        }
-        .padding(4)
-        .background(style.cardSurface.opacity(0.76), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(style.cardStroke.opacity(0.85), lineWidth: 1)
+            .scrollIndicators(.hidden)
+            .defaultScrollAnchor(.trailing)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .accessibilityElement(children: .combine)
         }
     }
+
+    private func metric(_ label: String, value: String) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .foregroundStyle(style.tertiaryText)
+            Text(value)
+                .foregroundStyle(style.secondaryText)
+                .monospacedDigit()
+        }
+        .font(.system(size: 11, weight: .medium))
+        .lineLimit(1)
+    }
+
+    private func contextValue(for stats: TurnStatsSnapshot) -> String? {
+        if let promptTokens = stats.promptTokens,
+           let contextWindowTokens = stats.contextWindowTokens {
+            return "\(formatNumber(promptTokens)) / \(formatNumber(contextWindowTokens))"
+        }
+        if let promptTokens = stats.promptTokens {
+            return formatNumber(promptTokens)
+        }
+        if let contextWindowTokens = stats.contextWindowTokens {
+            return formatNumber(contextWindowTokens)
+        }
+        return nil
+    }
+
+    private func formatDuration(_ millis: Int) -> String {
+        if millis < 1000 {
+            return "\(millis)ms"
+        }
+        let seconds = Double(millis) / 1000
+        return seconds < 10
+            ? String(format: "%.2fs", seconds)
+            : String(format: "%.1fs", seconds)
+    }
+
+    private func formatNumber(_ value: Int) -> String {
+        Self.numberFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private static let numberFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
 }
 
 public struct IntatisSessionHistoryItem: Identifiable, Hashable {
@@ -243,17 +1938,20 @@ public struct IntatisSessionHistoryItem: Identifiable, Hashable {
     public var detail: String
     public var systemImage: String
     public var isSelected: Bool
+    public var isDeleteDisabled: Bool
 
     public init(id: SessionID,
                 title: String,
                 detail: String,
                 systemImage: String,
-                isSelected: Bool = false) {
+                isSelected: Bool = false,
+                isDeleteDisabled: Bool = false) {
         self.id = id
         self.title = title
         self.detail = detail
         self.systemImage = systemImage
         self.isSelected = isSelected
+        self.isDeleteDisabled = isDeleteDisabled
     }
 }
 
@@ -266,6 +1964,8 @@ public struct IntatisSessionHistoryList: View {
     private let isNewDisabled: Bool
     private let onNew: () -> Void
     private let onSelect: (SessionID) -> Void
+    private let onRename: ((SessionID) -> Void)?
+    private let onDelete: ((SessionID) -> Void)?
 
     public init(title: String,
                 newTitle: String,
@@ -274,7 +1974,9 @@ public struct IntatisSessionHistoryList: View {
                 style: IntatisThreadStyle,
                 isNewDisabled: Bool = false,
                 onNew: @escaping () -> Void,
-                onSelect: @escaping (SessionID) -> Void) {
+                onSelect: @escaping (SessionID) -> Void,
+                onRename: ((SessionID) -> Void)? = nil,
+                onDelete: ((SessionID) -> Void)? = nil) {
         self.title = title
         self.newTitle = newTitle
         self.emptyTitle = emptyTitle
@@ -283,6 +1985,8 @@ public struct IntatisSessionHistoryList: View {
         self.isNewDisabled = isNewDisabled
         self.onNew = onNew
         self.onSelect = onSelect
+        self.onRename = onRename
+        self.onDelete = onDelete
     }
 
     public var body: some View {
@@ -294,15 +1998,18 @@ public struct IntatisSessionHistoryList: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Button(action: onNew) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(isNewDisabled ? style.tertiaryText : style.accent)
+                    Label(newTitle, systemImage: "plus")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 12, weight: .semibold))
                         .frame(width: 24, height: 24)
-                        .background(style.cardSurface.opacity(0.78), in: Circle())
                 }
-                .buttonStyle(.plain)
+                .controlSize(.small)
+                .buttonBorderShape(.circle)
+                .intatisGlassButton()
                 .disabled(isNewDisabled)
                 .help(newTitle)
+                .accessibilityLabel(newTitle)
+                .accessibilityIdentifier("sidebar.session.new")
             }
 
             if items.isEmpty {
@@ -321,6 +2028,28 @@ public struct IntatisSessionHistoryList: View {
                                 IntatisSessionHistoryRow(item: item, style: style)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier(
+                                "sidebar.session.\(item.id.rawValue)")
+                            .contextMenu {
+                                if let onRename {
+                                    Button {
+                                        onRename(item.id)
+                                    } label: {
+                                        Label("Rename…", systemImage: "pencil")
+                                    }
+                                }
+                                if let onDelete {
+                                    if onRename != nil {
+                                        Divider()
+                                    }
+                                    Button(role: .destructive) {
+                                        onDelete(item.id)
+                                    } label: {
+                                        Label("Delete…", systemImage: "trash")
+                                    }
+                                    .disabled(item.isDeleteDisabled)
+                                }
+                            }
                         }
                     }
                     .padding(.vertical, 1)
@@ -360,8 +2089,6 @@ private struct IntatisSessionHistoryRow: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
-        .background(item.isSelected ? style.accentSoft : style.cardSurface.opacity(0.30),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(item.isSelected ? style.accent.opacity(0.42) : Color.clear, lineWidth: 1)
@@ -385,10 +2112,12 @@ public struct IntatisRecoveryAdviceView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Label(advice.title, systemImage: advice.retryable ? "arrow.clockwise" : "info.circle")
+            Label(
+                IntatisLocalization.string(advice.title),
+                systemImage: advice.retryable ? "arrow.clockwise" : "info.circle")
                 .font(.caption.bold())
                 .foregroundStyle(tint)
-            Text(advice.detail)
+            Text(IntatisLocalization.string(advice.detail))
                 .font(.caption)
                 .foregroundStyle(style.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -417,6 +2146,17 @@ public struct IntatisThreadComposerSecondaryAction {
     }
 }
 
+public enum IntatisComposerControlMetrics {
+    public static let controlHeight: CGFloat = 40
+    public static let iconLabelExtent: CGFloat = 32
+    public static let selectionMaxWidth: CGFloat = 220
+    public static let selectionHorizontalPadding: CGFloat = 12
+    public static let rowSpacing: CGFloat = 8
+    public static let inputHorizontalPadding: CGFloat = 14
+    public static let inputVerticalPadding: CGFloat = 9
+    public static let inputCornerRadius: CGFloat = controlHeight / 2
+}
+
 public struct IntatisThreadComposer: View {
     @Binding private var input: String
     private let placeholder: String
@@ -424,9 +2164,20 @@ public struct IntatisThreadComposer: View {
     private let isInputDisabled: Bool
     private let style: IntatisThreadStyle
     private let secondaryAction: IntatisThreadComposerSecondaryAction?
+    private let stopAction: IntatisThreadComposerSecondaryAction?
     private let accessory: AnyView?
+    private let leadingAccessory: AnyView?
+    private let inputLeadingAccessory: AnyView?
     private let onSend: () -> Void
     @FocusState private var focused: Bool
+
+    private var inputFont: Font {
+        #if os(iOS)
+        return .body
+        #else
+        return .system(size: 15)
+        #endif
+    }
 
     public init(placeholder: String,
                 input: Binding<String>,
@@ -434,6 +2185,10 @@ public struct IntatisThreadComposer: View {
                 isInputDisabled: Bool,
                 style: IntatisThreadStyle,
                 secondaryAction: IntatisThreadComposerSecondaryAction? = nil,
+                leadingAccessory: AnyView? = nil,
+                inputLeadingAccessory: AnyView? = nil,
+                stopAction: IntatisThreadComposerSecondaryAction? = nil,
+                accessory: AnyView? = nil,
                 onSend: @escaping () -> Void) {
         self.placeholder = placeholder
         self._input = input
@@ -441,7 +2196,10 @@ public struct IntatisThreadComposer: View {
         self.isInputDisabled = isInputDisabled
         self.style = style
         self.secondaryAction = secondaryAction
-        self.accessory = nil
+        self.stopAction = stopAction
+        self.accessory = accessory
+        self.leadingAccessory = leadingAccessory
+        self.inputLeadingAccessory = inputLeadingAccessory
         self.onSend = onSend
     }
 
@@ -451,6 +2209,9 @@ public struct IntatisThreadComposer: View {
                                  isInputDisabled: Bool,
                                  style: IntatisThreadStyle,
                                  secondaryAction: IntatisThreadComposerSecondaryAction? = nil,
+                                 leadingAccessory: AnyView? = nil,
+                                 inputLeadingAccessory: AnyView? = nil,
+                                 stopAction: IntatisThreadComposerSecondaryAction? = nil,
                                  @ViewBuilder accessory: () -> Accessory,
                                  onSend: @escaping () -> Void) {
         self.placeholder = placeholder
@@ -459,70 +2220,159 @@ public struct IntatisThreadComposer: View {
         self.isInputDisabled = isInputDisabled
         self.style = style
         self.secondaryAction = secondaryAction
+        self.stopAction = stopAction
         self.accessory = AnyView(accessory())
+        self.leadingAccessory = leadingAccessory
+        self.inputLeadingAccessory = inputLeadingAccessory
         self.onSend = onSend
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let accessory {
-                accessory
-            }
+            topAccessoryRow
 
-            HStack(alignment: .bottom, spacing: 10) {
-                HStack(alignment: .bottom, spacing: 8) {
-                    TextField(placeholder, text: $input, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 15))
-                        .foregroundStyle(style.primaryText)
-                        .lineLimit(1...6)
-                        .focused($focused)
-                        .onSubmit(onSend)
-                        .disabled(isInputDisabled)
-
-                    if let secondaryAction {
-                        Button(action: secondaryAction.action) {
-                            if secondaryAction.isBusy {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: secondaryAction.systemImage)
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundStyle(secondaryAction.isDisabled ? style.tertiaryText : style.accent)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .help(secondaryAction.help)
-                        .disabled(secondaryAction.isDisabled)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
-                .background {
-                    Capsule(style: .continuous)
-                        .fill(style.surface.opacity(0.44))
-                }
-                .background(style.material, in: Capsule(style: .continuous))
-                .overlay {
-                    Capsule(style: .continuous)
-                        .stroke(style.stroke.opacity(0.82), lineWidth: 1)
-                }
-
-                Button(action: onSend) {
-                    ZStack {
-                        Circle()
-                            .fill(canSend ? AnyShapeStyle(style.accent)
-                                          : AnyShapeStyle(style.surface.opacity(0.50)))
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(canSend ? .white : style.tertiaryText)
-                    }
-                    .frame(width: 40, height: 40)
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
+            IntatisGlassEffectGroup(spacing: 10) {
+                composerControls
             }
         }
     }
+
+    @ViewBuilder private var topAccessoryRow: some View {
+        if leadingAccessory != nil || accessory != nil {
+            HStack(alignment: .center, spacing: 12) {
+                if let leadingAccessory {
+                    leadingAccessory
+                        .controlSize(.regular)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+
+                if leadingAccessory != nil, accessory != nil {
+                    Spacer(minLength: 12)
+                }
+
+                if let accessory {
+                    accessory
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+            .frame(
+                maxWidth: .infinity,
+                minHeight: IntatisComposerControlMetrics.controlHeight,
+                alignment: .center)
+        }
+    }
+
+    private var composerControls: some View {
+        HStack(
+            alignment: .bottom,
+            spacing: IntatisComposerControlMetrics.rowSpacing
+        ) {
+            inputLeadingControls
+            inputControl
+            if let stopAction {
+                stopButton(stopAction)
+            } else {
+                sendButton
+            }
+        }
+    }
+
+    @ViewBuilder private var inputLeadingControls: some View {
+        if inputLeadingAccessory != nil || secondaryAction != nil {
+            HStack(
+                alignment: .center,
+                spacing: IntatisComposerControlMetrics.rowSpacing
+            ) {
+                if let inputLeadingAccessory {
+                    inputLeadingAccessory
+                        .controlSize(.regular)
+                }
+                if let secondaryAction {
+                    compactActionButton(secondaryAction)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private var inputControl: some View {
+        TextField(placeholder, text: $input, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(inputFont)
+            .foregroundStyle(.primary)
+            .lineLimit(1...6)
+            .focused($focused)
+            .onSubmit {
+                guard stopAction == nil, canSend else { return }
+                onSend()
+            }
+            .disabled(isInputDisabled)
+            .accessibilityIdentifier("thread.composer.input")
+            .padding(.horizontal, IntatisComposerControlMetrics.inputHorizontalPadding)
+            .padding(.vertical, IntatisComposerControlMetrics.inputVerticalPadding)
+            .frame(
+                minHeight: IntatisComposerControlMetrics.controlHeight,
+                alignment: .center)
+            .intatisLiquidGlass(
+                cornerRadius: IntatisComposerControlMetrics.inputCornerRadius,
+                interactive: true)
+    }
+
+    private func compactActionButton(
+        _ action: IntatisThreadComposerSecondaryAction
+    ) -> some View {
+        Button(action: action.action) {
+            Label(action.help, systemImage: action.systemImage)
+                .intatisComposerIconLabel()
+                .opacity(action.isBusy ? 0 : 1)
+                .overlay {
+                    if action.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+        }
+        .intatisCompactIconButton()
+        .help(action.help)
+        .accessibilityLabel(action.help)
+        .disabled(action.isDisabled)
+    }
+
+    private var sendButton: some View {
+        Button(action: onSend) {
+            Label(IntatisLocalization.string("Send"), systemImage: "arrow.up")
+                .intatisComposerIconLabel()
+        }
+        .intatisCompactIconButton(prominent: true)
+        .disabled(!canSend)
+        .accessibilityLabel(IntatisLocalization.string("Send"))
+        .accessibilityIdentifier("thread.composer.send")
+    }
+
+    private func stopButton(
+        _ action: IntatisThreadComposerSecondaryAction
+    ) -> some View {
+        Button(role: .destructive, action: action.action) {
+            Label(
+                IntatisLocalization.string("Stop"),
+                systemImage: action.systemImage)
+                .intatisComposerIconLabel()
+                .opacity(action.isBusy ? 0 : 1)
+                .overlay {
+                    if action.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+        }
+        .intatisCompactIconButton(prominent: true)
+        .tint(.red)
+        .help(action.help)
+        .disabled(action.isDisabled)
+        .accessibilityLabel(IntatisLocalization.string("Stop"))
+        .accessibilityIdentifier("thread.composer.stop")
+    }
+
 }
 
 public struct IntatisThreadContentLayout {
@@ -568,19 +2418,45 @@ public struct IntatisThreadContentLayout {
     }
 }
 
+enum IntatisThreadBubbleWidthPolicy: Equatable {
+    case fullWidthLeading
+    case constrained(
+        isTrailing: Bool,
+        maxWidth: CGFloat,
+        gutter: CGFloat)
+
+    static func resolve(
+        isTrailing: Bool,
+        fillsAvailableWidth: Bool,
+        maxWidth: CGFloat,
+        gutter: CGFloat
+    ) -> Self {
+        if fillsAvailableWidth, !isTrailing {
+            return .fullWidthLeading
+        }
+        return .constrained(
+            isTrailing: isTrailing,
+            maxWidth: maxWidth,
+            gutter: gutter)
+    }
+}
+
 public struct IntatisThreadBubbleRow<Content: View>: View {
     private let isTrailing: Bool
+    private let fillsAvailableWidth: Bool
     private let rowWidth: CGFloat?
     private let maxWidth: CGFloat
     private let gutter: CGFloat
     private let content: Content
 
     public init(isTrailing: Bool,
+                fillsAvailableWidth: Bool = false,
                 rowWidth: CGFloat? = nil,
                 maxWidth: CGFloat,
                 gutter: CGFloat,
                 @ViewBuilder content: () -> Content) {
         self.isTrailing = isTrailing
+        self.fillsAvailableWidth = fillsAvailableWidth
         self.rowWidth = rowWidth
         self.maxWidth = maxWidth
         self.gutter = gutter
@@ -593,43 +2469,169 @@ public struct IntatisThreadBubbleRow<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: isTrailing ? .trailing : .leading)
     }
 
-    private var row: some View {
-        HStack(spacing: 0) {
-            if isTrailing {
-                Spacer(minLength: gutter)
-            }
-
+    @ViewBuilder private var row: some View {
+        switch IntatisThreadBubbleWidthPolicy.resolve(
+            isTrailing: isTrailing,
+            fillsAvailableWidth: fillsAvailableWidth,
+            maxWidth: maxWidth,
+            gutter: gutter
+        ) {
+        case .fullWidthLeading:
             content
-                .frame(maxWidth: maxWidth, alignment: isTrailing ? .trailing : .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
-
-            if !isTrailing {
-                Spacer(minLength: gutter)
+        case let .constrained(isTrailing, maxWidth, gutter):
+            HStack(spacing: 0) {
+                if isTrailing {
+                    Spacer(minLength: gutter)
+                }
+                content
+                    .frame(
+                        maxWidth: maxWidth,
+                        alignment: isTrailing ? .trailing : .leading)
+                    .layoutPriority(1)
+                if !isTrailing {
+                    Spacer(minLength: gutter)
+                }
             }
         }
     }
 }
 
-struct IntatisThreadHeaderAction {
+/// Shared first-token waiting state for Code and Cowork threads.
+///
+/// The caller decides when a model response is pending; this view only owns the
+/// visual treatment so both workspace modes stay consistent.
+public struct IntatisThreadThinkingRow: View {
+    private let layout: IntatisThreadContentLayout
+    private let style: IntatisThreadStyle
+    private let label: String
+    private let phaseID: String
+
+    public init(layout: IntatisThreadContentLayout,
+                style: IntatisThreadStyle,
+                label: String = IntatisLocalization.string("Thinking…"),
+                phaseID: String = "thinking") {
+        self.layout = layout
+        self.style = style
+        self.label = label
+        self.phaseID = phaseID
+    }
+
+    public var body: some View {
+        IntatisThreadBubbleRow(
+            isTrailing: false,
+            fillsAvailableWidth: true,
+            rowWidth: layout.contentWidth,
+            maxWidth: layout.messageMaxWidth,
+            gutter: layout.messageGutter) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(style.accent)
+                IntatisThinkingElapsedLabel(
+                    label: label,
+                    phaseID: phaseID)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(style.secondaryText)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 4)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A phase-local elapsed clock for the visible first-token waiting state.
+/// Removing the Thinking row destroys this state, so a later waiting phase
+/// starts again from zero without adding protocol or EventLog fields.
+public struct IntatisThinkingElapsedLabel: View {
+    private let label: String
+    private let phaseID: String
+    @State private var startedAt = Date()
+
+    public init(
+        label: String = IntatisLocalization.string("Thinking…"),
+        phaseID: String = "thinking"
+    ) {
+        self.label = label
+        self.phaseID = phaseID
+    }
+
+    public var body: some View {
+        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            let elapsed = max(
+                0,
+                Int(context.date.timeIntervalSince(startedAt)))
+            let text = IntatisLocalization.format(
+                "%llds %@",
+                Int64(elapsed),
+                label)
+            Text(text)
+                .monospacedDigit()
+                .accessibilityLabel(text)
+        }
+        .onChange(of: phaseID) { _, _ in
+            startedAt = Date()
+        }
+    }
+}
+
+enum IntatisThreadActivity {
+    /// Returns true only while the thread is waiting for the next visible model
+    /// response. Informational bookkeeping events are ignored, while streamed
+    /// text and tool calls count as visible output.
+    static func isAwaitingModelOutput(items: [CodeItem],
+                                      isWorking: Bool,
+                                      permissionBlocksResponse: Bool) -> Bool {
+        guard isWorking, !permissionBlocksResponse else { return false }
+
+        for item in items.reversed() {
+            switch item.kind {
+            case .note:
+                continue
+            case .user, .toolResult:
+                return true
+            case .agent:
+                return item.body.isEmpty && !item.complete
+            case .toolCall, .patch, .error, .agentToAgent:
+                return false
+            }
+        }
+        return true
+    }
+}
+
+public struct IntatisThreadHeaderAction {
     let title: String
     let systemImage: String
     let isDisabled: Bool
+    let isIconOnly: Bool
+    let help: String
+    let accessibilityIdentifier: String
     let action: () -> Void
 
-    init(title: String,
-         systemImage: String,
-         isDisabled: Bool = false,
-         action: @escaping () -> Void) {
+    public init(title: String,
+                systemImage: String,
+                isDisabled: Bool = false,
+                isIconOnly: Bool = false,
+                help: String? = nil,
+                accessibilityIdentifier: String? = nil,
+                action: @escaping () -> Void) {
         self.title = title
         self.systemImage = systemImage
         self.isDisabled = isDisabled
+        self.isIconOnly = isIconOnly
+        self.help = help ?? title
+        self.accessibilityIdentifier = accessibilityIdentifier
+            ?? "thread.header.action.\(systemImage)"
         self.action = action
     }
 }
 
 struct IntatisWorkspaceThreadHeader: View {
     let title: String
-    let subtitle: String
+    let subtitle: String?
     let style: IntatisThreadStyle
     let actions: [IntatisThreadHeaderAction]
 
@@ -652,26 +2654,45 @@ struct IntatisWorkspaceThreadHeader: View {
             Text(title)
                 .font(.system(size: 30, weight: .semibold, design: .serif))
                 .foregroundStyle(style.primaryText)
-            Text(subtitle)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(style.secondaryText)
-                .lineLimit(2)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(style.secondaryText)
+                    .lineLimit(2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder private var actionRow: some View {
         if !actions.isEmpty {
-            HStack(spacing: 8) {
-                ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                    Button(action: action.action) {
-                        Label(action.title, systemImage: action.systemImage)
-                            .font(.system(size: 13, weight: .semibold))
+            IntatisGlassEffectGroup(spacing: 8) {
+                HStack(spacing: 8) {
+                    ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
+                        Button(action: action.action) {
+                            actionLabel(action)
+                        }
+                        .intatisGlassButton()
+                        .disabled(action.isDisabled)
+                        .help(action.help)
+                        .accessibilityIdentifier(action.accessibilityIdentifier)
                     }
-                    .buttonStyle(.borderless)
-                    .disabled(action.isDisabled)
                 }
             }
+        }
+    }
+
+    @ViewBuilder private func actionLabel(
+        _ action: IntatisThreadHeaderAction
+    ) -> some View {
+        if action.isIconOnly {
+            Image(systemName: action.systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 16, height: 16)
+                .accessibilityLabel(action.title)
+        } else {
+            Label(action.title, systemImage: action.systemImage)
+                .font(.system(size: 13, weight: .semibold))
         }
     }
 }

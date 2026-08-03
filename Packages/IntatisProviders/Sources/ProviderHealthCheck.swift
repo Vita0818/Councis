@@ -166,7 +166,6 @@ enum ProviderHealthChecker {
         let request = ChatRequest(
             model: model,
             messages: [ChatMessage(role: .user, content: options.prompt)],
-            temperature: 0,
             includeUsage: true)
 
         do {
@@ -178,6 +177,8 @@ enum ProviderHealthChecker {
                         firstTokenMillis = elapsedMillis(since: start)
                     }
                     appendPreview(text, to: &preview, limit: options.maxPreviewCharacters)
+                case .citation:
+                    break
                 case .usage(let value):
                     usage = Usage.merging(usage, with: value)
                 case .done:
@@ -220,7 +221,6 @@ enum ProviderHealthChecker {
             model: model,
             messages: [.user(options.prompt)],
             tools: [],
-            temperature: 0,
             includeUsage: true)
 
         do {

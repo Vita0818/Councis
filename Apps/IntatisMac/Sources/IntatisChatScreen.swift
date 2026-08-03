@@ -2,9 +2,9 @@
 //  IntatisChatScreen.swift
 //  IntatisMac
 //
-//  The fully restyled Chat surface (the vertical slice): page header, message
-//  bubbles (user = warm champagne tint, assistant = neutral glass), an empty
-//  greeting, and a glass composer with a gold send button. Plus the Settings panel.
+//  The macOS Chat surface follows the native window material. Content uses
+//  semantic system Material, while the custom composer and controls adopt
+//  Liquid Glass on current systems.
 //
 
 #if canImport(SwiftUI)
@@ -12,6 +12,7 @@ import Foundation
 import SwiftUI
 #if canImport(AppKit)
 import AppKit
+import UniformTypeIdentifiers
 #endif
 import IntatisCore
 import IntatisProtocol
@@ -57,9 +58,13 @@ struct IntatisMacScreenLayout {
 
 struct IntatisChatScreen: View {
     @ObservedObject var env: AppEnvironment
+    let sessionTitle: String
 
     var body: some View {
-        IntatisChatSessionScreen(env: env, model: env.viewModel)
+        IntatisChatSessionScreen(
+            env: env,
+            model: env.viewModel,
+            sessionTitle: sessionTitle)
             .id(env.chatSessionID.rawValue)
     }
 }
@@ -67,15 +72,14 @@ struct IntatisChatScreen: View {
 private struct IntatisChatSessionScreen: View {
     @ObservedObject var env: AppEnvironment
     @ObservedObject var model: ChatViewModel
+    let sessionTitle: String
     @Environment(\.colorScheme) private var scheme
+    @State private var historyWindowUpperBound: Int?
     private static let bottomAnchorID = "intatis-chat-thread-bottom"
 
     var body: some View {
         GeometryReader { proxy in
             content(layout: IntatisMacScreenLayout(rawWidth: proxy.size.width))
-        }
-        .task(id: env.chatSessionID.rawValue) {
-            model.start()
         }
     }
 
@@ -96,7 +100,11 @@ private struct IntatisChatSessionScreen: View {
 
             IntatisComposer(model: model,
                             catalog: env.providerCatalog,
-                            onSelectModel: env.selectProviderModel(providerID:modelID:))
+                            onSelectModel: env.selectProviderModel(providerID:modelID:variantID:),
+                            onSend: {
+                                historyWindowUpperBound = nil
+                                model.send()
+                            })
                 .frame(maxWidth: layout.contentMaxWidth)
                 .padding(.horizontal, layout.horizontalPadding)
                 .padding(.top, 10)
@@ -106,18 +114,10 @@ private struct IntatisChatSessionScreen: View {
     }
 
     private func header(layout: IntatisMacScreenLayout) -> some View {
-        IntatisPageHeader(title: "Chat", subtitle: subtitle)
+        IntatisPageHeader(title: sessionTitle, subtitle: nil)
         .padding(.horizontal, layout.horizontalPadding)
         .padding(.top, 24)
         .padding(.bottom, 10)
-    }
-
-    private var subtitle: String {
-        let catalog = env.providerCatalog
-        let provider = catalog.selectedProvider
-        let model = catalog.selectedModel
-        let host = provider.flatMap { URL(string: $0.baseURL)?.host } ?? provider?.baseURL ?? AppConfig.defaultBaseURL
-        return "\(model?.title ?? AppConfig.defaultDisplayName(for: AppConfig.defaultModel)) · \(provider?.title ?? "OpenAI") · \(host)"
     }
 
     @ViewBuilder private func errorText(layout: IntatisMacScreenLayout) -> some View {
@@ -134,27 +134,50 @@ private struct IntatisChatSessionScreen: View {
         if model.messages.isEmpty {
             emptyState
         } else {
+            let historyWindow = threadHistoryWindow
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 14) {
-                        ForEach(model.messages) { msg in
+                    VStack(spacing: 14) {
+                        if historyWindow.hasEarlier || historyWindow.hasLater {
+                            IntatisThreadHistoryPager(
+                                lowerBound: historyWindow.lowerBound,
+                                upperBound: historyWindow.upperBound,
+                                totalCount: historyWindow.totalCount,
+                                hasEarlier: historyWindow.hasEarlier,
+                                hasLater: historyWindow.hasLater,
+                                accessibilityPrefix: "chat.history",
+                                onEarlier: {
+                                    historyWindowUpperBound =
+                                        historyWindow.earlierRequestedUpperBound
+                                },
+                                onNewer: {
+                                    historyWindowUpperBound =
+                                        historyWindow.newerRequestedUpperBound
+                                },
+                                onLatest: {
+                                    historyWindowUpperBound = nil
+                                })
+                        }
+                        ForEach(historyWindow.items) { msg in
                             IntatisMessageBubble(message: msg,
                                                  rowWidth: layout.contentWidth,
                                                  maxWidth: layout.messageMaxWidth,
                                                  gutter: layout.messageGutter)
                                 .id(msg.id)
                         }
-                        if model.isStreaming, model.messages.last?.role == .user {
+                        if showsVisibleThinkingIndicator {
                             thinkingRow(layout: layout)
+                                .id("intatis-chat-thinking-\(chatThinkingPhaseID)")
                         }
                         Color.clear
                             .frame(height: 1)
+                            .padding(.bottom, 16)
                             .id(Self.bottomAnchorID)
                     }
                     .frame(width: layout.contentWidth)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, layout.horizontalPadding)
-                    .padding(.vertical, 16)
+                    .padding(.top, 16)
                 }
                 .scrollContentBackground(.hidden)
                 .onAppear {
@@ -163,18 +186,50 @@ private struct IntatisChatSessionScreen: View {
                 .onChange(of: chatScrollSignature) { _ in
                     scrollToBottom(proxy)
                 }
+                .overlay(alignment: .bottomTrailing) {
+                    if historyWindow.hasLater {
+                        IntatisJumpToLatestButton(
+                            accessibilityIdentifier: "chat.jump-to-latest"
+                        ) {
+                            historyWindowUpperBound = nil
+                        }
+                    }
+                }
             }
+            .id(historyWindowUpperBound.map(String.init) ?? "latest")
         }
     }
 
     private var chatScrollSignature: String {
-        guard let last = model.messages.last else { return "0" }
+        let historyWindow = threadHistoryWindow
+        guard let last = historyWindow.items.last else { return "0" }
         return [
-            "\(model.messages.count)",
+            "\(historyWindow.lowerBound)",
+            "\(historyWindow.upperBound)",
             last.id.rawValue,
             "\(last.text.count)",
             "\(last.isComplete)",
-            "\(model.isStreaming)"
+            "\(historyWindow.isLatest && model.isStreaming)"
+        ].joined(separator: ":")
+    }
+
+    private var threadHistoryWindow:
+        IntatisThreadHistoryWindow<ChatMessageView> {
+        .resolve(
+            allItems: model.messages,
+            requestedUpperBound: historyWindowUpperBound)
+    }
+
+    private var showsVisibleThinkingIndicator: Bool {
+        threadHistoryWindow.isLatest
+            && model.isStreaming
+            && model.messages.last?.role == .user
+    }
+
+    private var chatThinkingPhaseID: String {
+        [
+            env.chatSessionID.rawValue,
+            model.messages.last?.id.rawValue ?? "initial"
         ].joined(separator: ":")
     }
 
@@ -193,15 +248,10 @@ private struct IntatisChatSessionScreen: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Spacer()
-            ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(IntatisTheme.accentGradient)
-                Image(systemName: "sparkle")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
+            Image(systemName: "sparkle")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(IntatisTheme.accent(scheme))
             .frame(width: 76, height: 76)
-            .shadow(color: IntatisTheme.gold.opacity(scheme == .light ? 0.3 : 0), radius: 16, x: 0, y: 8)
 
             Spacer()
         }
@@ -210,12 +260,13 @@ private struct IntatisChatSessionScreen: View {
 
     private func thinkingRow(layout: IntatisMacScreenLayout) -> some View {
         IntatisThreadBubbleRow(isTrailing: false,
+                               fillsAvailableWidth: true,
                                rowWidth: layout.contentWidth,
                                maxWidth: layout.messageMaxWidth,
                                gutter: layout.messageGutter) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Thinking…")
+                IntatisThinkingElapsedLabel(phaseID: chatThinkingPhaseID)
                     .font(IntatisType.caption(12))
                     .foregroundStyle(IntatisTheme.softText(scheme))
                 Spacer(minLength: 0)
@@ -229,70 +280,110 @@ struct IntatisChatModelMenu: View {
     let catalog: AppProviderCatalog
     let isBusy: Bool
     let isCompact: Bool
-    var help: String = "Switch model"
-    let onSelect: (String, String) -> Void
+    var usesGlassButton: Bool = true
+    var help: String = IntatisLocalization.string("Switch model")
+    let onSelect: (String, String, String?) -> Void
     @Environment(\.colorScheme) private var scheme
 
-    private var selectedProvider: AppProviderSettings? { catalog.selectedProvider }
     private var selectedModel: AppProviderModel? { catalog.selectedModel }
     private var menuProviders: [ProviderModelMenuProvider] {
         catalog.providers.map { provider in
             ProviderModelMenuProvider(
                 id: provider.id,
                 title: provider.title,
-                models: provider.models.map { ProviderModelMenuModel(id: $0.id, title: $0.title) })
+                models: provider.models.flatMap { model in
+                    let base = ProviderModelMenuModel(
+                        id: model.id,
+                        modelID: model.id,
+                        variantID: nil,
+                        title: model.title,
+                        detail: model.reasoningLabel)
+                    let variants = model.variants.map { variant in
+                        ProviderModelMenuModel(
+                            id: variantMenuID(modelID: model.id, variantID: variant.id),
+                            modelID: model.id,
+                            variantID: variant.id,
+                            title: model.title,
+                            detail: variantMenuDetail(variant))
+                    }
+                    return [base] + variants
+                })
         }
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if usesGlassButton {
+            selectionMenu
+                .intatisComposerSelectionMenu()
+        } else {
+            selectionMenu
+                .buttonStyle(.borderless)
+        }
+    }
+
+    private var selectionMenu: some View {
         ProviderModelSelectionMenu(
             providers: menuProviders,
             selectedProviderID: catalog.selectedProviderID,
             selectedModelID: catalog.selectedModelID,
+            selectedVariantID: catalog.selectedVariantID,
             isBusy: isBusy,
             onSelect: onSelect) {
                 label
         }
-        .buttonStyle(.plain)
-        .help(isBusy ? "Model changes apply after the current response finishes" : help)
+        .help(isBusy
+            ? IntatisLocalization.string("Model changes apply after the current response finishes")
+            : help)
     }
 
-    private var label: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "cpu")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(IntatisTheme.goldDeep)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(selectedModel?.title ?? AppConfig.defaultDisplayName(for: AppConfig.defaultModel))
-                    .font(IntatisType.body(13, .semibold))
-                    .foregroundStyle(IntatisTheme.deepText(scheme))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !isCompact {
-                    Text(selectedProvider?.title ?? "OpenAI")
-                        .font(IntatisType.caption(11, .medium))
-                        .foregroundStyle(IntatisTheme.softText(scheme))
-                        .lineLimit(1)
-                }
-            }
+    @ViewBuilder private var label: some View {
+        if usesGlassButton && isCompact {
+            labelContent
+                .intatisComposerSelectionLabel()
+        } else if usesGlassButton {
+            labelContent
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .intatisLiquidGlass(cornerRadius: 16, interactive: true)
+        } else {
+            labelContent
+                .padding(.horizontal, 2)
+                .padding(.vertical, 1)
+                .frame(
+                    maxWidth: IntatisComposerControlMetrics.selectionMaxWidth,
+                    alignment: .leading)
+        }
+    }
+
+    private var labelContent: some View {
+        HStack(spacing: 8) {
+            Text(selectedModel?.title ?? AppConfig.defaultDisplayName(for: AppConfig.defaultModel))
+                .font(IntatisType.body(13, .semibold))
+                .foregroundStyle(IntatisTheme.deepText(scheme))
+                .lineLimit(1)
+                .truncationMode(.middle)
             Image(systemName: "chevron.down")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(IntatisTheme.tertiaryText(scheme))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .frame(minWidth: isCompact ? 0 : 190,
-               maxWidth: isCompact ? .infinity : 260,
-               alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.28 : 0.66))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(IntatisTheme.glassStroke(scheme).opacity(0.75), lineWidth: 1)
-                }
+        .frame(
+            minWidth: isCompact || !usesGlassButton ? 0 : 190,
+            maxWidth: usesGlassButton
+                ? (isCompact ? nil : 260)
+                : IntatisComposerControlMetrics.selectionMaxWidth,
+            alignment: .leading)
+    }
+
+    private func variantMenuID(modelID: String, variantID: String) -> String {
+        "\(modelID.utf8.count):\(modelID)\(variantID)"
+    }
+
+    private func variantMenuDetail(_ variant: AppProviderModelVariant) -> String {
+        guard let reasoning = variant.reasoningLabel,
+              reasoning.caseInsensitiveCompare(variant.id) != .orderedSame else {
+            return variant.reasoningLabel ?? variant.id
         }
+        return "\(variant.id) · \(reasoning)"
     }
 }
 
@@ -306,7 +397,7 @@ struct IntatisArtifactProgressStrip: View {
                 HStack(spacing: 10) {
                     ProgressView(value: min(max(item.progress, 0), 1))
                         .frame(width: 120)
-                    Text(item.state)
+                    Text(localizedState(item.state))
                         .font(IntatisType.caption(12, .semibold))
                         .foregroundStyle(IntatisTheme.deepText(scheme))
                     Spacer(minLength: 8)
@@ -318,7 +409,18 @@ struct IntatisArtifactProgressStrip: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .intatisGlassCard(cornerRadius: 14)
+        .intatisCard(cornerRadius: 14)
+    }
+
+    private func localizedState(_ state: String) -> String {
+        switch state.lowercased() {
+        case "queued": return IntatisLocalization.string("queued")
+        case "running": return IntatisLocalization.string("running")
+        case "completed": return IntatisLocalization.string("completed")
+        case "failed": return IntatisLocalization.string("failed")
+        case "cancelled": return IntatisLocalization.string("cancelled")
+        default: return state
+        }
     }
 }
 
@@ -333,12 +435,17 @@ struct IntatisMessageBubble: View {
 
     private var isUser: Bool { message.role == .user }
 
-    private var roleLabel: String {
+    private var isUninterruptedAgentReply: Bool {
+        (message.role == .assistant || message.role == .agent)
+            && message.recoveryAdvice == nil
+    }
+
+    private var roleLabel: String? {
         switch message.role {
-        case .user:      return "You"
-        case .assistant: return AppIdentity.displayName
-        case .agent:     return message.agent?.rawValue ?? "Agent"
-        case .system:    return "System"
+        case .user:      return nil
+        case .assistant: return "Councis"
+        case .agent:     return message.agent?.rawValue ?? "Councis"
+        case .system:    return IntatisLocalization.string("System")
         }
     }
 
@@ -349,6 +456,7 @@ struct IntatisMessageBubble: View {
     var body: some View {
         IntatisThreadBubbleRow(
             isTrailing: isUser,
+            fillsAvailableWidth: message.role == .assistant || message.role == .agent,
             rowWidth: rowWidth,
             maxWidth: maxWidth,
             gutter: gutter) {
@@ -356,49 +464,79 @@ struct IntatisMessageBubble: View {
         }
     }
 
-    private var bubble: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Text(roleLabel.uppercased())
-                    .font(IntatisType.caption(10, .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(isUser ? IntatisTheme.goldDeep : IntatisTheme.tertiaryText(scheme))
-                ForEach(message.tags, id: \.self) { tag in
-                    goalTag(tag)
-                }
-            }
-            Text(displayText)
-                .font(IntatisType.chat(15))
-                .foregroundStyle(IntatisTheme.deepText(scheme))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+    @ViewBuilder private var bubble: some View {
+        if isUninterruptedAgentReply {
+            bubbleBody
+                .padding(.vertical, 8)
+        } else {
+            bubbleBody
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
+                .intatisContentSurface(cornerRadius: 16)
+                .overlay { userSelectionStroke }
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 11)
-        .background { bubbleBackground }
     }
 
-    @ViewBuilder private var bubbleBackground: some View {
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+    private var bubbleBody: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if IntatisMessageHeaderPolicy.showsIdentity(for: message.role)
+                || !message.tags.isEmpty {
+                HStack(spacing: 6) {
+                    if let roleLabel {
+                        Text(roleLabel)
+                            .font(IntatisType.caption(10, .semibold))
+                            .tracking(0.6)
+                            .foregroundStyle(IntatisTheme.tertiaryText(scheme))
+                    }
+                    if (message.role == .assistant || message.role == .agent),
+                       let timestamp = message.timestamp {
+                        Text(IntatisMessageTimestampPresentation.string(for: timestamp))
+                            .font(IntatisType.caption(10))
+                            .monospacedDigit()
+                            .foregroundStyle(IntatisTheme.tertiaryText(scheme))
+                    }
+                    ForEach(message.tags, id: \.self) { tag in
+                        goalTag(tag)
+                    }
+                }
+            }
+            if message.role == .assistant || message.role == .agent {
+                IntatisMessageContentView(
+                    messageID: message.id.rawValue,
+                    rawText: message.text,
+                    isComplete: message.isComplete,
+                    policy: .richText,
+                    style: .intatisMac(scheme))
+                if !message.citations.isEmpty {
+                    IntatisMessageCitationsView(
+                        citations: message.citations)
+                }
+            } else {
+                Text(displayText)
+                    .font(IntatisType.chat(15))
+                    .foregroundStyle(IntatisTheme.deepText(scheme))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder private var userSelectionStroke: some View {
         if isUser {
-            shape
-                .fill(IntatisTheme.sand.opacity(scheme == .dark ? 0.16 : 0.85))
-                .overlay { shape.stroke(IntatisTheme.gold.opacity(scheme == .dark ? 0.34 : 0.30), lineWidth: 1) }
-        } else {
-            shape
-                .fill(IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.30 : 0.70))
-                .background(.ultraThinMaterial, in: shape)
-                .overlay { shape.stroke(IntatisTheme.glassStroke(scheme).opacity(scheme == .dark ? 0.50 : 0.85), lineWidth: 1) }
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(IntatisTheme.selectedStroke(scheme), lineWidth: 1)
         }
     }
 
     private func goalTag(_ tag: String) -> some View {
         Text(tag.uppercased())
             .font(IntatisType.caption(10, .semibold))
-            .foregroundStyle(IntatisTheme.goldDeep)
+            .foregroundStyle(IntatisTheme.accent(scheme))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(IntatisTheme.goldSoft.opacity(scheme == .dark ? 0.24 : 0.45), in: Capsule())
+            .overlay {
+                Capsule().stroke(IntatisTheme.separator(scheme), lineWidth: 1)
+            }
     }
 }
 
@@ -407,7 +545,8 @@ struct IntatisMessageBubble: View {
 struct IntatisComposer: View {
     @ObservedObject var model: ChatViewModel
     let catalog: AppProviderCatalog
-    let onSelectModel: (String, String) -> Void
+    let onSelectModel: (String, String, String?) -> Void
+    let onSend: () -> Void
     @Environment(\.colorScheme) private var scheme
 
     private var canSend: Bool {
@@ -416,104 +555,49 @@ struct IntatisComposer: View {
 
     var body: some View {
         IntatisThreadComposer(
-            placeholder: "Message \(AppIdentity.displayName)...",
+            placeholder: IntatisLocalization.string("Message Councis..."),
             input: $model.input,
             canSend: canSend,
             isInputDisabled: model.isBusy,
             style: .intatisMac(scheme),
             secondaryAction: IntatisThreadComposerSecondaryAction(
                 systemImage: "photo",
-                help: "Generate image from prompt",
+                help: IntatisLocalization.string("Generate image from prompt"),
                 isBusy: model.isGeneratingArtifact,
                 isDisabled: !canSend,
                 action: { model.generateImage() }),
+            leadingAccessory: AnyView(IntatisComposerModelControl(
+                catalog: catalog,
+                isBusy: model.isBusy,
+                onSelectModel: onSelectModel)),
+            stopAction: model.isBusy
+                ? IntatisThreadComposerSecondaryAction(
+                    systemImage: "stop.fill",
+                    help: IntatisLocalization.string("Stop"),
+                    action: { model.cancelCurrentOperation() })
+                : nil,
             accessory: {
-                IntatisComposerAccessory(
-                    catalog: catalog,
-                    isBusy: model.isBusy,
-                    latestTurnStats: model.latestTurnStats,
-                    contextLabel: contextLabel,
-                    onSelectModel: onSelectModel)
+                IntatisComposerUsageStrip(
+                    stats: model.latestTurnStats,
+                    style: .intatisMac(scheme))
             },
-            onSend: { model.send() })
+            onSend: onSend)
     }
-
-    private var contextLabel: String? {
-        guard let promptTokens = model.latestTurnStats?.promptTokens else { return nil }
-        let formatted = Self.numberFormatter.string(from: NSNumber(value: promptTokens)) ?? "\(promptTokens)"
-        return "Context \(formatted) tok"
-    }
-
-    private static let numberFormatter: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter
-    }()
 }
 
-struct IntatisComposerAccessory: View {
+struct IntatisComposerModelControl: View {
     let catalog: AppProviderCatalog
     let isBusy: Bool
-    let latestTurnStats: TurnStatsSnapshot?
-    let contextLabel: String?
-    let onSelectModel: (String, String) -> Void
-    @Environment(\.colorScheme) private var scheme
+    let onSelectModel: (String, String, String?) -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                modelMenu(isCompact: false)
-                metricsRow
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                modelMenu(isCompact: true)
-                metricsRow
-            }
-        }
-    }
-
-    private func modelMenu(isCompact: Bool) -> some View {
         IntatisChatModelMenu(
             catalog: catalog,
             isBusy: isBusy,
-            isCompact: isCompact,
-            help: "Switch model",
+            isCompact: true,
+            usesGlassButton: true,
+            help: IntatisLocalization.string("Switch model"),
             onSelect: onSelectModel)
-    }
-
-    @ViewBuilder private var metricsRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 7) {
-                metricChips
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                metricChips
-            }
-        }
-    }
-
-    @ViewBuilder private var metricChips: some View {
-        if let latestTurnStats {
-            IntatisTurnStatsSummaryView(stats: latestTurnStats, style: .intatisMac(scheme))
-        }
-        if let contextLabel {
-            HStack(spacing: 6) {
-                Image(systemName: "rectangle.stack")
-                    .font(.system(size: 11, weight: .semibold))
-                Text(contextLabel)
-                    .font(IntatisType.caption(12, .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(IntatisTheme.softText(scheme))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.24 : 0.58),
-                        in: Capsule(style: .continuous))
-            .overlay {
-                Capsule(style: .continuous)
-                    .stroke(IntatisTheme.glassStroke(scheme).opacity(0.70), lineWidth: 1)
-            }
-        }
     }
 }
 
@@ -528,25 +612,42 @@ struct IntatisSettingsPanel: View {
     @State private var settingsError: String?
     @State private var isTestingProvider = false
     @State private var providerHealthReports: [ProviderHealthReport] = []
+    @State private var showThirdPartyNotices = false
+    @State private var isAdvancedSettingsExpanded = false
+    @State private var isProviderConnectionExpanded = false
+    @State private var isModelManagementExpanded = false
+    @State private var isExportingDiagnostics = false
+    @State private var diagnosticExportMessage: String?
+    @State private var diagnosticExportSucceeded = false
+    @AppStorage(IntatisMessageRendererMode.defaultsKey)
+    private var rendererModeRawValue = IntatisMessageRendererMode.microsoft.rawValue
 
     var body: some View {
         GeometryReader { proxy in
             settingsContent(layout: IntatisMacScreenLayout(rawWidth: proxy.size.width))
         }
+        .sheet(isPresented: $showThirdPartyNotices) {
+            NavigationStack {
+                IntatisThirdPartyNoticesView()
+                    .navigationTitle("Open-source notices")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showThirdPartyNotices = false }
+                        }
+                    }
+            }
+            .frame(minWidth: 680, minHeight: 560)
+        }
     }
 
     private func settingsContent(layout: IntatisMacScreenLayout) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                IntatisPageHeader(title: "Settings", subtitle: "Providers · models · API keys")
+            VStack(alignment: .leading, spacing: 18) {
+                IntatisPageHeader(
+                    title: IntatisLocalization.string("Settings"),
+                    subtitle: nil)
 
                 settingsCard(layout: layout)
-
-                Text(settingsStorageNote)
-                    .font(IntatisType.caption(12, .regular))
-                    .foregroundStyle(IntatisTheme.softText(scheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
 
                 if let settingsError {
                     Text(settingsError)
@@ -561,6 +662,10 @@ struct IntatisSettingsPanel: View {
 
                 settingsActions(layout: layout)
 
+                advancedSettingsCard(layout: layout)
+
+                diagnosticExportRow(layout: layout)
+
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, layout.horizontalPadding)
@@ -572,6 +677,167 @@ struct IntatisSettingsPanel: View {
         .scrollContentBackground(.hidden)
     }
 
+    private var messageRenderingSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
+                Text("Message rendering")
+                    .font(IntatisType.body(14, .semibold))
+                Spacer(minLength: 12)
+                Picker("Message rendering", selection: rendererModeSelection) {
+                    Text("Rich Markdown").tag(IntatisMessageRendererMode.microsoft.rawValue)
+                    Text("Plain text safe mode").tag(IntatisMessageRendererMode.plainSafe.rawValue)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 300)
+                .help(rendererModeHelpText)
+                .accessibilityIdentifier("settings.message-renderer-mode")
+            }
+
+            if rendererLaunchOverride != nil {
+                Text(rendererModeHelpText)
+                    .font(IntatisType.caption(12, .regular))
+                    .foregroundStyle(IntatisTheme.softText(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button {
+                showThirdPartyNotices = true
+            } label: {
+                Label("Open-source notices", systemImage: "doc.text")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(IntatisTheme.accent(scheme))
+            .accessibilityIdentifier("settings.open-source-notices")
+        }
+    }
+
+    private func advancedSettingsCard(layout: IntatisMacScreenLayout) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider().opacity(0.45)
+
+            DisclosureGroup(isExpanded: $isAdvancedSettingsExpanded) {
+                VStack(alignment: .leading, spacing: 18) {
+                    IntatisMCPSettingsView()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Divider().opacity(0.45)
+
+                    messageRenderingSettings
+
+                    Divider().opacity(0.45)
+
+                    HStack(spacing: 16) {
+                        Text("Configuration")
+                            .font(IntatisType.body(14, .semibold))
+                        Spacer(minLength: 12)
+                        openJSONButton
+                    }
+                }
+                .padding(.top, 16)
+            } label: {
+                Label("Advanced settings", systemImage: "slider.horizontal.3")
+                    .font(IntatisType.body(14, .semibold))
+                    .foregroundStyle(IntatisTheme.deepText(scheme))
+            }
+            .accessibilityIdentifier("settings.advanced")
+        }
+        .padding(.top, 2)
+        .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
+    }
+
+    private func diagnosticExportRow(layout: IntatisMacScreenLayout) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().opacity(0.45)
+
+            Group {
+                if layout.isCompact {
+                    VStack(alignment: .leading, spacing: 12) {
+                        diagnosticExportTitle
+                        diagnosticExportButton
+                    }
+                } else {
+                    HStack(spacing: 18) {
+                        diagnosticExportTitle
+                        Spacer(minLength: 12)
+                        diagnosticExportButton
+                    }
+                }
+            }
+
+            if let diagnosticExportMessage {
+                Label(
+                    diagnosticExportMessage,
+                    systemImage: diagnosticExportSucceeded
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill")
+                    .font(IntatisType.caption(12, .semibold))
+                    .foregroundStyle(diagnosticExportSucceeded ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 2)
+        .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
+    }
+
+    private var diagnosticExportTitle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label("Diagnostics", systemImage: "waveform.path.ecg")
+                .font(IntatisType.body(14, .semibold))
+            Text("Local ZIP. Nothing is uploaded.")
+                .font(IntatisType.caption(12, .regular))
+                .foregroundStyle(IntatisTheme.softText(scheme))
+        }
+    }
+
+    private var diagnosticExportButton: some View {
+        Button(action: exportDiagnostics) {
+            Label(
+                isExportingDiagnostics
+                    ? IntatisLocalization.string("Generating Diagnostic Logs…")
+                    : IntatisLocalization.string("Export Diagnostic Logs…"),
+                systemImage: isExportingDiagnostics
+                    ? "hourglass"
+                    : "square.and.arrow.down")
+                .font(IntatisType.body(14, .semibold))
+                .foregroundStyle(.primary)
+        }
+        .intatisGlassButton()
+        .disabled(isExportingDiagnostics)
+        .help("Choose where to save a local diagnostic ZIP")
+        .accessibilityIdentifier("settings.export-diagnostic-logs")
+    }
+
+    private var rendererLaunchOverride: IntatisMessageRendererMode? {
+        IntatisMessageRendererMode.launchOverride()
+    }
+
+    /// The Phase 0 renderer stored `rich`. Render routing already migrates that
+    /// value to Microsoft; normalize the Picker view as well so an upgraded
+    /// user never sees an empty segmented selection.
+    private var rendererModeSelection: Binding<String> {
+        Binding(
+            get: {
+                IntatisMessageRendererMode.resolve(
+                    persistedRawValue: rendererModeRawValue,
+                    arguments: []).rawValue
+            },
+            set: { rendererModeRawValue = $0 })
+    }
+
+    private var rendererModeHelpText: String {
+        if let rendererLaunchOverride {
+            let label = rendererLaunchOverride == .plainSafe
+                ? IntatisLocalization.string("Plain text safe mode")
+                : IntatisLocalization.string("Rich Markdown")
+            return IntatisLocalization.format(
+                "Current launch is forced to %@. This picker is saved immediately for the next launch without an override, so a rescued session can remain in safe mode.",
+                label)
+        }
+        return IntatisLocalization.string(
+            "This choice is saved and applied immediately; it is independent of provider Save. Rich Markdown uses the audited upstream renderer with LaTeX math typesetting enabled; remote images and syntax highlighting remain disabled for the first release. Plain text safe mode bypasses Markdown entirely. Raw session data is unchanged.")
+    }
+
     @ViewBuilder private func settingsCard(layout: IntatisMacScreenLayout) -> some View {
         if layout.settingsUsesColumns {
             HStack(alignment: .top, spacing: 18) {
@@ -581,7 +847,7 @@ struct IntatisSettingsPanel: View {
                 providerDetail(layout: layout)
             }
             .padding(22)
-            .intatisGlassCard(cornerRadius: 24)
+            .intatisCard(cornerRadius: 24)
             .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 18) {
@@ -591,7 +857,7 @@ struct IntatisSettingsPanel: View {
                 providerDetail(layout: layout)
             }
             .padding(18)
-            .intatisGlassCard(cornerRadius: 20)
+            .intatisCard(cornerRadius: 20)
             .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
         }
     }
@@ -603,7 +869,6 @@ struct IntatisSettingsPanel: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
                     Spacer(minLength: 0)
-                    openJSONButton
                     testProviderButton(layout: layout)
                     saveButton
                 }
@@ -613,7 +878,6 @@ struct IntatisSettingsPanel: View {
             HStack {
                 savedLabel
                 Spacer()
-                openJSONButton
                 testProviderButton(layout: layout)
                 saveButton
             }
@@ -625,34 +889,30 @@ struct IntatisSettingsPanel: View {
         if saved {
             Label("Saved", systemImage: "checkmark.circle.fill")
                 .font(IntatisType.caption(12, .semibold))
-                .foregroundStyle(IntatisTheme.goldDeep)
+                .foregroundStyle(.green)
         }
     }
 
     private var openJSONButton: some View {
         Button(action: openJSONConfig) {
-            Label("Open JSON", systemImage: "curlybraces")
+            Label("Open Councis Config", systemImage: "curlybraces")
                 .font(IntatisType.body(14, .semibold))
-                .foregroundStyle(IntatisTheme.deepText(scheme))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(inputBackground)
+                .foregroundStyle(.primary)
         }
-        .buttonStyle(.plain)
-        .help("Open provider JSON config")
+        .intatisGlassButton()
+        .help(settingsStorageNote)
     }
 
     private func testProviderButton(layout: IntatisMacScreenLayout) -> some View {
         Button(action: testProvider) {
-            Label(isTestingProvider ? "Testing" : (layout.isCompact ? "Test" : "Test Provider"),
+            Label(isTestingProvider
+                    ? IntatisLocalization.string("Testing")
+                    : IntatisLocalization.string(layout.isCompact ? "Test" : "Test Provider"),
                   systemImage: isTestingProvider ? "hourglass" : "checkmark.seal")
                 .font(IntatisType.body(14, .semibold))
-                .foregroundStyle(IntatisTheme.deepText(scheme))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(inputBackground)
+                .foregroundStyle(.primary)
         }
-        .buttonStyle(.plain)
+        .intatisGlassButton()
         .disabled(isTestingProvider)
         .help("Save current settings and run a small model health check")
     }
@@ -661,12 +921,9 @@ struct IntatisSettingsPanel: View {
         Button(action: save) {
             Text("Save")
                 .font(IntatisType.body(14, .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 9)
-                .background(IntatisTheme.accentGradient, in: Capsule())
+                .foregroundStyle(.primary)
         }
-        .buttonStyle(.plain)
+        .intatisGlassButton(prominent: true)
     }
 
     @ViewBuilder private var providerHealthSummary: some View {
@@ -678,14 +935,15 @@ struct IntatisSettingsPanel: View {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(providerHealthReports.enumerated()), id: \.offset) { _, report in
                     VStack(alignment: .leading, spacing: 4) {
-                        Label(report.displayTitle, systemImage: report.isOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        Label(IntatisLocalization.string(report.displayTitle),
+                              systemImage: report.isOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                             .font(IntatisType.caption(12, .semibold))
-                            .foregroundStyle(report.isOK ? IntatisTheme.goldDeep : .red)
-                        Text(report.displaySummary)
+                            .foregroundStyle(report.isOK ? .green : .red)
+                        Text(IntatisLocalization.providerHealthSummary(report))
                             .font(IntatisType.caption(11, .medium))
                             .foregroundStyle(IntatisTheme.softText(scheme))
                             .lineLimit(2)
-                        Text(report.displayDetail)
+                        Text(IntatisLocalization.providerHealthDetail(report))
                             .font(IntatisType.caption(11, .regular))
                             .foregroundStyle(IntatisTheme.softText(scheme))
                             .fixedSize(horizontal: false, vertical: true)
@@ -724,20 +982,11 @@ struct IntatisSettingsPanel: View {
                 field("Provider name",
                       text: providerFieldBinding(providerIndex, \.displayName),
                       placeholder: "OpenAI")
-                field("Base URL",
-                      text: baseURLBinding(providerIndex),
-                      placeholder: AppConfig.defaultBaseURL)
-                field("Chat endpoint",
-                      text: chatEndpointBinding(providerIndex),
-                      placeholder: AppConfig.defaultChatEndpoint)
                 secureField("API key",
                             text: apiKeyBinding(for: catalog.providers[providerIndex].id),
                             placeholder: apiKeyPlaceholder(for: catalog.providers[providerIndex]))
-                Text("Key source: \(apiKeySourceLabel(for: catalog.providers[providerIndex]))")
-                    .font(IntatisType.caption(11, .medium))
-                    .foregroundStyle(IntatisTheme.softText(scheme))
-                    .fixedSize(horizontal: false, vertical: true)
                 activeModelPicker(providerIndex: providerIndex, layout: layout)
+                providerConnectionSettings(providerIndex: providerIndex)
                 modelList(providerIndex: providerIndex, layout: layout)
             } else {
                 Text("Add a provider to configure models.")
@@ -746,6 +995,30 @@ struct IntatisSettingsPanel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func providerConnectionSettings(providerIndex: Int) -> some View {
+        DisclosureGroup(isExpanded: $isProviderConnectionExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                field("Base URL",
+                      text: baseURLBinding(providerIndex),
+                      placeholder: AppConfig.defaultBaseURL)
+                field("Chat endpoint",
+                      text: chatEndpointBinding(providerIndex),
+                      placeholder: AppConfig.defaultChatEndpoint)
+                Text(IntatisLocalization.format(
+                    "Key source: %@",
+                    apiKeySourceLabel(for: catalog.providers[providerIndex])))
+                    .font(IntatisType.caption(11, .medium))
+                    .foregroundStyle(IntatisTheme.softText(scheme))
+            }
+            .padding(.top, 10)
+        } label: {
+            Text("Connection")
+                .font(IntatisType.body(13, .semibold))
+                .foregroundStyle(IntatisTheme.deepText(scheme))
+        }
+        .accessibilityIdentifier("settings.provider.connection")
     }
 
     private func providerRow(_ provider: AppProviderSettings) -> some View {
@@ -757,7 +1030,7 @@ struct IntatisSettingsPanel: View {
                 HStack(spacing: 7) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(selected ? IntatisTheme.goldDeep : IntatisTheme.tertiaryText(scheme))
+                        .foregroundStyle(selected ? IntatisTheme.accent(scheme) : IntatisTheme.tertiaryText(scheme))
                     Text(provider.title)
                         .font(IntatisType.body(13, .semibold))
                         .foregroundStyle(IntatisTheme.deepText(scheme))
@@ -771,15 +1044,9 @@ struct IntatisSettingsPanel: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
-            .background {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(selected
-                          ? IntatisTheme.goldSoft.opacity(scheme == .dark ? 0.22 : 0.32)
-                          : IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.20 : 0.45))
-            }
             .overlay {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(selected ? IntatisTheme.gold.opacity(0.55) : IntatisTheme.glassStroke(scheme).opacity(0.5),
+                    .stroke(selected ? IntatisTheme.selectedStroke(scheme) : IntatisTheme.separator(scheme),
                             lineWidth: 1)
             }
         }
@@ -793,7 +1060,7 @@ struct IntatisSettingsPanel: View {
                 .foregroundStyle(IntatisTheme.softText(scheme))
             Picker("", selection: $catalog.selectedModelID) {
                 ForEach(catalog.providers[providerIndex].models) { model in
-                    Text(model.title).tag(model.id)
+                    IntatisModelTitleLabel(model: model).tag(model.id)
                 }
             }
             .labelsHidden()
@@ -803,36 +1070,46 @@ struct IntatisSettingsPanel: View {
     }
 
     private func modelList(providerIndex: Int, layout: IntatisMacScreenLayout) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        DisclosureGroup(isExpanded: $isModelManagementExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Spacer()
+                    Button(action: { addModel(providerIndex: providerIndex) }) {
+                        Label("Add model", systemImage: "plus")
+                            .font(IntatisType.caption(12, .semibold))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                ForEach(Array(catalog.providers[providerIndex].models.indices), id: \.self) { modelIndex in
+                    modelEditorRow(providerIndex: providerIndex,
+                                   modelIndex: modelIndex,
+                                   layout: layout)
+                }
+
+                HStack {
+                    Spacer()
+                    Button(action: { removeProvider(providerIndex) }) {
+                        Label("Delete provider", systemImage: "trash")
+                            .font(IntatisType.caption(12, .semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(catalog.providers.count == 1)
+                }
+            }
+            .padding(.top, 10)
+        } label: {
             HStack {
                 Text("Models")
-                    .font(IntatisType.caption(12, .semibold))
+                    .font(IntatisType.body(13, .semibold))
+                    .foregroundStyle(IntatisTheme.deepText(scheme))
+                Spacer()
+                Text("\(catalog.providers[providerIndex].models.count)")
+                    .font(IntatisType.caption(12, .medium))
                     .foregroundStyle(IntatisTheme.softText(scheme))
-                Spacer()
-                Button(action: { addModel(providerIndex: providerIndex) }) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .help("Add model")
-            }
-
-            ForEach(Array(catalog.providers[providerIndex].models.indices), id: \.self) { modelIndex in
-                modelEditorRow(providerIndex: providerIndex,
-                               modelIndex: modelIndex,
-                               layout: layout)
-            }
-
-            HStack {
-                Spacer()
-                Button(action: { removeProvider(providerIndex) }) {
-                    Label("Delete provider", systemImage: "trash")
-                        .font(IntatisType.caption(12, .semibold))
-                }
-                .buttonStyle(.borderless)
-                .disabled(catalog.providers.count == 1)
             }
         }
+        .accessibilityIdentifier("settings.provider.models")
     }
 
     @ViewBuilder private func modelEditorRow(providerIndex: Int,
@@ -894,7 +1171,9 @@ struct IntatisSettingsPanel: View {
             withAnimation { saved = true }
         } catch {
             saved = false
-            settingsError = "Could not save settings: \(error.localizedDescription)"
+            settingsError = IntatisLocalization.format(
+                "Could not save settings: %@",
+                error.localizedDescription)
         }
     }
 
@@ -907,14 +1186,19 @@ struct IntatisSettingsPanel: View {
             saved = false
             #if canImport(AppKit)
             if !NSWorkspace.shared.open(url) {
-                settingsError = "Could not open JSON config at \(url.path)"
+                settingsError = IntatisLocalization.format(
+                    "Could not open JSON config at %@",
+                    url.path)
             }
             #else
-            settingsError = "Opening JSON config is not available on this platform."
+            settingsError = IntatisLocalization.string(
+                "Opening JSON config is not available on this platform.")
             #endif
         } catch {
             saved = false
-            settingsError = "Could not open JSON config: \(error.localizedDescription)"
+            settingsError = IntatisLocalization.format(
+                "Could not open JSON config: %@",
+                error.localizedDescription)
         }
     }
 
@@ -933,9 +1217,58 @@ struct IntatisSettingsPanel: View {
                 providerHealthReports = await env.healthCheckSelectedProvider()
             } catch {
                 saved = false
-                settingsError = "Could not test provider: \(error.localizedDescription)"
+                settingsError = IntatisLocalization.format(
+                    "Could not test provider: %@",
+                    error.localizedDescription)
             }
         }
+    }
+
+    private func exportDiagnostics() {
+        guard !isExportingDiagnostics else { return }
+        #if canImport(AppKit)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue =
+            IntatisDiagnosticExportService.suggestedArchiveName()
+        panel.canCreateDirectories = true
+        panel.title = IntatisLocalization.string("Export Diagnostic Logs")
+        panel.message = IntatisLocalization.string(
+            "Choose where to save a local diagnostic ZIP")
+        IntatisMacProcessDiagnostics.shared.setKnownModalPresented(true)
+        defer {
+            IntatisMacProcessDiagnostics.shared.setKnownModalPresented(false)
+        }
+        guard panel.runModal() == .OK,
+              let destinationURL = panel.url else { return }
+
+        isExportingDiagnostics = true
+        diagnosticExportMessage = nil
+        diagnosticExportSucceeded = false
+        Task { @MainActor in
+            defer { isExportingDiagnostics = false }
+            do {
+                let result = try await IntatisDiagnosticExportService.export(
+                    to: destinationURL)
+                diagnosticExportSucceeded = true
+                if result.collectionErrorCount == 0 {
+                    diagnosticExportMessage = IntatisLocalization.format(
+                        "Diagnostic logs were exported as %@.",
+                        result.archiveFileName)
+                } else {
+                    diagnosticExportMessage = IntatisLocalization.format(
+                        "Diagnostic logs were exported as %@ with %lld collection warnings recorded in manifest.json.",
+                        result.archiveFileName,
+                        Int64(result.collectionErrorCount))
+                }
+            } catch {
+                diagnosticExportSucceeded = false
+                diagnosticExportMessage = IntatisLocalization.format(
+                    "Could not export diagnostic logs: %@",
+                    error.localizedDescription)
+            }
+        }
+        #endif
     }
 
     private var selectedProviderIndex: Int? {
@@ -944,6 +1277,8 @@ struct IntatisSettingsPanel: View {
 
     private func selectProvider(_ provider: AppProviderSettings) {
         catalog.selectedProviderID = provider.id
+        isProviderConnectionExpanded = false
+        isModelManagementExpanded = false
         if !provider.models.contains(where: { $0.id == catalog.selectedModelID }) {
             catalog.selectedModelID = provider.models.first?.id ?? AppConfig.defaultModel
         }
@@ -991,8 +1326,12 @@ struct IntatisSettingsPanel: View {
     }
 
     private func providerSubtitle(_ provider: AppProviderSettings) -> String {
-        let host = URL(string: provider.baseURL)?.host ?? provider.baseURL
-        return "\(provider.models.count) models · \(host) · \(apiKeySourceLabel(for: provider))"
+        if provider.models.count == 1 {
+            return IntatisLocalization.string("1 model")
+        }
+        return IntatisLocalization.format(
+            "%lld models",
+            Int64(provider.models.count))
     }
 
     private func providerFieldBinding(_ providerIndex: Int,
@@ -1054,71 +1393,90 @@ struct IntatisSettingsPanel: View {
     private func apiKeyPlaceholder(for provider: AppProviderSettings) -> String {
         let ref = AppConfig.apiKeyRef(for: provider)
         if ref.source != .authFile {
-            return "Using \(apiKeySourceLabel(for: provider)); enter key to replace"
+            return IntatisLocalization.format(
+                "Using %@; enter key to replace",
+                apiKeySourceLabel(for: provider))
         }
-        return env.hasAPIKey(for: provider) ? "••••••••••••••••" : "Enter API key"
+        return env.hasAPIKey(for: provider)
+            ? "••••••••••••••••"
+            : IntatisLocalization.string("Enter API key")
     }
 
     private func apiKeySourceLabel(for provider: AppProviderSettings) -> String {
         let ref = AppConfig.apiKeyRef(for: provider)
         switch ref.source {
         case .authFile:
-            return "auth file"
+            return IntatisLocalization.string("auth file")
         case .environment:
-            return ref.account.isEmpty ? "environment" : "env \(ref.account)"
+            return ref.account.isEmpty
+                ? IntatisLocalization.string("environment")
+                : IntatisLocalization.format("env %@", ref.account)
         case .file:
-            return "secret file"
+            return IntatisLocalization.string("secret file")
         case .providerConfig:
-            return "provider config"
+            return IntatisLocalization.string("provider config")
         case .keychain:
-            return "legacy keychain"
+            return IntatisLocalization.string("legacy keychain")
         }
     }
 
     private var settingsStorageNote: String {
         if let path = AppConfig.externalConfigDescription {
-            return "Config: \(path)"
+            return IntatisLocalization.format("Config: %@", path)
         }
-        return "Config: \(AppConfig.editableConfigDescription)"
+        return IntatisLocalization.format(
+            "Config: %@",
+            AppConfig.editableConfigDescription)
     }
 
     @ViewBuilder private func field(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
+            Text(IntatisLocalization.string(label))
                 .font(IntatisType.caption(12, .semibold))
                 .foregroundStyle(IntatisTheme.softText(scheme))
-            TextField(placeholder, text: text)
+            TextField(IntatisLocalization.string(placeholder), text: text)
                 .textFieldStyle(.plain)
                 .font(IntatisType.mono(13))
                 .foregroundStyle(IntatisTheme.deepText(scheme))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .background(inputBackground)
+                .overlay(inputBackground)
         }
     }
 
     @ViewBuilder private func secureField(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
+            Text(IntatisLocalization.string(label))
                 .font(IntatisType.caption(12, .semibold))
                 .foregroundStyle(IntatisTheme.softText(scheme))
-            SecureField(placeholder, text: text)
+            SecureField(IntatisLocalization.string(placeholder), text: text)
                 .textFieldStyle(.plain)
                 .font(IntatisType.mono(13))
                 .foregroundStyle(IntatisTheme.deepText(scheme))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .background(inputBackground)
+                .overlay(inputBackground)
         }
     }
 
     private var inputBackground: some View {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(IntatisTheme.glassSurface(scheme).opacity(scheme == .dark ? 0.30 : 0.70))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(IntatisTheme.glassStroke(scheme).opacity(0.8), lineWidth: 1)
+            .stroke(IntatisTheme.separator(scheme), lineWidth: 1)
+    }
+}
+
+struct IntatisModelTitleLabel: View {
+    let model: AppProviderModel
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(model.title)
+                .foregroundStyle(.primary)
+            if let reasoningLabel = model.reasoningLabel {
+                Text(reasoningLabel)
+                    .foregroundStyle(.secondary)
             }
+        }
     }
 }
 #endif

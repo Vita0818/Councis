@@ -76,21 +76,23 @@ public struct AgentAttachRequestedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var path: String
     public var model: ModelID
-    public var providerID: String?
     public var profile: String
+    /// Exact inference identity proposed for this admission. Nil identifies a
+    /// legacy request that predates per-agent inference bindings.
+    public var agentInferenceBinding: AgentInferenceBinding?
     public var metadata: CoworkEventMetadata?
 
     public init(agent: AgentID,
                 path: String,
-                providerID: String? = nil,
                 model: ModelID,
                 profile: String,
+                agentInferenceBinding: AgentInferenceBinding? = nil,
                 metadata: CoworkEventMetadata? = nil) {
         self.agent = agent
         self.path = path
         self.model = model
-        self.providerID = providerID
         self.profile = profile
+        self.agentInferenceBinding = agentInferenceBinding
         self.metadata = metadata
     }
 }
@@ -99,17 +101,28 @@ public struct AgentAttachedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var path: String
     public var model: ModelID
-    public var providerID: String?
     public var profile: String
+    /// Durable inference identity of the admitted agent. Nil is preserved as a
+    /// legacy/unresolved fact rather than being replaced by a current default.
+    public var agentInferenceBinding: AgentInferenceBinding?
+    /// Present only when this roster snapshot durably settles a host rebind.
+    /// Keeping both identities in the same additive event makes replay and
+    /// audit explicit without exposing any profile definition or secret.
+    public var previousAgentInferenceBinding: AgentInferenceBinding?
+    public var inferenceBindingChangeReason: String?
     public var metadata: CoworkEventMetadata?
-    public init(agent: AgentID, path: String,
-                providerID: String? = nil, model: ModelID, profile: String,
+    public init(agent: AgentID, path: String, model: ModelID, profile: String,
+                agentInferenceBinding: AgentInferenceBinding? = nil,
+                previousAgentInferenceBinding: AgentInferenceBinding? = nil,
+                inferenceBindingChangeReason: String? = nil,
                 metadata: CoworkEventMetadata? = nil) {
         self.agent = agent
         self.path = path
         self.model = model
-        self.providerID = providerID
         self.profile = profile
+        self.agentInferenceBinding = agentInferenceBinding
+        self.previousAgentInferenceBinding = previousAgentInferenceBinding
+        self.inferenceBindingChangeReason = inferenceBindingChangeReason
         self.metadata = metadata
     }
 }
@@ -130,20 +143,20 @@ public struct AgentSpawnRequestedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var path: String
     public var model: ModelID?
-    public var providerID: String?
+    public var agentInferenceBinding: AgentInferenceBinding?
     public var metadata: CoworkEventMetadata?
 
     public init(requestedBy: AgentID? = nil,
                 agent: AgentID,
                 path: String,
-                providerID: String? = nil,
                 model: ModelID? = nil,
+                agentInferenceBinding: AgentInferenceBinding? = nil,
                 metadata: CoworkEventMetadata? = nil) {
         self.requestedBy = requestedBy
         self.agent = agent
         self.path = path
         self.model = model
-        self.providerID = providerID
+        self.agentInferenceBinding = agentInferenceBinding
         self.metadata = metadata
     }
 }
@@ -153,81 +166,21 @@ public struct AgentSpawnedPayload: Codable, Equatable, Sendable {
     public var agent: AgentID
     public var path: String
     public var model: ModelID
-    public var providerID: String?
+    public var agentInferenceBinding: AgentInferenceBinding?
     public var metadata: CoworkEventMetadata?
 
     public init(requestedBy: AgentID? = nil,
                 agent: AgentID,
                 path: String,
-                providerID: String? = nil,
                 model: ModelID,
+                agentInferenceBinding: AgentInferenceBinding? = nil,
                 metadata: CoworkEventMetadata? = nil) {
         self.requestedBy = requestedBy
         self.agent = agent
         self.path = path
         self.model = model
-        self.providerID = providerID
+        self.agentInferenceBinding = agentInferenceBinding
         self.metadata = metadata
-    }
-}
-
-/// Additive audit record that resolves or explicitly rebinds an agent's full
-/// provider/model identity. Older lifecycle events retain their model-only
-/// shape and may be completed by this event during migration.
-public struct AgentModelBoundPayload: Codable, Equatable, Sendable {
-    public var agent: AgentID
-    public var providerID: String
-    public var model: ModelID
-    public var reason: String?
-    public var metadata: CoworkEventMetadata?
-
-    public init(agent: AgentID,
-                providerID: String,
-                model: ModelID,
-                reason: String? = nil,
-                metadata: CoworkEventMetadata? = nil) {
-        let binding = AgentModelBinding(providerID: providerID, modelID: model)
-        self.agent = agent
-        self.providerID = binding.providerID
-        self.model = binding.modelID
-        self.reason = reason
-        self.metadata = metadata
-    }
-
-    public init(agent: AgentID,
-                binding: AgentModelBinding,
-                reason: String? = nil,
-                metadata: CoworkEventMetadata? = nil) {
-        self.init(
-            agent: agent,
-            providerID: binding.providerID,
-            model: binding.modelID,
-            reason: reason,
-            metadata: metadata)
-    }
-
-    public var binding: AgentModelBinding {
-        AgentModelBinding(providerID: providerID, modelID: model)
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case agent
-        case providerID
-        case model
-        case reason
-        case metadata
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let binding = try AgentModelBinding(
-            validatingProviderID: container.decode(String.self, forKey: .providerID),
-            modelID: container.decode(ModelID.self, forKey: .model))
-        self.agent = try container.decode(AgentID.self, forKey: .agent)
-        self.providerID = binding.providerID
-        self.model = binding.modelID
-        self.reason = try container.decodeIfPresent(String.self, forKey: .reason)
-        self.metadata = try container.decodeIfPresent(CoworkEventMetadata.self, forKey: .metadata)
     }
 }
 
@@ -353,6 +306,36 @@ public struct AgentMessageConsumedPayload: Codable, Equatable, Sendable {
         self.messageID = messageID
         self.agent = agent
         self.taskID = taskID
+        self.metadata = metadata
+    }
+}
+
+/// Durable cancellation settlement for a mailbox item that must never be
+/// presented after its owning Goal/run has stopped. This is distinct from
+/// `agent_message_consumed`, which is reserved for messages actually projected
+/// into a successfully completed agent invocation.
+public struct AgentMessageDiscardedPayload: Codable, Equatable, Sendable {
+    public var messageID: MessageID
+    public var agent: AgentID
+    public var reason: String
+    public var taskID: TaskID?
+    public var goalID: GoalID?
+    public var continuationRunID: ContinuationRunID?
+    public var metadata: CoworkEventMetadata?
+
+    public init(messageID: MessageID,
+                agent: AgentID,
+                reason: String,
+                taskID: TaskID? = nil,
+                goalID: GoalID? = nil,
+                continuationRunID: ContinuationRunID? = nil,
+                metadata: CoworkEventMetadata? = nil) {
+        self.messageID = messageID
+        self.agent = agent
+        self.reason = reason
+        self.taskID = taskID
+        self.goalID = goalID
+        self.continuationRunID = continuationRunID
         self.metadata = metadata
     }
 }

@@ -101,65 +101,6 @@ final class CoworkProjectionTests: XCTestCase {
         XCTAssertEqual(projection.mailboxes[worker]?.pendingMessages, [MessageID(rawValue: "msg_status")])
     }
 
-    func testProjectionTracksLifecycleBindingThenExplicitBoundOverridesAndDetachClears() {
-        let lifecycleEvents: [Envelope] = [
-            env(0, .agentAttached(AgentAttachedPayload(
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-a",
-                model: ModelID(rawValue: "initial-model"),
-                profile: "reviewed"))),
-            env(1, .agentSpawned(AgentSpawnedPayload(
-                requestedBy: main,
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-b",
-                model: ModelID(rawValue: "spawn-model")))),
-        ]
-
-        let lifecycle = CoworkProjection.build(from: lifecycleEvents)
-        XCTAssertEqual(lifecycle.agentRoster[worker]?.providerID, "provider-b")
-        XCTAssertEqual(lifecycle.agentModelBindings[worker], AgentModelBinding(
-            providerID: "provider-b",
-            modelID: ModelID(rawValue: "spawn-model")))
-
-        let reboundEvents = lifecycleEvents + [
-            env(2, .agentModelBound(AgentModelBoundPayload(
-                agent: worker,
-                providerID: "provider-c",
-                model: ModelID(rawValue: "bound-model"),
-                reason: "legacy provider migration"))),
-        ]
-        let rebound = CoworkProjection.build(from: reboundEvents)
-        XCTAssertEqual(rebound.agentModelBindings[worker], AgentModelBinding(
-            providerID: "provider-c",
-            modelID: ModelID(rawValue: "bound-model")))
-
-        let detached = CoworkProjection.build(from: reboundEvents + [
-            env(3, .agentDetached(AgentDetachedPayload(agent: worker))),
-        ])
-        XCTAssertNil(detached.agentRoster[worker])
-        XCTAssertNil(detached.agentModelBindings[worker])
-    }
-
-    func testLegacyModelOnlyLifecycleDoesNotInventProviderBinding() {
-        let projection = CoworkProjection.build(from: [
-            env(0, .agentAttached(AgentAttachedPayload(
-                agent: worker,
-                path: "/tmp/worker",
-                model: ModelID(rawValue: "legacy-model"),
-                profile: "reviewed"))),
-            env(1, .agentSpawned(AgentSpawnedPayload(
-                requestedBy: main,
-                agent: worker,
-                path: "/tmp/worker",
-                model: ModelID(rawValue: "legacy-model")))),
-        ])
-
-        XCTAssertNil(projection.agentRoster[worker]?.providerID)
-        XCTAssertNil(projection.agentModelBindings[worker])
-    }
-
     func testProjectionRestoresAgentStatusAndReplayIsStable() {
         let contract = taskContract()
         let workspaceLease = WorkspaceLease(

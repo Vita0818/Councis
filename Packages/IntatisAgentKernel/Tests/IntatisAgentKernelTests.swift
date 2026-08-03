@@ -38,6 +38,17 @@ private struct PartialThenFailingToolProvider: ToolCallingProvider {
     }
 }
 
+private struct SecretEchoFailingProvider: ToolCallingProvider {
+    let secret: String
+
+    func stream(_ request: AgentRequest) -> AsyncThrowingStream<AgentChunk, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: IntatisError.provider(
+                "upstream echoed Authorization: Bearer \(secret)"))
+        }
+    }
+}
+
 private struct NoShell: ShellRunner {
     func run(_ command: String, cwd: URL) async throws -> ShellResult { ShellResult(stdout: "", stderr: "", exitCode: 0) }
 }
@@ -106,6 +117,45 @@ private struct NoGit: GitService {
 }
 
 final class IntatisAgentKernelTests: XCTestCase {
+
+    func testRuntimeModesKeepDistinctDefaultIterationBudgets() {
+        let code = AgentRuntime.code(allowsShell: false)
+        let cowork = AgentRuntime.cowork(
+            registry: .standard(),
+            engine: PermissionEngine(),
+            allowsShell: false)
+
+        XCTAssertEqual(code.maxIterations, 50)
+        XCTAssertEqual(
+            code.maxIterations,
+            AgentRuntime.defaultCodeMaxIterations)
+        XCTAssertEqual(cowork.maxIterations, 64)
+        XCTAssertEqual(
+            cowork.maxIterations,
+            AgentRuntime.defaultCoworkMaxIterations)
+        XCTAssertEqual(code.modelContextPolicy, .unspecified)
+        XCTAssertEqual(cowork.modelContextPolicy, .unspecified)
+
+        let exactPolicy = AgentModelContextPolicy(
+            contextWindowTokens: 200_000,
+            autoCompactTokenLimit: 120_000,
+            compHash: "exact-profile")
+        let stableMainRuntime = AgentRuntime.cowork(
+            registry: .standard(),
+            engine: PermissionEngine(),
+            allowsShell: false,
+            modelContextPolicy: exactPolicy)
+        XCTAssertEqual(
+            stableMainRuntime.modelContextPolicy,
+            exactPolicy)
+
+        let codeRuntimeWithExactMetadata = AgentRuntime.code(
+            allowsShell: false,
+            modelContextPolicy: exactPolicy)
+        XCTAssertEqual(
+            codeRuntimeWithExactMetadata.modelContextPolicy,
+            exactPolicy)
+    }
 
     private func workspaceAndLog() throws -> (URL, EventLog) {
         let ws = FileManager.default.temporaryDirectory
@@ -194,6 +244,37 @@ final class IntatisAgentKernelTests: XCTestCase {
         XCTAssertEqual(errorItem?.recoveryAdvice?.title, "Check endpoint compatibility")
     }
 
+    func testProviderErrorSecretIsRedactedBeforeDurableEventLogWrite() async throws {
+        let (ws, log) = try workspaceAndLog()
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let secret = "opaque-provider-secret-must-not-persist"
+        let loop = makeLoop(
+            ws: ws,
+            log: log,
+            provider: SecretEchoFailingProvider(secret: secret),
+            responder: FixedResponder(.allow))
+
+        do {
+            _ = try await loop.send("trigger a provider failure")
+            XCTFail("expected provider failure")
+        } catch {
+            // Callers may classify the original error in memory; the durable
+            // projection must contain only the sanitized form.
+        }
+
+        let payloads = await log.replay().compactMap { envelope -> ErrorPayload? in
+            guard case .error(let payload) = envelope.event else { return nil }
+            return payload
+        }
+        let durable = try XCTUnwrap(payloads.last)
+        XCTAssertFalse(durable.message.contains(secret))
+        XCTAssertTrue(durable.message.contains("REDACTED"))
+        let rawLog = try String(
+            contentsOf: ws.appendingPathComponent(".log/events.jsonl"),
+            encoding: .utf8)
+        XCTAssertFalse(rawLog.contains(secret))
+    }
+
     func testDeniedWriteDoesNotExecute() async throws {
         let (ws, log) = try workspaceAndLog()
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -215,6 +296,16 @@ final class IntatisAgentKernelTests: XCTestCase {
             return nil
         }.first
         XCTAssertTrue(result?.observation.contains("permission denied") == true)
+        XCTAssertEqual(result?.toolCallId, "c1")
+        XCTAssertEqual(result?.outcome, .denied)
+        XCTAssertEqual(result?.failureSource, .userDenied)
+        XCTAssertNotNil(result?.turnID)
+        XCTAssertNotNil(result?.permissionRequestID)
+        let turnOutcomes = events.compactMap { envelope -> TurnOutcomePayload? in
+            if case .turnOutcome(let payload) = envelope.event { return payload }
+            return nil
+        }
+        XCTAssertEqual(turnOutcomes.map(\.outcome), [.completed])
     }
 
     func testReadOnlyToolNeedsNoApproval() async throws {
@@ -723,10 +814,11 @@ final class IntatisAgentKernelTests: XCTestCase {
         let (ws, log) = try workspaceAndLog()
         defer { try? FileManager.default.removeItem(at: ws) }
 
+        let rawArguments = #"{"path":"out.txt","content":"hello","overwrite":true}"#
         let provider = ScriptedProvider([
             [.toolCalls([ToolCall(id: "unknown_field",
                                   name: "write_file",
-                                  arguments: #"{"path":"out.txt","content":"hello","overwrite":true}"#)]),
+                                  arguments: rawArguments)]),
              .done(finishReason: "tool_calls")],
             [.textDelta("I should only use known fields."), .done(finishReason: "stop")],
         ])
@@ -739,9 +831,63 @@ final class IntatisAgentKernelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: ws.appendingPathComponent("out.txt").path))
         XCTAssertFalse(types.contains(.permissionRequest))
         XCTAssertFalse(types.contains(.patchProposed))
+        let durableCall = try XCTUnwrap(events.compactMap { envelope -> ToolCallPayload? in
+            guard case .toolCall(let payload) = envelope.event else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(durableCall.args, #"{"_intatis":"arguments_redacted"}"#)
+        XCTAssertEqual(durableCall.argsRedacted, true)
+        XCTAssertNil(durableCall.argsDigest)
+        XCTAssertEqual(durableCall.argsCharacterCount, rawArguments.count)
+        let encodedEvents = String(decoding: try JSONEncoder().encode(events), as: UTF8.self)
+        XCTAssertFalse(encodedEvents.contains(rawArguments))
+        XCTAssertFalse(encodedEvents.contains(ToolRegistry.authorizationDigest(rawArguments)))
         let result = await toolResults(in: log).first
         XCTAssertEqual(result?.observation,
                        "invalid tool input: arguments for write_file contain unknown field(s): overwrite. Allowed fields: content, path.")
+    }
+
+    func testUnknownToolNameAndArgumentsAreRedactedBeforeEventLog() async throws {
+        let (ws, log) = try workspaceAndLog()
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let secret = "sk-unknown-tool-secret-123456789"
+        let rawName = "https://private-tool.example.test/run?token=\(secret)"
+        let rawArguments = #"{"api_key":"sk-unknown-tool-secret-123456789"}"#
+        let provider = ScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "unknown-sensitive",
+                name: rawName,
+                arguments: rawArguments)]),
+             .done(finishReason: "tool_calls")],
+            [.textDelta("Unknown tool rejected."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            ws: ws,
+            log: log,
+            provider: provider,
+            responder: FixedResponder(.allow))
+
+        try await loop.send("Reject the unknown tool.")
+
+        let events = await log.replay()
+        let call = try XCTUnwrap(events.compactMap { envelope -> ToolCallPayload? in
+            guard case .toolCall(let payload) = envelope.event else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(call.name, "[REDACTED_URL]")
+        XCTAssertEqual(call.args, #"{"_intatis":"arguments_redacted"}"#)
+        XCTAssertNil(call.argsDigest)
+        let result = try XCTUnwrap(events.compactMap { envelope -> ToolResultPayload? in
+            guard case .toolResult(let payload) = envelope.event else { return nil }
+            return payload
+        }.first)
+        XCTAssertTrue(result.observation.contains("unknown tool: [REDACTED_URL]"))
+        let encoded = String(decoding: try JSONEncoder().encode(events), as: UTF8.self)
+        XCTAssertFalse(encoded.contains(rawName))
+        XCTAssertFalse(encoded.contains(secret))
+        XCTAssertFalse(encoded.contains(rawArguments))
+        XCTAssertFalse(encoded.contains(ToolRegistry.authorizationDigest(rawArguments)))
     }
 
     func testEmptyArgumentsAreNormalizedForNoArgumentTools() async throws {
@@ -787,7 +933,7 @@ final class IntatisAgentKernelTests: XCTestCase {
         })
         let result = await toolResults(in: log).first
         XCTAssertEqual(result?.observation,
-                       "permission denied: permission denied: write to workspace")
+                       "permission denied: modify workspace resource")
     }
 
     func testNoArgumentToolsRejectUnknownArguments() async throws {

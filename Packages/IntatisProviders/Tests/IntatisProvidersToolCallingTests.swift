@@ -487,6 +487,90 @@ final class IntatisProvidersToolCallingTests: XCTestCase {
         XCTAssertEqual(http.attemptCount, 2)
     }
 
+    func testToolCallingStreamingRetriesRetryableErrorOnlySSEBeforeAcceptedPayload() async throws {
+        let errorSSE = #"""
+        data: {"error":{"message":"Network connection lost","code":502}}
+
+        """#
+        let recoveredSSE = #"""
+        data: {"choices":[{"delta":{"content":"Recovered"}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+        """#
+        let http = SequencedToolHTTP(attempts: [
+            ToolStreamAttempt(chunks: [Data(errorSSE.utf8)], error: nil),
+            ToolStreamAttempt(chunks: [Data(recoveredSSE.utf8)], error: nil),
+        ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: http,
+            runtimePolicy: ProviderRuntimePolicy(maxAttempts: 2,
+                                                 requestTimeoutSeconds: 1,
+                                                 initialRetryDelaySeconds: 0,
+                                                 maxRetryDelaySeconds: 0))
+
+        var text = ""
+        var doneCount = 0
+        for try await chunk in provider.stream(AgentRequest(model: ModelID(rawValue: "m"),
+                                                            messages: [.user("hi")],
+                                                            tools: [])) {
+            switch chunk {
+            case .textDelta(let delta):
+                text += delta
+            case .done:
+                doneCount += 1
+            case .toolCalls, .usage:
+                break
+            }
+        }
+
+        XCTAssertEqual(text, "Recovered")
+        XCTAssertEqual(doneCount, 1)
+        XCTAssertEqual(http.attemptCount, 2)
+    }
+
+    func testToolCallingStreamingDoesNotRetryErrorAfterAcceptedPayload() async throws {
+        let partialThenErrorSSE = #"""
+        data: {"choices":[{"delta":{"content":"Partial"}}]}
+
+        data: {"error":{"message":"Network connection lost","code":502}}
+
+        """#
+        let http = SequencedToolHTTP(attempts: [
+            ToolStreamAttempt(chunks: [Data(partialThenErrorSSE.utf8)], error: nil),
+            ToolStreamAttempt(
+                chunks: [Data("data: [DONE]\n\n".utf8)],
+                error: nil),
+        ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: http,
+            runtimePolicy: ProviderRuntimePolicy(maxAttempts: 2,
+                                                 requestTimeoutSeconds: 1,
+                                                 initialRetryDelaySeconds: 0,
+                                                 maxRetryDelaySeconds: 0))
+
+        var text = ""
+        do {
+            for try await chunk in provider.stream(AgentRequest(model: ModelID(rawValue: "m"),
+                                                                messages: [.user("hi")],
+                                                                tools: [])) {
+                if case .textDelta(let delta) = chunk {
+                    text += delta
+                }
+            }
+            XCTFail("A provider error after accepted output must fail without replaying the request.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Network connection lost"))
+        }
+
+        XCTAssertEqual(text, "Partial")
+        XCTAssertEqual(http.attemptCount, 1)
+    }
+
     func testToolCallingStreamingThrowsProviderErrorPayload() async throws {
         let sse = #"""
         data: {"error":{"message":"tool schema rejected","type":"invalid_request_error","code":"bad_tool_schema"}}
@@ -502,6 +586,30 @@ final class IntatisProvidersToolCallingTests: XCTestCase {
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("tool schema rejected"))
             XCTAssertTrue(error.localizedDescription.contains("bad_tool_schema"))
+        }
+    }
+
+    func testToolCallingStreamingPreservesStructuredHardUsageLimitError() async {
+        let sse = #"""
+        data: {"error":{"message":"usage_limit_reached","type":"billing_error"}}
+
+        """#
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: FakeHTTP2(chunks: fragment(sse, size: 9)))
+
+        do {
+            for try await _ in provider.stream(AgentRequest(
+                model: ModelID(rawValue: "m"),
+                messages: [.user("hi")],
+                tools: [])) {}
+            XCTFail("expected hard provider usage limit")
+        } catch let error as ProviderUsageLimitError {
+            XCTAssertEqual(error.signal, "usage_limit_reached")
+            XCTAssertNil(error.statusCode)
+        } catch {
+            XCTFail("expected ProviderUsageLimitError, got \(type(of: error)): \(error)")
         }
     }
 
@@ -538,6 +646,270 @@ final class IntatisProvidersToolCallingTests: XCTestCase {
         let body2 = try JSONSerialization.jsonObject(with: XCTUnwrap(without.httpBody)) as! [String: Any]
         XCTAssertNil(body2["reasoning_effort"])
         XCTAssertNil(body2["max_tokens"])
+    }
+
+    func testOpenRouterAdapterUsesNestedRuntimeReasoning()
+        throws {
+        let configuredEndpoint = ProviderEndpoint(
+            id: "openrouter",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openRouter,
+            modelRequestOptions: [
+                "m": [
+                    "reasoning": .object([
+                        "effort": .string("low"),
+                        "summary": .string("auto"),
+                    ]),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: configuredEndpoint,
+            apiKey: "k",
+            http: FakeHTTP2(chunks: []))
+
+        let request = try provider.buildAgentRequest(
+            AgentRequest(
+                model: ModelID(rawValue: "m"),
+                messages: [.user("hi")],
+                tools: [],
+                reasoningEffort: .high))
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(request.httpBody))
+        guard case .object(let body) = value else {
+            return XCTFail(
+                "request body is not an object")
+        }
+        XCTAssertNil(body["reasoning_effort"])
+        XCTAssertEqual(
+            body["reasoning"],
+            .object([
+                "effort": .string("high"),
+                "summary": .string("auto"),
+            ]))
+    }
+
+    func testConfiguredModelOptionsPassThroughAgentBodyAndExplicitRuntimeValuesWin() throws {
+        let configuredEndpoint = ProviderEndpoint(
+            id: "generic",
+            baseURL: URL(string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestOptions: [
+                "vendor/model": [
+                    "provider": .object(["allow_fallbacks": .bool(false)]),
+                    "parallel_tool_calls": .bool(false),
+                    "max_tokens": .number(999),
+                    "reasoning_effort": .string("low"),
+                    "reasoningEffort": .string("xhigh"),
+                    "reasoning": .object([
+                        "effort": .string("medium"),
+                        "summary": .string("auto"),
+                    ]),
+                    "model": .string("must-not-win"),
+                    "messages": .array([]),
+                    "tools": .array([]),
+                    "stream": .bool(false),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: configuredEndpoint,
+            apiKey: "k",
+            http: FakeHTTP2(chunks: []))
+        let encoded = try provider.buildAgentRequest(AgentRequest(
+            model: ModelID(rawValue: "vendor/model"),
+            messages: [.user("hi")],
+            tools: [ToolSpec(name: "inspect", description: "Inspect", parameters: .object([:]))],
+            reasoningEffort: .high,
+            maxOutputTokens: 321))
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: XCTUnwrap(encoded.httpBody))
+        guard case .object(let body) = decoded else { return XCTFail("request body is not an object") }
+
+        XCTAssertEqual(body["provider"], JSONValue.object(["allow_fallbacks": .bool(false)]))
+        XCTAssertEqual(body["parallel_tool_calls"], JSONValue.bool(false))
+        XCTAssertEqual(body["max_tokens"], JSONValue.number(321))
+        XCTAssertEqual(body["reasoning_effort"], JSONValue.string("high"))
+        XCTAssertNil(body["reasoningEffort"])
+        XCTAssertEqual(
+            body["reasoning"],
+            .object([
+                "effort": .string("medium"),
+                "summary": .string("auto"),
+            ]))
+        XCTAssertEqual(body["model"], JSONValue.string("vendor/model"))
+        XCTAssertEqual(body["stream"], JSONValue.bool(true))
+        guard let messageValue = body["messages"],
+              case .array(let messages) = messageValue else {
+            return XCTFail("runtime messages were not encoded")
+        }
+        guard let toolValue = body["tools"],
+              case .array(let tools) = toolValue else {
+            return XCTFail("runtime tools were not encoded")
+        }
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(tools.count, 1)
+
+        let explicitParallel = try provider.buildAgentRequest(AgentRequest(
+            model: ModelID(rawValue: "vendor/model"),
+            messages: [.user("hi")],
+            tools: [],
+            parallelToolCalls: true))
+        let explicitParallelValue = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(explicitParallel.httpBody))
+        guard case .object(let explicitParallelBody) =
+                explicitParallelValue else {
+            return XCTFail("request body is not an object")
+        }
+        XCTAssertEqual(
+            explicitParallelBody["parallel_tool_calls"],
+            .bool(false))
+        XCTAssertNil(explicitParallelBody["n"])
+    }
+
+    func testOpenAICompatibleStrictRoutingBodyDoesNotSynthesizeUnsupportedControls()
+        throws {
+        let configuredEndpoint = ProviderEndpoint(
+            id: "openrouter-compatible",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestOptions: [
+                "deepseek/deepseek-v4-pro": [
+                    "reasoningEffort":
+                        .string("xhigh"),
+                    "provider": .object([
+                        "only": .array([
+                            .string("deepseek"),
+                        ]),
+                        "allow_fallbacks": .bool(false),
+                        "require_parameters":
+                            .bool(true),
+                    ]),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: configuredEndpoint,
+            apiKey: "k",
+            http: FakeHTTP2(chunks: []))
+
+        let encoded = try provider.buildAgentRequest(
+            AgentRequest(
+                model: ModelID(
+                    rawValue:
+                        "deepseek/deepseek-v4-pro"),
+                messages: [.user("hi")],
+                tools: [
+                    ToolSpec(
+                        name: "activate_skill",
+                        description:
+                            "Activate a skill",
+                        parameters: .object([:]),
+                        supportsParallelCalls: true),
+                ],
+                parallelToolCalls: true))
+        let decoded = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(encoded.httpBody))
+        guard case .object(let body) = decoded else {
+            return XCTFail(
+                "request body is not an object")
+        }
+
+        XCTAssertEqual(
+            Set(body.keys),
+            Set([
+                "model",
+                "messages",
+                "stream",
+                "tools",
+                "reasoning_effort",
+                "provider",
+            ]))
+        XCTAssertNil(body["n"])
+        XCTAssertNil(body["parallel_tool_calls"])
+        XCTAssertEqual(
+            body["reasoning_effort"],
+            .string("xhigh"))
+        XCTAssertEqual(
+            body["provider"],
+            .object([
+                "only": .array([
+                    .string("deepseek"),
+                ]),
+                "allow_fallbacks": .bool(false),
+                "require_parameters":
+                    .bool(true),
+            ]))
+    }
+
+    func testOpenRouterAdapterAlsoOmitsSyntheticCandidateAndParallelControls()
+        throws {
+        let configuredEndpoint = ProviderEndpoint(
+            id: "openrouter",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openRouter)
+        let provider = OpenAIWireProvider(
+            endpoint: configuredEndpoint,
+            apiKey: "k",
+            http: FakeHTTP2(chunks: []))
+
+        let encoded = try provider.buildAgentRequest(
+            AgentRequest(
+                model: ModelID(
+                    rawValue: "deepseek/model"),
+                messages: [.user("hi")],
+                tools: [
+                    ToolSpec(
+                        name: "inspect",
+                        description: "Inspect",
+                        parameters: .object([:]),
+                        supportsParallelCalls: true),
+                ],
+                parallelToolCalls: true))
+        let decoded = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(encoded.httpBody))
+        guard case .object(let body) = decoded else {
+            return XCTFail(
+                "request body is not an object")
+        }
+
+        XCTAssertNil(body["n"])
+        XCTAssertNil(body["parallel_tool_calls"])
+    }
+
+    func testProviderRequestBodyEncodingSortsNestedObjectKeys() throws {
+        let encoded = try OpenAIWireProvider.encodeRequestBody([
+            "zeta": .bool(true),
+            "alpha": .object([
+                "zeta": .bool(false),
+                "alpha": .string("value"),
+            ]),
+        ])
+
+        XCTAssertEqual(
+            String(decoding: encoded, as: UTF8.self),
+            #"{"alpha":{"alpha":"value","zeta":false},"zeta":true}"#)
     }
 
     func testAgentMessageWithImageEncodesAsContentArray() {

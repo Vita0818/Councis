@@ -11,6 +11,7 @@ public enum ToolCapability: String, Codable, Sendable, Hashable {
     case proposePatch = "propose_patch"
     case applyPatch = "apply_patch"
     case readPDF = "read_pdf"
+    case readDocument = "read_document"
     case editPDF = "edit_pdf"
     case reconstructDocument = "reconstruct_document"
     case compileLaTeX = "compile_latex"
@@ -22,6 +23,13 @@ public enum ToolCapability: String, Codable, Sendable, Hashable {
     case requestDelegation = "request_delegation"
     case delegateTask = "delegate_task"
     case attachWorkspace = "attach_workspace"
+    case readWorkTasks = "read_work_tasks"
+    case updateOwnedWorkTask = "update_owned_work_task"
+    case manageWorkTasks = "manage_work_tasks"
+    case readGoal = "read_goal"
+    case createGoal = "create_goal"
+    case submitGoalVerdict = "submit_goal_verdict"
+    case renameSession = "rename_session"
 }
 
 public struct DelegationBudget: Codable, Sendable, Hashable {
@@ -55,79 +63,112 @@ public struct CapabilityLease: Codable, Sendable, Hashable {
     public var communication: CommunicationGrant
     public var delegation: DelegationGrant
     public var expiresAtTaskCompletion: Bool
+    /// Exact external-MCP authority. Legacy leases and all standard
+    /// worker/coordinator factories intentionally start with no grants.
+    public var mcpGrants: [MCPGrant]
 
     public init(id: CapabilityLeaseID = CapabilityLeaseID.new(),
                 taskID: TaskID? = nil,
                 tools: Set<ToolCapability>,
                 communication: CommunicationGrant = .none,
                 delegation: DelegationGrant = .none,
-                expiresAtTaskCompletion: Bool = true) {
+                expiresAtTaskCompletion: Bool = true,
+                mcpGrants: [MCPGrant] = []) {
         self.id = id
         self.taskID = taskID
         self.tools = tools
         self.communication = communication
         self.delegation = delegation
         self.expiresAtTaskCompletion = expiresAtTaskCompletion
+        self.mcpGrants = mcpGrants
     }
 
-    public static func worker(taskID: TaskID? = nil) -> CapabilityLease {
-        CapabilityLease(
-            taskID: taskID,
-            tools: [
-                .readWorkspace,
-                .listWorkspace,
-                .searchWorkspace,
-                .readPDF,
-                .replyMessage,
-                .requestDelegation,
-            ],
-            communication: .replyOnly,
-            delegation: .requestOnly)
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case taskID
+        case tools
+        case communication
+        case delegation
+        case expiresAtTaskCompletion
+        case mcpGrants
     }
 
-    public static func coordinator(taskID: TaskID? = nil,
-                                   budget: DelegationBudget = DelegationBudget(maxTasks: 8, maxDepth: 1)) -> CapabilityLease {
-        CapabilityLease(
-            taskID: taskID,
-            tools: [
-                .readWorkspace,
-                .listWorkspace,
-                .searchWorkspace,
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(CapabilityLeaseID.self, forKey: .id)
+        taskID = try container.decodeIfPresent(TaskID.self, forKey: .taskID)
+        tools = try container.decode(Set<ToolCapability>.self, forKey: .tools)
+        communication = try container.decode(CommunicationGrant.self, forKey: .communication)
+        delegation = try container.decode(DelegationGrant.self, forKey: .delegation)
+        expiresAtTaskCompletion =
+            try container.decodeIfPresent(Bool.self, forKey: .expiresAtTaskCompletion) ?? true
+        mcpGrants = try container.decodeIfPresent([MCPGrant].self, forKey: .mcpGrants) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(taskID, forKey: .taskID)
+        try container.encode(tools, forKey: .tools)
+        try container.encode(communication, forKey: .communication)
+        try container.encode(delegation, forKey: .delegation)
+        try container.encode(expiresAtTaskCompletion, forKey: .expiresAtTaskCompletion)
+        try container.encode(mcpGrants, forKey: .mcpGrants)
+    }
+
+    public static func worker(taskID: TaskID? = nil,
+                              workspaceAccess: WorkspaceAccess = .readOnly) -> CapabilityLease {
+        var tools: Set<ToolCapability> = [
+            .readWorkspace,
+            .listWorkspace,
+            .searchWorkspace,
+            .readPDF,
+            .replyMessage,
+            .requestDelegation,
+            .readWorkTasks,
+            .updateOwnedWorkTask,
+            .readGoal,
+        ]
+        if workspaceAccess == .readWrite {
+            tools.formUnion([
+                .runShell,
                 .gitControl,
                 .gitRemote,
-                .proposePatch,
                 .applyPatch,
-                .readPDF,
+                .readDocument,
                 .editPDF,
                 .reconstructDocument,
                 .compileLaTeX,
                 .generateMedia,
                 .browseWeb,
-                .sendMessage,
-                .requestInformation,
-                .replyMessage,
-                .requestDelegation,
-                .delegateTask,
-                .attachWorkspace,
-            ],
-            communication: .anyAgentInThread,
-            delegation: .granted(budget),
-            expiresAtTaskCompletion: taskID != nil)
+            ])
+        }
+        return CapabilityLease(
+            taskID: taskID,
+            tools: tools,
+            communication: .replyOnly,
+            delegation: .requestOnly)
     }
 
-    /// Read-only evidence inspection for an independent task reviewer. It has no
-    /// write, network, communication, delegation, or agent-lifecycle authority.
-    public static func taskReviewer(taskID: TaskID? = nil) -> CapabilityLease {
-        CapabilityLease(
+    public static func coordinator(taskID: TaskID? = nil,
+                                   budget: DelegationBudget = DelegationBudget(maxTasks: 8, maxDepth: 1),
+                                   workspaceAccess: WorkspaceAccess = .readWrite) -> CapabilityLease {
+        var tools = worker(taskID: taskID, workspaceAccess: workspaceAccess).tools
+        tools.formUnion([
+            .sendMessage,
+            .requestInformation,
+            .replyMessage,
+            .requestDelegation,
+            .delegateTask,
+            .attachWorkspace,
+            .manageWorkTasks,
+            .createGoal,
+        ])
+        return CapabilityLease(
             taskID: taskID,
-            tools: [
-                .readWorkspace,
-                .listWorkspace,
-                .searchWorkspace,
-                .readPDF,
-            ],
-            communication: .none,
-            delegation: .none,
+            tools: tools,
+            communication: .anyAgentInThread,
+            delegation: .granted(budget),
             expiresAtTaskCompletion: taskID != nil)
     }
 }
@@ -186,6 +227,56 @@ public struct WorkspaceRootIdentity: Codable, Sendable, Hashable {
 }
 
 public struct WorkspaceLease: Codable, Sendable, Hashable {
+    /// Sensitive path floor for a model-facing general-purpose terminal. A
+    /// caller may add narrower denied patterns to a lease, but the terminal
+    /// execution boundary must always union this complete list back in so an
+    /// old or explicitly empty lease cannot remove the credential boundary.
+    public static let mandatoryTerminalDeniedPatterns: [String] = [
+        "**/.env*",
+        ".netrc",
+        ".pgpass",
+        ".npmrc",
+        ".pypirc",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials",
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".gpg",
+        "keychains",
+        "**/secrets/**",
+        "**/*secret*",
+        "**/*token*",
+        "**/*key*",
+        "**/*credential*",
+        "**/*keychain*",
+        "**/*certificate*",
+        "**/*cert*",
+        "**/*.pem",
+        "**/*.key",
+        "**/*.p12",
+        "**/*.pfx",
+        "**/*.keystore",
+        "**/*.jks",
+        "**/*.asc",
+        "**/.config/gh/**",
+        "**/.config/opencode/**",
+        "**/.config/intatis/**",
+        "**/.local/share/opencode/**",
+        "**/.local/share/intatis/**",
+        "**/.git/config",
+        "**/.git/config.worktree",
+        "Library/Keychains",
+    ]
+
+    /// New leases persist the same floor for clear previews and replay. The
+    /// executor still unions `mandatoryTerminalDeniedPatterns` independently,
+    /// because durable data is not itself an enforcement boundary.
+    public static let defaultDeniedPatterns = mandatoryTerminalDeniedPatterns
+
     public var id: WorkspaceLeaseID
     public var workspaceID: WorkspaceID
     public var taskID: TaskID?
@@ -203,14 +294,7 @@ public struct WorkspaceLease: Codable, Sendable, Hashable {
                 rootIdentity: WorkspaceRootIdentity? = nil,
                 access: WorkspaceAccess,
                 allowedPathRules: [PathRule] = [PathRule(pattern: ".")],
-                deniedPatterns: [String] = [
-                    ".env",
-                    ".ssh",
-                    "Library/Keychains",
-                    "**/secret*",
-                    "**/*token*",
-                    "**/*key*",
-                ],
+                deniedPatterns: [String] = WorkspaceLease.defaultDeniedPatterns,
                 expiresAtTaskCompletion: Bool = false) {
         self.id = id
         self.workspaceID = workspaceID

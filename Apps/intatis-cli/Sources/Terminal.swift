@@ -44,35 +44,6 @@ final class RenderOptions: @unchecked Sendable {
     }
 }
 
-/// One-shot commands keep the live renderer, but need a deterministic fence
-/// before process exit. A sequence is acknowledged only after its stdout side
-/// effects have completed, so waiting on the persisted terminal sequence cannot
-/// truncate the answer or require timing sleeps.
-actor EventRenderProgress {
-    private var highestRenderedSequence = -1
-    private var waiters: [(sequence: Int, continuation: CheckedContinuation<Void, Never>)] = []
-
-    func markRendered(_ sequence: Int) {
-        highestRenderedSequence = max(highestRenderedSequence, sequence)
-        var remaining: [(sequence: Int, continuation: CheckedContinuation<Void, Never>)] = []
-        for waiter in waiters {
-            if highestRenderedSequence >= waiter.sequence {
-                waiter.continuation.resume()
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        waiters = remaining
-    }
-
-    func wait(until sequence: Int) async {
-        guard highestRenderedSequence < sequence else { return }
-        await withCheckedContinuation { continuation in
-            waiters.append((sequence, continuation))
-        }
-    }
-}
-
 // Minimal ANSI helpers.
 private let dim = "\u{001B}[2m", cyan = "\u{001B}[36m", yellow = "\u{001B}[33m"
 private let magenta = "\u{001B}[35m", red = "\u{001B}[31m", reset = "\u{001B}[0m"
@@ -81,33 +52,10 @@ private let magenta = "\u{001B}[35m", red = "\u{001B}[31m", reset = "\u{001B}[0m
 /// (never reads stdin), so it runs concurrently with the input loop and the
 /// permission prompt with no contention.
 func renderLoop(_ log: EventLog, showAgentLabels: Bool = false, spinner: TurnSpinner? = nil,
-                options: RenderOptions = RenderOptions(),
-                progress: EventRenderProgress? = nil,
-                mandatoryTaskReview: Bool = false) async {
+                options: RenderOptions = RenderOptions()) async {
     let stream = await log.stream(from: 0)
     var currentMessage = ""
-    var reviewGate = MandatoryReviewPresentationGate()
     for await env in stream {
-        let presentation: MandatoryReviewPresentationDecision
-        if mandatoryTaskReview {
-            presentation = reviewGate.apply(env)
-        } else {
-            presentation = .show
-        }
-        if case .hide = presentation {
-            await progress?.markRendered(env.seq)
-            continue
-        }
-        if case .deliver(let payload) = presentation {
-            spinner?.stop()
-            if showAgentLabels {
-                out("\n\(cyan)● \(payload.agent.rawValue)\(reset)\n")
-            }
-            out(payload.result)
-            if !payload.result.hasSuffix("\n") { out("\n") }
-            await progress?.markRendered(env.seq)
-            continue
-        }
         // Keep the "Thinking…" line alive through the pre-output events
         // (user_message, agent_status); stop it only when real output arrives.
         switch env.event {
@@ -127,14 +75,15 @@ func renderLoop(_ log: EventLog, showAgentLabels: Bool = false, spinner: TurnSpi
             let args = options.verbose ? truncate(p.args, 800) : oneLine(p.args, 72)
             out("\n  \(cyan)· \(p.name)\(reset) \(dim)\(args)\(reset)\n")
         case .toolResult(let p):
-            let color = isFailureObservation(p.observation) ? red : dim
+            let color = p.outcome.map { $0 == .succeeded ? dim : red }
+                ?? (isFailureObservation(p.observation) ? red : dim)
             if options.verbose {
                 out("  \(color)⎿\(reset) \(truncate(p.observation, 4000))\n")
             } else {
                 out("  \(color)⎿ \(summary(p.observation))\(reset)\n")
             }
         case .permissionResolved(let p):
-            out("  \(yellow)[\(p.decision.rawValue): \(p.tool) — \(p.reason)]\(reset)\n")
+            out("  \(yellow)[\(permissionResolutionLabel(p)): \(p.tool) — \(p.reason)]\(reset)\n")
         case .permissionReview(let p):
             out("  \(yellow)[review \(p.decision.rawValue): \(p.tool) by \(p.reviewerModel) — \(p.reason)]\(reset)\n")
         case .patchProposed(let p):
@@ -160,14 +109,19 @@ func renderLoop(_ log: EventLog, showAgentLabels: Bool = false, spinner: TurnSpi
         default:
             break
         }
-        await progress?.markRendered(env.seq)
     }
 }
 
 /// Terminal approval for `ask_user` decisions (Code mode).
 struct TerminalResponder: PermissionResponder {
     func requestApproval(_ request: PermissionRequestPayload) async -> PermissionDecision {
-        await TerminalPermissionPromptQueue.shared.requestApproval(request)
+        await requestResolution(request).decision
+    }
+
+    func requestResolution(
+        _ request: PermissionRequestPayload
+    ) async -> PermissionApprovalResolution {
+        await TerminalPermissionPromptQueue.shared.requestResolution(request)
     }
 }
 
@@ -177,10 +131,62 @@ struct TerminalResponder: PermissionResponder {
 private actor TerminalPermissionPromptQueue {
     static let shared = TerminalPermissionPromptQueue()
 
-    func requestApproval(_ request: PermissionRequestPayload) -> PermissionDecision {
-        out("\n  \(yellow)⚠ [\(request.requestId.rawValue)] \(request.tool) (\(request.risk.rawValue)) — \(request.reason)\(reset)\n  approve this request? [y/N] ")
-        guard let line = readLine() else { return .deny }
-        let answer = line.trimmingCharacters(in: .whitespaces).lowercased()
-        return (answer == "y" || answer == "yes") ? .allow : .deny
+    func requestResolution(
+        _ request: PermissionRequestPayload
+    ) -> PermissionApprovalResolution {
+        while true {
+            out("\n  \(yellow)⚠ [\(request.requestId.rawValue)] \(request.tool) (\(request.risk.rawValue)) — \(request.reason)\(reset)\n  [a]pprove call / [d]ecline call / [c]ancel turn: ")
+            guard let line = readLine() else {
+                return PermissionApprovalResolution(
+                    decision: .deny,
+                    action: .cancelTurn,
+                    reason: "Turn cancelled because permission input closed",
+                    risk: request.risk,
+                    source: .user,
+                    failureSource: .userCancelled)
+            }
+            switch line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "a", "approve", "y", "yes":
+                return PermissionApprovalResolution(
+                    decision: .allow,
+                    action: .approve,
+                    reason: "Permission approved by user",
+                    risk: request.risk,
+                    source: .user)
+            case "d", "decline", "n", "no":
+                return PermissionApprovalResolution(
+                    decision: .deny,
+                    action: .decline,
+                    reason: "Permission declined by user",
+                    risk: request.risk,
+                    source: .user,
+                    failureSource: .userDenied)
+            case "c", "cancel", "cancel turn":
+                return PermissionApprovalResolution(
+                    decision: .deny,
+                    action: .cancelTurn,
+                    reason: "Turn cancelled by user",
+                    risk: request.risk,
+                    source: .user,
+                    failureSource: .userCancelled)
+            default:
+                out("  Enter a, d, or c.\n")
+            }
+        }
+    }
+}
+
+private func permissionResolutionLabel(_ payload: PermissionResolvedPayload) -> String {
+    if payload.decision == .allow { return "approved" }
+    if payload.action == .cancelTurn { return "turn cancelled" }
+    switch payload.failureSource {
+    case .userDenied: return "call declined"
+    case .userCancelled, .turnCancelled: return "turn cancelled"
+    case .policyDenied: return "policy denied"
+    case .reviewerTimedOut: return "review timed out"
+    case .reviewerFailed: return "review failed"
+    case .sandboxDenied: return "sandbox denied"
+    case .runtimeFailed: return "runtime failed"
+    case nil: return "denied"
     }
 }

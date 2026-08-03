@@ -30,69 +30,7 @@ final class EventCompatibilityTests: XCTestCase {
             return XCTFail("expected agent_attached")
         }
         XCTAssertEqual(payload.agent, AgentID(rawValue: "worker"))
-        XCTAssertNil(payload.providerID)
         XCTAssertNil(payload.metadata)
-    }
-
-    func testOldAgentSpawnedEventWithoutProviderStillDecodes() throws {
-        let json = """
-        {"seq":3,"ts":"2026-06-23T12:00:00Z","session":"sess_old","v":1,"type":"agent_spawned","payload":{"requestedBy":"main","agent":"worker","path":"/tmp/worker","model":"m"}}
-        """
-
-        let envelope = try Envelope.makeDecoder().decode(Envelope.self, from: Data(json.utf8))
-
-        guard case .agentSpawned(let payload) = envelope.event else {
-            return XCTFail("expected agent_spawned")
-        }
-        XCTAssertEqual(payload.model, ModelID(rawValue: "m"))
-        XCTAssertNil(payload.providerID)
-    }
-
-    func testProviderAwareAgentLifecycleEventsRoundTrip() throws {
-        let worker = AgentID(rawValue: "worker")
-        let model = ModelID(rawValue: "vendor/model")
-        let events: [Event] = [
-            .agentAttachRequested(AgentAttachRequestedPayload(
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-a",
-                model: model,
-                profile: "reviewed")),
-            .agentAttached(AgentAttachedPayload(
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-a",
-                model: model,
-                profile: "reviewed")),
-            .agentSpawnRequested(AgentSpawnRequestedPayload(
-                requestedBy: AgentID(rawValue: "main"),
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-a",
-                model: model)),
-            .agentSpawned(AgentSpawnedPayload(
-                requestedBy: AgentID(rawValue: "main"),
-                agent: worker,
-                path: "/tmp/worker",
-                providerID: "provider-a",
-                model: model)),
-            .agentModelBound(AgentModelBoundPayload(
-                agent: worker,
-                providerID: "provider-b",
-                model: ModelID(rawValue: "replacement-model"),
-                reason: "explicit migration")),
-        ]
-
-        for (index, event) in events.enumerated() {
-            let envelope = Envelope(
-                seq: index,
-                ts: Date(timeIntervalSince1970: TimeInterval(index)),
-                session: SessionID(rawValue: "sess_binding"),
-                event: event)
-            let data = try Envelope.makeEncoder().encode(envelope)
-            let decoded = try Envelope.makeDecoder().decode(Envelope.self, from: data)
-            XCTAssertEqual(decoded, envelope)
-        }
     }
 
     func testUnknownFutureEventDoesNotCrashReplayOrReuseSequence() async throws {

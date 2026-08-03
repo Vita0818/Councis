@@ -1,20 +1,16 @@
 // swift-tools-version:5.9
 import PackageDescription
 
-// Councis v0.1 — single root manifest.
-// One target per module; target dependencies enforce the acyclic DAG from
-// ARCHITECTURE.md §2.1. The conceptual `Packages/<Name>` split maps 1:1 to
-// these targets and can be promoted to standalone SwiftPM packages later.
-//
-// Buildable/testable today: Core / Protocol / Providers / Artifacts / Conversation
-// (pure Swift, no Apple-only frameworks). SharedUI + IntatisMac use SwiftUI/AppKit,
-// guarded with `#if canImport(SwiftUI)` so the package still builds on Linux.
+// Intatis root SwiftPM manifest. Product versioning is owned by project.yml;
+// package comments below that mention early v0.x milestones describe when a
+// subsystem was introduced, not the current product version. See
+// docs/VERSIONING.md.
 
 let package = Package(
-    name: "Councis",
+    name: "Intatis",
     platforms: [
-        .macOS(.v13),
-        .iOS(.v16),
+        .macOS("26.0"),
+        .iOS("26.0"),
     ],
     products: [
         .library(name: "IntatisCore", targets: ["IntatisCore"]),
@@ -23,18 +19,35 @@ let package = Package(
         .library(name: "IntatisArtifacts", targets: ["IntatisArtifacts"]),
         .library(name: "IntatisConversation", targets: ["IntatisConversation"]),
         .library(name: "IntatisTools", targets: ["IntatisTools"]),
+        .library(name: "IntatisSkills", targets: ["IntatisSkills"]),
         .library(name: "IntatisPermission", targets: ["IntatisPermission"]),
+        .library(name: "IntatisMCP", targets: ["IntatisMCP"]),
+        .library(name: "IntatisMCPStdio", targets: ["IntatisMCPStdio"]),
         .library(name: "IntatisAgentKernel", targets: ["IntatisAgentKernel"]),
         .library(name: "IntatisCowork", targets: ["IntatisCowork"]),
-        .library(name: "IntatisMacTeamSupport", targets: ["IntatisMacTeamSupport"]),
         .library(name: "IntatisMultimodal", targets: ["IntatisMultimodal"]),
         .library(name: "IntatisSharedUI", targets: ["IntatisSharedUI"]),
-        // The CLI IS a SwiftPM executable (no Xcode needed): `swift run councis chat`.
-        .executable(name: "councis", targets: ["IntatisCLI"]),
-        .executable(name: "CouncisMac", targets: ["CouncisMac"]),
+        // The CLI IS a SwiftPM executable (no Xcode needed): `swift run intatis chat`.
+        .executable(name: "intatis", targets: ["IntatisCLI"]),
         // The GUI apps (IntatisMac, IntatisiOS) are Xcode App targets, not SPM
         // products — SwiftPM cannot build a .app bundle, and iOS apps cannot be
         // built from SPM at all. See project.yml (XcodeGen) + README.
+    ],
+    dependencies: [
+        // Audited in-tree thin derivative of Microsoft SwiftStreamingMarkdown
+        // v0.6.0. Provenance and local patches live beside the vendored source.
+        .package(path: "Vendor/SwiftStreamingMarkdown"),
+        // Audited client-only derivative of the official Model Context
+        // Protocol Swift SDK 0.12.1 at a0ae212e. Its upstream identity,
+        // exclusions, licenses, and patch ledger live beside the source.
+        .package(path: "Vendor/MCPClientSDK"),
+        // Official portable CryptoKit-compatible backend for Linux CLI builds.
+        // Exact release provenance and license inventory are recorded in
+        // ThirdPartyNotices/SwiftCrypto.md.
+        .package(
+            url: "https://github.com/apple/swift-crypto.git",
+            exact: "4.5.1"
+        ),
     ],
     targets: [
         // MARK: Library targets (module == target)
@@ -49,7 +62,14 @@ let package = Package(
         ),
         .target(
             name: "IntatisProviders",
-            dependencies: ["IntatisCore", "IntatisProtocol"],
+            dependencies: [
+                "IntatisCore", "IntatisProtocol",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
+            ],
             path: "Packages/IntatisProviders/Sources"
         ),
         .target(
@@ -66,9 +86,34 @@ let package = Package(
         ),
         // v0.2 — Code: tools, deterministic permission gate, single-agent kernel.
         .target(
+            name: "IntatisPTYLauncher",
+            path: "Packages/IntatisPTYLauncher",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "IntatisTools",
-            dependencies: ["IntatisCore", "IntatisProtocol"],
+            dependencies: [
+                "IntatisCore", "IntatisProtocol", "IntatisPTYLauncher",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
+            ],
             path: "Packages/IntatisTools/Sources"
+        ),
+        .target(
+            name: "IntatisSkills",
+            dependencies: [
+                "IntatisCore", "IntatisProtocol", "IntatisTools",
+                "IntatisPermission",
+            ],
+            path: "Packages/IntatisSkills",
+            exclude: ["Tests"],
+            sources: ["Sources"],
+            resources: [
+                .copy("Resources/BundledSkills"),
+            ]
         ),
         .target(
             name: "IntatisPermission",
@@ -76,11 +121,75 @@ let package = Package(
             dependencies: ["IntatisCore", "IntatisProtocol", "IntatisProviders"],
             path: "Packages/IntatisPermission/Sources"
         ),
+        // Production remote MCP HTTP/OAuth requests use libcurl's
+        // CURLOPT_RESOLVE socket binding on macOS and Linux. The iOS product
+        // does not link IntatisMCP.
+        .target(
+            name: "IntatisCurlTransport",
+            path: "Packages/IntatisCurlTransport",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("curl"),
+            ]
+        ),
+        // External MCP Server client core, including the client-side handlers
+        // for callbacks initiated by a connected server. This target contains
+        // no MCP Server implementation or server-facing product seam. It has
+        // no dependency on Conversation, Providers, AgentKernel, Cowork, or an
+        // app target; those layers inject event/artifact/inference services
+        // through narrow interfaces.
+        .target(
+            name: "IntatisMCP",
+            dependencies: [
+                "IntatisCore", "IntatisProtocol", "IntatisTools",
+                .target(
+                    name: "IntatisCurlTransport",
+                    condition: .when(platforms: [.macOS, .linux])
+                ),
+                .product(name: "MCP", package: "MCPClientSDK"),
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
+            ],
+            path: "Packages/IntatisMCP/Sources"
+        ),
+        // Linux-only kernel execution guard support for local MCP stdio.
+        // The C shim is inert on Apple platforms; keeping it separate avoids
+        // placing fork/ptrace/seccomp code in the portable client core.
+        .target(
+            name: "IntatisMCPStdioGuard",
+            path: "Packages/IntatisMCPStdio/ExecutionGuard",
+            publicHeadersPath: "include"
+        ),
+        // Local stdio process ownership is a separate linkage boundary so the
+        // App Store target can remain remote-HTTP-only.
+        .target(
+            name: "IntatisMCPStdio",
+            dependencies: [
+                "IntatisMCP", "IntatisMCPStdioGuard",
+                "IntatisCore", "IntatisProtocol", "IntatisTools",
+                .product(name: "MCP", package: "MCPClientSDK"),
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
+            ],
+            path: "Packages/IntatisMCPStdio/Sources"
+        ),
         .target(
             name: "IntatisAgentKernel",
             dependencies: [
                 "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisTools", "IntatisPermission", "IntatisConversation", "IntatisArtifacts",
+                "IntatisTools", "IntatisPermission", "IntatisConversation",
+                "IntatisArtifacts", "IntatisMCP", "IntatisSkills",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
             ],
             path: "Packages/IntatisAgentKernel/Sources"
         ),
@@ -90,13 +199,9 @@ let package = Package(
             dependencies: [
                 "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisTools",
                 "IntatisPermission", "IntatisConversation", "IntatisAgentKernel",
+                "IntatisSkills",
             ],
             path: "Packages/IntatisCowork/Sources"
-        ),
-        .target(
-            name: "IntatisMacTeamSupport",
-            dependencies: ["IntatisCore", "IntatisCowork"],
-            path: "Apps/IntatisMac/TeamSupport"
         ),
         // v0.4 — Multimodal: image/video generation + transcription → artifacts.
         .target(
@@ -110,44 +215,49 @@ let package = Package(
         .target(
             name: "IntatisSharedUI",
             // Providers is needed because ChatViewModel drives ProviderRegistry.
-            dependencies: ["IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisConversation", "IntatisArtifacts"],
+            dependencies: [
+                "IntatisCore", "IntatisProtocol", "IntatisProviders",
+                "IntatisConversation", "IntatisArtifacts",
+                .product(
+                    name: "SwiftStreamingMarkdown",
+                    package: "SwiftStreamingMarkdown",
+                    condition: .when(platforms: [.macOS, .iOS])
+                ),
+            ],
             path: "Packages/IntatisSharedUI/Sources"
         ),
-        // v0.6 — CLI: clean-room `councis` command (chat + code agent), talks to
+        // v0.6 — CLI: Swift-native `intatis` command (chat + code agent), talks to
         // any OpenAI-compatible endpoint via env vars.
         .executableTarget(
             name: "IntatisCLI",
             dependencies: [
                 "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisConversation",
                 "IntatisTools", "IntatisPermission", "IntatisAgentKernel", "IntatisCowork",
+                "IntatisMCP", "IntatisMCPStdio", "IntatisSkills",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
             ],
             path: "Apps/intatis-cli/Sources"
         ),
+        // Development-only executable exercised by the pinned official MCP
+        // client conformance runner. It is not a shipped product and contains
+        // no MCP server implementation or server-facing API.
         .executableTarget(
-            name: "CouncisMac",
+            name: "IntatisMCPConformanceClient",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisConversation",
-                "IntatisArtifacts", "IntatisMultimodal", "IntatisSharedUI", "IntatisTools",
-                "IntatisPermission", "IntatisAgentKernel", "IntatisCowork", "IntatisMacTeamSupport",
+                "IntatisMCP", "IntatisCore", "IntatisProtocol",
+                .product(name: "MCP", package: "MCPClientSDK"),
             ],
-            path: "Apps",
-            exclude: [
-                "intatis-cli", "IntatisiOS",
-                "CouncisMac/CouncisMac.DeveloperID.entitlements",
-                "IntatisMac/Info.plist",
-                "IntatisMac/IntatisMac.AppStore.entitlements",
-                "IntatisMac/IntatisMac.DeveloperID.entitlements",
-                "IntatisMac/TeamSupport",
-                "IntatisMac/TeamSupportTests",
-            ],
-            sources: ["CouncisMac/Sources", "IntatisMac/Sources"],
-            swiftSettings: [.define("COUNCIS_APP")]
+            path: "Packages/IntatisMCPConformanceClient/Sources"
         ),
         // GUI app targets (IntatisMac macOS app, IntatisiOS iOS app) are defined in
         // the Xcode project generated from project.yml — they link these library
         // products. The iOS app intentionally links only the subset.
 
-        // MARK: Test targets (none depend on UI/app targets, so `swift test` is headless)
+        // MARK: Test targets (none depend on app targets; SharedUI tests run headlessly on macOS)
         .testTarget(
             name: "IntatisCoreTests",
             dependencies: ["IntatisCore"],
@@ -179,15 +289,54 @@ let package = Package(
             path: "Packages/IntatisTools/Tests"
         ),
         .testTarget(
+            name: "IntatisSkillsTests",
+            dependencies: [
+                "IntatisSkills", "IntatisCore", "IntatisProtocol", "IntatisTools",
+            ],
+            path: "Packages/IntatisSkills/Tests"
+        ),
+        .testTarget(
             name: "IntatisPermissionTests",
             dependencies: ["IntatisPermission", "IntatisCore", "IntatisProtocol", "IntatisProviders"],
             path: "Packages/IntatisPermission/Tests"
+        ),
+        .testTarget(
+            name: "IntatisMCPTests",
+            dependencies: [
+                "IntatisMCP", "IntatisMCPStdio", "IntatisCore",
+                "IntatisProtocol", "IntatisTools",
+                .product(name: "MCP", package: "MCPClientSDK"),
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
+            ],
+            path: "Packages/IntatisMCP/Tests"
+        ),
+        .testTarget(
+            name: "IntatisCLITests",
+            dependencies: [
+                "IntatisCLI", "IntatisAgentKernel",
+                "IntatisConversation", "IntatisCore",
+                "IntatisMCP", "IntatisProtocol",
+            ],
+            path: "Apps/intatis-cli/Tests",
+            resources: [
+                .copy("Fixtures"),
+            ]
         ),
         .testTarget(
             name: "IntatisAgentKernelTests",
             dependencies: [
                 "IntatisAgentKernel", "IntatisCore", "IntatisProtocol", "IntatisProviders",
                 "IntatisTools", "IntatisPermission", "IntatisConversation",
+                "IntatisArtifacts", "IntatisMCP", "IntatisSkills",
+                .product(
+                    name: "Crypto",
+                    package: "swift-crypto",
+                    condition: .when(platforms: [.linux])
+                ),
             ],
             path: "Packages/IntatisAgentKernel/Tests"
         ),
@@ -196,6 +345,7 @@ let package = Package(
             dependencies: [
                 "IntatisCowork", "IntatisCore", "IntatisProtocol", "IntatisProviders",
                 "IntatisTools", "IntatisPermission", "IntatisConversation", "IntatisAgentKernel",
+                "IntatisSkills",
             ],
             path: "Packages/IntatisCowork/Tests"
         ),
@@ -208,9 +358,12 @@ let package = Package(
             path: "Packages/IntatisMultimodal/Tests"
         ),
         .testTarget(
-            name: "IntatisMacTeamSupportTests",
-            dependencies: ["IntatisMacTeamSupport", "IntatisCore", "IntatisCowork"],
-            path: "Apps/IntatisMac/TeamSupportTests"
+            name: "IntatisSharedUITests",
+            dependencies: ["IntatisSharedUI"],
+            path: "Packages/IntatisSharedUI/Tests",
+            resources: [
+                .copy("Fixtures"),
+            ]
         ),
     ]
 )

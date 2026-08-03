@@ -17,22 +17,27 @@ public struct ChatLoop: Sendable {
     private let systemPrompt: String?
     private let reasoningEffort: ReasoningEffort?
     private let includeUsage: Bool
+    private let webSearch: ChatWebSearchConfiguration?
 
     public init(log: EventLog, provider: ChatProvider, model: ModelID,
                 systemPrompt: String? = nil, reasoningEffort: ReasoningEffort? = nil,
-                includeUsage: Bool = false) {
+                includeUsage: Bool = false,
+                webSearch: ChatWebSearchConfiguration? = nil) {
         self.log = log
         self.provider = provider
         self.model = model
         self.systemPrompt = systemPrompt
         self.reasoningEffort = reasoningEffort
         self.includeUsage = includeUsage
+        self.webSearch = webSearch
     }
 
     /// Send one user message and stream the assistant reply into the log.
     public func send(_ userText: String,
                      images: [ImageAttachment] = [],
                      userMessage: UserMessagePayload? = nil) async throws {
+        let turnID = TurnID.new()
+        let submissionID = userMessage?.submissionID
         let history = await buildHistory()
         try await log.append(.userMessage(userMessage ?? UserMessagePayload(text: userText)))
 
@@ -46,9 +51,13 @@ public struct ChatLoop: Sendable {
         let start = Date()
         var firstTokenAt: Date?
         var usage: Usage?
+        var citations: [MessageCitation] = []
+        var citationURLs: Set<String> = []
         do {
             let request = ChatRequest(model: model, messages: messages,
-                                      reasoningEffort: reasoningEffort, includeUsage: includeUsage)
+                                      reasoningEffort: reasoningEffort,
+                                      includeUsage: includeUsage,
+                                      webSearch: webSearch)
             for try await chunk in provider.stream(request) {
                 switch chunk {
                 case .delta(let d):
@@ -56,17 +65,58 @@ public struct ChatLoop: Sendable {
                     full += d
                     try await log.append(.messageDelta(
                         MessageDeltaPayload(messageId: assistantID, role: .assistant, textDelta: d)))
+                case .citation(let citation):
+                    if citationURLs.insert(citation.url).inserted {
+                        citations.append(citation)
+                    }
                 case .usage(let u):
                     usage = Usage.merging(usage, with: u)
                 case .done:
                     break
                 }
             }
+            // A transport can finish its stream while cancellation is racing
+            // the final callback. Never turn a user Stop into a completed
+            // partial assistant message.
+            try Task.checkCancellation()
             try await log.append(.messageCompleted(
-                MessageCompletedPayload(messageId: assistantID, role: .assistant, text: full)))
+                MessageCompletedPayload(
+                    messageId: assistantID,
+                    role: .assistant,
+                    text: full,
+                    citations: citations)))
             await appendTurnStats(start: start, firstTokenAt: firstTokenAt, usage: usage)
+            try Task.checkCancellation()
+            try await log.append(.turnOutcome(TurnOutcomePayload(
+                turnID: turnID,
+                outcome: .completed,
+                submissionID: submissionID)))
         } catch {
-            try await log.append(.error(RuntimeErrorPresentation.payload(for: error, fallbackCode: "provider")))
+            let interrupted = IntatisCancellation.isCurrentTaskCancellation(error)
+            if !interrupted {
+                let payload: ErrorPayload
+                if IntatisCancellation.isCancellationSignal(error) {
+                    // A provider-originated CancellationError is not evidence
+                    // that the user cancelled this turn.
+                    payload = ErrorPayload(
+                        code: "runtime_failed",
+                        message: "The provider or runtime ended with an unexpected cancellation signal.")
+                } else {
+                    payload = RuntimeErrorPresentation.payload(
+                        for: error,
+                        fallbackCode: "provider")
+                }
+                _ = try? await log.append(.error(payload))
+            }
+            let diagnostic = PermissionReviewTextSanitizer.sanitizeDiagnostic(
+                error.localizedDescription,
+                maxCharacters: 512).text
+            _ = try? await log.append(.turnOutcome(TurnOutcomePayload(
+                turnID: turnID,
+                outcome: interrupted ? .interrupted : .failed,
+                failureSource: interrupted ? .turnCancelled : .runtimeFailed,
+                reason: diagnostic,
+                submissionID: submissionID)))
             throw error
         }
     }

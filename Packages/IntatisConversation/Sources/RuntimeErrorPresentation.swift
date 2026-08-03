@@ -1,6 +1,7 @@
 import Foundation
 import IntatisCore
 import IntatisProtocol
+import IntatisProviders
 
 public struct RuntimeRecoveryAdvice: Equatable, Sendable {
     public var title: String
@@ -24,6 +25,9 @@ public enum RuntimeErrorPresentation {
     public static func code(for error: Error, fallbackCode: String) -> String {
         if error is CancellationError {
             return "cancelled"
+        }
+        if error is ProviderUsageLimitError {
+            return "provider.usage_limit"
         }
         if let intatis = error as? IntatisError {
             switch intatis {
@@ -53,7 +57,13 @@ public enum RuntimeErrorPresentation {
         if error is CancellationError {
             return IntatisError.cancelled.localizedDescription
         }
-        return error.localizedDescription
+        // Provider, decoder, and plug-in errors are untrusted strings. This is
+        // the last common boundary before messages become durable EventLog or
+        // task-failure facts, so sanitize even when an upstream formatter was
+        // bypassed by a custom provider implementation.
+        return PermissionReviewTextSanitizer.sanitizeDiagnostic(
+            error.localizedDescription,
+            maxCharacters: 1_024).text
     }
 
     public static func recoveryAdvice(for payload: ErrorPayload) -> RuntimeRecoveryAdvice? {

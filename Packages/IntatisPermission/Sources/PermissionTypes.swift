@@ -20,14 +20,21 @@ public struct ToolCallContext: Sendable {
     public let touchedPaths: [String]
     public let risksNetwork: Bool
     public let rawArgs: String   // JSON arguments
+    public let intent: PermissionIntent
 
     public init(toolName: String, sideEffect: SideEffect, touchedPaths: [String],
-                risksNetwork: Bool, rawArgs: String) {
+                risksNetwork: Bool, rawArgs: String,
+                intent: PermissionIntent? = nil) {
         self.toolName = toolName
         self.sideEffect = sideEffect
         self.touchedPaths = touchedPaths
         self.risksNetwork = risksNetwork
         self.rawArgs = rawArgs
+        self.intent = intent ?? .derived(
+            toolName: toolName,
+            sideEffect: sideEffect,
+            touchedPaths: touchedPaths,
+            risksNetwork: risksNetwork)
     }
 }
 
@@ -73,6 +80,25 @@ public struct PermissionOutcome: Equatable, Sendable {
         self.decision = decision
         self.risk = risk
         self.reason = reason
+    }
+}
+
+/// Preserves the exact layer-A result even when PermissionEngine adapts `pass`
+/// to an in-engine reviewer verdict or to `ask_user` for a durable responder.
+public struct PermissionEngineDecision: Equatable, Sendable {
+    public let gate: GateResult
+    public let outcome: PermissionOutcome
+    /// `true` only when the in-engine model reviewer actually inspected this
+    /// call. Downstream policy overlays may add an interaction after an allow,
+    /// but must never reinterpret or bypass a reviewer deny/ask.
+    public let reviewerConsulted: Bool
+
+    public init(gate: GateResult,
+                outcome: PermissionOutcome,
+                reviewerConsulted: Bool = false) {
+        self.gate = gate
+        self.outcome = outcome
+        self.reviewerConsulted = reviewerConsulted
     }
 }
 

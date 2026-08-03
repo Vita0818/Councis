@@ -1,74 +1,56 @@
 import Foundation
+import IntatisProviders
 
 func printConfig(_ config: CLIConfig) {
     out("""
-    default provider: \(config.defaultProviderID)
-    default model   : \(config.model)
-    reasoning       : \(config.reasoningEffort?.rawValue ?? "off")
-    mode            : \(config.mode.rawValue)
-    preset          : \(config.preset ?? "(mode default)")
-    config          : \(ConfigFile.url.path)
-    providers       :
+    endpoint : (configured, hidden) · \(config.selectedRouteLabel)
+    model    : \(config.model)
+    wire     : \(config.wire.rawValue)
+    reasoning: \(config.reasoningEffort?.rawValue ?? "off")
+    mode     : \(config.mode.rawValue)
+    api key  : \(config.hasConfiguredCredential ? "(configured, hidden)" : "(unset)")
+    routes   : \(config.providerRoutes.count)
+    config   : \(config.configurationFileURL == nil ? ConfigFile.url.path : "(advanced Intatis config, path hidden)")
 
     """)
-    for provider in config.providers {
-        out("  \(provider.id) · \(provider.baseURL.absoluteString) · \(provider.wire.rawValue) · key \(provider.apiKey?.isEmpty == false ? "set (hidden)" : "unset")\n")
-    }
-    out("\n")
 }
 
 func printHelp() {
     out("""
-    Councis CLI — heterogeneous model teams on the Intatis Cowork runtime.
+    Intatis CLI — a local AI agent for ANY OpenAI-compatible endpoint.
 
     USAGE
-      councis                         Start the configured default mode
-      councis chat [--preset NAME] [PROMPT...]
-                                      REPL without PROMPT; otherwise run one
-                                      reviewed @main task in a confined workspace
-      councis work [--preset NAME] [--workspace DIR] [PROMPT...]
-                                      REPL without PROMPT; otherwise run one
-                                      reviewed @main task in DIR
-      councis work DIR                Compatibility workspace form only when DIR
-                                      exists and is the sole positional argument
-      councis cowork ...              Compatibility alias for `councis work`
-      councis settings                Edit the default endpoint, key, model, and mode
-      councis config                  Print resolved config (secrets hidden)
-      councis runs [FILE]             Read legacy Council run summaries
-        [--show-answer]               Explicitly include the stored final answer
-      councis selftest                Offline smoke tests (no key or network)
-      councis help
+      intatis                 Start your default mode (set via `intatis settings`)
+      intatis chat            Streaming chat (no tools)
+      intatis code [dir]      Coding agent: read/search/edit files, git/shell (with approval)
+      intatis cowork [dir]    Multi-agent work; use /goal <objective> for durable Goal execution
+      intatis settings        Interactive settings (endpoint, key, model, reasoning, mode)
+      intatis config          Print the resolved config
+      intatis selftest        Offline smoke test (no key)
+      intatis mcp help        Manage external MCP servers and session access
+      intatis exec --session <id> --agent <id> [--task <id>] --prompt <text> [--yes]
+                              Run one exact durable Code/MCP turn
+      intatis diagnose-hang --pid <pid> [--output <directory>]
+                              Capture a 10s sample and 5m Intatis logs into an owner-only bundle
+      intatis help
 
-    LAUNCH OPTIONS
-      --preset NAME                   Select the heterogeneous team preset
-      --workspace DIR, --dir DIR      Work-mode workspace (default: current dir)
-      --                              Treat all remaining tokens as prompt text
+    CONFIG  (env var > advanced Intatis config > legacy config > default)
+      INTATIS_CONFIG     optional intatis.json/jsonc using model + enabled_providers + provider map
+      INTATIS_BASE_URL   default https://api.openai.com/v1
+      INTATIS_API_KEY    required (any non-empty for local servers)
+      INTATIS_MODEL      default gpt-4o-mini
+      INTATIS_REASONING  minimal | low | medium | high
+      INTATIS_MODE       chat | code | cowork
 
-      Multiple prompt tokens are joined with spaces. Chat positionals are always
-      prompt text. The retired `--mock` Council engine is not available; use
-      `councis selftest` for an offline smoke test.
+    In a session, type /help for slash commands (/model, /reasoning, /mode, /clear …).
 
-    TEAM PRESETS
-      Project: .councis/presets/<name>.json
-      User   : ~/.councis/presets/<name>.json
+    FIRST RUN
+      intatis settings        # set endpoint + API key once
+      intatis                 # then just run it — uses your saved config
 
-      A preset declares @main, @judge, workerModelPool, modelAssignment, and
-      provider metadata. Credentials and endpoint URLs belong only in config.
-
-    CONFIG  (COUNCIS_* > INTATIS_* compatibility vars > config > defaults)
-      COUNCIS_BASE_URL       default https://api.openai.com/v1
-      COUNCIS_API_KEY        key for the default provider
-      COUNCIS_PROVIDER       default provider id
-      COUNCIS_MODEL          fallback model, default gpt-4o-mini
-      COUNCIS_REASONING      minimal | low | medium | high
-      COUNCIS_MODE           chat | work
-      COUNCIS_PRESET         override the mode's default preset
-      COUNCIS_MAX_STEPS      maximum tool round-trips per agent turn
-
-    Multiple providers can be declared in ~/.councis/config.json. Give each an
-    `apiKeyEnv`, or set COUNCIS_<PROVIDER_ID>_API_KEY (punctuation becomes `_`).
-
-    In a session, type /help for slash commands.
+    ANY VENDOR (same binary)
+      INTATIS_BASE_URL=http://localhost:11434/v1 INTATIS_API_KEY=ollama INTATIS_MODEL=llama3.1 intatis chat
+      INTATIS_BASE_URL=https://api.deepseek.com/v1 INTATIS_API_KEY=sk-... INTATIS_MODEL=deepseek-chat intatis chat
 
     """)
 }

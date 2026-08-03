@@ -5,12 +5,29 @@ import IntatisCore
 import IntatisProtocol
 import IntatisConversation
 
+private func intatisLocalizedAgentState(_ state: String) -> String {
+    switch state {
+    case AgentState.idle.rawValue:
+        return IntatisLocalization.string("Idle")
+    case AgentState.thinking.rawValue:
+        return IntatisLocalization.string("Thinking")
+    case AgentState.tool.rawValue:
+        return IntatisLocalization.string("Tool")
+    case AgentState.blocked.rawValue:
+        return IntatisLocalization.string("Blocked")
+    default:
+        return state
+    }
+}
+
 /// Presentational Code thread (v0.2). All data + callbacks are injected, so the
 /// kernel-driving view model lives in the app, not here (keeps SharedUI free of
 /// Tools/Permission/AgentKernel dependencies).
 public struct CodeShell: View {
-    private static let bottomAnchorID = "intatis-code-thread-bottom"
-    private let items: [CodeItem]
+    private let displayedItems: [CodeItem]
+    private let presentationScope: IntatisThreadPresentationScope
+    private let sessionTitle: String
+    private let thinkingPhaseID: String
     private let pending: PendingPermission?
     private let permissionNotice: PermissionResolutionNotice?
     private let latestTurnStats: TurnStatsSnapshot?
@@ -22,11 +39,19 @@ public struct CodeShell: View {
     private let onShowSessions: (() -> Void)?
     private let onNewSession: (() -> Void)?
     private let composerAccessory: AnyView?
+    private let headerActions: [IntatisThreadHeaderAction]
     @Binding private var input: String
     private let onSend: () -> Void
-    private let onResolve: (PermissionDecision) -> Void
+    private let onCancelCurrent: (() -> Void)?
+    private let onResolve: (PermissionResponseAction) -> Void
+    @Binding private var showsInspector: Bool
+    @StateObject private var scrollCoordinator = IntatisThreadScrollCoordinator()
+    @State private var historySelection: IntatisThreadHistorySelection?
 
     public init(items: [CodeItem],
+                presentationScope: IntatisThreadPresentationScope,
+                sessionTitle: String = IntatisLocalization.string("Code"),
+                thinkingScopeID: String = "code",
                 pending: PendingPermission?,
                 permissionNotice: PermissionResolutionNotice? = nil,
                 latestTurnStats: TurnStatsSnapshot? = nil,
@@ -39,10 +64,16 @@ public struct CodeShell: View {
                 onShowSessions: (() -> Void)? = nil,
                 onNewSession: (() -> Void)? = nil,
                 composerAccessory: AnyView? = nil,
+                headerActions: [IntatisThreadHeaderAction] = [],
+                showsInspector: Binding<Bool>,
                 input: Binding<String>,
                 onSend: @escaping () -> Void,
-                onResolve: @escaping (PermissionDecision) -> Void) {
-        self.items = items
+                onCancelCurrent: (() -> Void)? = nil,
+                onResolve: @escaping (PermissionResponseAction) -> Void) {
+        self.displayedItems = IntatisExecutionTracePresentation.displayedItems(items)
+        self.presentationScope = presentationScope
+        self.sessionTitle = sessionTitle
+        self.thinkingPhaseID = "\(thinkingScopeID):\(items.last?.id ?? "initial")"
         self.pending = pending
         self.permissionNotice = permissionNotice
         self.latestTurnStats = latestTurnStats
@@ -54,8 +85,11 @@ public struct CodeShell: View {
         self.onShowSessions = onShowSessions
         self.onNewSession = onNewSession
         self.composerAccessory = composerAccessory
+        self.headerActions = headerActions
+        self._showsInspector = showsInspector
         self._input = input
         self.onSend = onSend
+        self.onCancelCurrent = onCancelCurrent
         self.onResolve = onResolve
         _ = splitLayout
     }
@@ -71,35 +105,52 @@ public struct CodeShell: View {
         }
     }
 
-    @ViewBuilder private func content(rawWidth: CGFloat) -> some View {
-        if rawWidth >= 940 {
-            HStack(spacing: 0) {
-                threadColumn(layout: IntatisThreadContentLayout(rawWidth: rawWidth - 300))
-                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
-                Divider().opacity(0.45)
+    private func content(rawWidth: CGFloat) -> some View {
+        let inspectorLayout = IntatisWorkspaceInspectorLayoutPolicy.resolve(
+            availableWidth: rawWidth,
+            isRequested: showsInspector,
+            activationWidth: 940,
+            minimumThreadWidth: 620,
+            minimumInspectorWidth: 260,
+            idealInspectorWidth: 292,
+            maximumInspectorWidth: 360)
+
+        return HStack(spacing: 0) {
+            threadColumn(
+                layout: IntatisThreadContentLayout(
+                    rawWidth: inspectorLayout.threadWidth),
+                inspectorIsAvailable: rawWidth >= 940)
+                .frame(width: inspectorLayout.threadWidth)
+                .frame(maxHeight: .infinity)
+            if inspectorLayout.isVisible {
+                Divider()
                 CodeInspectorView(
                     workspaceName: workspaceName,
                     agentState: agentState,
-                    itemCount: items.count,
+                    itemCount: displayedItems.count,
                     pending: pending,
-                    latestTurnStats: latestTurnStats,
                     failedItems: failedItems,
                     style: threadStyle)
-                .frame(width: 292)
-                .frame(maxHeight: .infinity)
+                    .frame(width: inspectorLayout.inspectorWidth)
+                    .frame(maxHeight: .infinity)
+                    .background(.bar)
+                    .accessibilityIdentifier("code.inspector")
             }
-        } else {
-            threadColumn(layout: IntatisThreadContentLayout(rawWidth: rawWidth))
         }
     }
 
     private var failedItems: [CodeItem] {
-        Array(items.filter { $0.isFailure || $0.kind == .error }.suffix(4))
+        Array(displayedItems.filter { $0.isFailure || $0.kind == .error }.suffix(4))
     }
 
-    private func threadColumn(layout: IntatisThreadContentLayout) -> some View {
+    private func threadColumn(
+        layout: IntatisThreadContentLayout,
+        inspectorIsAvailable: Bool
+    ) -> some View {
         VStack(spacing: 0) {
-            header(layout: layout)
+            header(
+                layout: layout,
+                inspectorIsAvailable: inspectorIsAvailable)
             thread(layout: layout)
             permissionArea(layout: layout)
             composerArea(layout: layout)
@@ -107,94 +158,282 @@ public struct CodeShell: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func header(layout: IntatisThreadContentLayout) -> some View {
+    private func header(
+        layout: IntatisThreadContentLayout,
+        inspectorIsAvailable: Bool
+    ) -> some View {
         IntatisWorkspaceThreadHeader(
-            title: "Code",
-            subtitle: "\(workspaceName) · \(agentState)",
+            title: sessionTitle,
+            subtitle: nil,
             style: threadStyle,
-            actions: [])
+            actions: headerActions + [inspectorAction(
+                isAvailable: inspectorIsAvailable)])
         .frame(maxWidth: layout.contentMaxWidth)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, layout.horizontalPadding)
-        .padding(.top, 26)
+        .padding(.top, 12)
         .padding(.bottom, 12)
     }
 
-    private var headerActions: [IntatisThreadHeaderAction] {
-        var actions: [IntatisThreadHeaderAction] = []
-        if let onShowSessions {
-            actions.append(IntatisThreadHeaderAction(title: "Sessions", systemImage: "clock.arrow.circlepath", action: onShowSessions))
-        }
-        if let onNewSession {
-            actions.append(IntatisThreadHeaderAction(title: "New", systemImage: "plus", action: onNewSession))
-        }
-        return actions
+    private func inspectorAction(
+        isAvailable: Bool
+    ) -> IntatisThreadHeaderAction {
+        let title = showsInspector && isAvailable
+            ? IntatisLocalization.string("Hide Inspector")
+            : IntatisLocalization.string("Show Inspector")
+        return IntatisThreadHeaderAction(
+            title: title,
+            systemImage: "sidebar.right",
+            isDisabled: !isAvailable,
+            isIconOnly: true,
+            help: title,
+            accessibilityIdentifier: "code.inspector.toggle") {
+                guard isAvailable else { return }
+                showsInspector.toggle()
+            }
     }
 
     @ViewBuilder private func thread(layout: IntatisThreadContentLayout) -> some View {
-        if items.isEmpty {
+        if displayedItems.isEmpty && !showsThinkingIndicator {
             CodeEmptyThreadView(style: threadStyle)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.horizontal, layout.horizontalPadding)
         } else {
+            let historyWindow = threadHistoryWindow
+            let pageScope = threadPresentationScope
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(items) { item in
+                    VStack(alignment: .leading, spacing: 12) {
+                        if historyWindow.hasEarlier || historyWindow.hasLater {
+                            IntatisThreadHistoryPager(
+                                lowerBound: historyWindow.lowerBound,
+                                upperBound: historyWindow.upperBound,
+                                totalCount: historyWindow.totalCount,
+                                hasEarlier: historyWindow.hasEarlier,
+                                hasLater: historyWindow.hasLater,
+                                accessibilityPrefix: "code.history",
+                                onEarlier: {
+                                    selectHistoryWindow(
+                                        historyWindow.earlierRequestedUpperBound)
+                                },
+                                onNewer: {
+                                    selectHistoryWindow(
+                                        historyWindow.newerRequestedUpperBound)
+                                },
+                                onLatest: {
+                                    selectHistoryWindow(nil)
+                                })
+                        }
+                        ForEach(historyWindow.items) { item in
                             CodeItemRow(item: item, style: threadStyle, layout: layout)
                                 .id(item.id)
                         }
+                        if showsVisibleThinkingIndicator {
+                            IntatisThreadThinkingRow(
+                                layout: layout,
+                                style: threadStyle,
+                                phaseID: thinkingPhaseID)
+                                .id("intatis-code-thinking-\(thinkingPhaseID)")
+                        }
                         Color.clear
                             .frame(height: 1)
-                            .id(Self.bottomAnchorID)
+                            .padding(.bottom, 16)
+                            .id(IntatisThreadBottomAnchorID(scope: pageScope))
+                            .intatisThreadBottomAnchorFrameProbe()
                     }
+                    .environment(
+                        \.intatisMessageViewportAdmission,
+                        scrollCoordinator.effectiveViewportAdmission(
+                            for: pageScope,
+                            defersUntilInitialRestore:
+                                defersRichUntilInitialRestore))
+                    .environment(
+                        \.intatisThreadScrollCoordinator,
+                        scrollCoordinator)
+                    .environment(
+                        \.intatisThreadRichSettleSource,
+                        scrollCoordinator.effectiveRichSettleSource(
+                            for: pageScope))
                     .frame(width: layout.contentWidth)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, layout.horizontalPadding)
-                    .padding(.vertical, 16)
+                    .padding(.top, 16)
                 }
                 .scrollContentBackground(.hidden)
-                .onAppear {
-                    scrollToBottom(proxy, animated: false)
+                .intatisThreadViewportFrameProbe()
+                .onPreferenceChange(
+                    IntatisThreadViewportFramesPreferenceKey.self
+                ) { frames in
+                    guard let isVisible =
+                            IntatisThreadViewportFrames
+                                .isBottomAnchorVisible(frames) else {
+                        return
+                    }
+                    scrollCoordinator.enqueueBottomAnchorVisibility(
+                        isVisible,
+                        scope: pageScope)
                 }
-                .onChange(of: itemScrollSignature) { _ in
-                    scrollToBottom(proxy)
+                .overlay(alignment: .bottomTrailing) {
+                    if historyWindow.hasLater
+                        || scrollCoordinator.followState == .detachedByUser {
+                        IntatisJumpToLatestButton(
+                            accessibilityIdentifier: "code.jump-to-latest"
+                        ) {
+                            if historyWindow.hasLater {
+                                selectHistoryWindow(nil)
+                            } else {
+                                scrollCoordinator.jumpToLatest(
+                                    scope: pageScope,
+                                    perform: scrollPerformer(proxy))
+                            }
+                        }
+                    }
+                }
+                .onAppear {
+                    scrollCoordinator.activate(
+                        scope: pageScope,
+                        defersRichUntilInitialRestore:
+                            defersRichUntilInitialRestore)
+                    requestScroll(
+                        proxy,
+                        reason: .initialRestore,
+                        scope: pageScope)
+                }
+                .onChange(of: itemScrollSignature) { _, _ in
+                    guard historyWindow.isLatest else { return }
+                    requestScroll(
+                        proxy,
+                        reason: scrollReason,
+                        scope: pageScope)
+                }
+                .onChange(of: layout.contentWidth) { _, _ in
+                    scrollCoordinator.openWidthSettleEpoch(
+                        scope: pageScope,
+                        width: layout.contentWidth,
+                        perform: scrollPerformer(proxy))
+                }
+                .onScrollGeometryChange(
+                    for: IntatisThreadScrollGeometry.self
+                ) { geometry in
+                    IntatisThreadScrollGeometry.measure(
+                        contentOffsetY: geometry.contentOffset.y,
+                        containerHeight: geometry.containerSize.height,
+                        bottomInset: geometry.contentInsets.bottom,
+                        contentHeight: geometry.contentSize.height)
+                } action: { _, current in
+                    scrollCoordinator.enqueueGeometryObservation(
+                        current.isAtBottom,
+                        contentHeight: current.contentHeight,
+                        scope: pageScope)
+                }
+                .onScrollPhaseChange { _, newPhase in
+                    switch newPhase {
+                    case .tracking, .interacting, .decelerating:
+                        scrollCoordinator.userInteractionDidBegin(
+                            scope: pageScope)
+                    case .idle:
+                        scrollCoordinator.userInteractionDidEnd(
+                            scope: pageScope)
+                    case .animating:
+                        break
+                    }
+                }
+                .onDisappear {
+                    scrollCoordinator.deactivate(scope: pageScope)
                 }
             }
+            .id(pageScope)
         }
     }
 
-    private var itemScrollSignature: String {
-        guard let last = items.last else { return "0" }
-        return [
-            "\(items.count)",
-            last.id,
-            "\(last.body.count)",
-            "\(last.complete)",
-            "\(isWorking)"
-        ].joined(separator: ":")
+    private var showsThinkingIndicator: Bool {
+        IntatisThreadActivity.isAwaitingModelOutput(
+            items: displayedItems,
+            isWorking: isWorking,
+            permissionBlocksResponse: permissionBlocksComposer)
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        DispatchQueue.main.async {
-            if animated {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
-                }
-            } else {
-                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
-            }
+    private var defersRichUntilInitialRestore: Bool {
+        IntatisThreadRichEntryPolicy.defersUntilInitialRestore(
+            richRowCount: threadHistoryWindow.items.count)
+    }
+
+    private var threadHistoryWindow: IntatisThreadHistoryWindow<CodeItem> {
+        .resolve(
+            allItems: displayedItems,
+            requestedUpperBound: requestedHistoryWindowUpperBound)
+    }
+
+    private var requestedHistoryWindowUpperBound: Int? {
+        historySelection?.upperBound(for: presentationScope)
+    }
+
+    private var threadPresentationScope: IntatisThreadPresentationScope {
+        presentationScope.historyWindowScope(
+            requestedUpperBound: requestedHistoryWindowUpperBound)
+    }
+
+    private func selectHistoryWindow(_ requestedUpperBound: Int?) {
+        historySelection = IntatisThreadHistorySelection(
+            scope: presentationScope,
+            requestedUpperBound: requestedUpperBound)
+    }
+
+    private var showsVisibleThinkingIndicator: Bool {
+        threadHistoryWindow.isLatest && showsThinkingIndicator
+    }
+
+    private var itemScrollSignature: IntatisThreadScrollSignature {
+        let historyWindow = threadHistoryWindow
+        let last = historyWindow.items.last
+        return IntatisThreadScrollSignature(
+            visibleItemCount: historyWindow.items.count,
+            lastItemID: last?.id,
+            lastBodyUTF8Count: last?.body.utf8.count ?? 0,
+            lastItemComplete: last?.complete ?? false,
+            isWorking: historyWindow.isLatest && isWorking,
+            showsThinkingIndicator: showsVisibleThinkingIndicator)
+    }
+
+    private var scrollReason: IntatisThreadScrollReason {
+        let historyWindow = threadHistoryWindow
+        guard let last = historyWindow.items.last else {
+            return .liveUpdate
+        }
+        let visibleIsWorking = historyWindow.isLatest && isWorking
+        return last.complete && !visibleIsWorking
+            ? .completion
+            : .liveUpdate
+    }
+
+    private func requestScroll(
+        _ proxy: ScrollViewProxy,
+        reason: IntatisThreadScrollReason,
+        scope: IntatisThreadPresentationScope
+    ) {
+        scrollCoordinator.request(
+            scope: scope,
+            reason: reason,
+            perform: scrollPerformer(proxy))
+    }
+
+    private func scrollPerformer(
+        _ proxy: ScrollViewProxy
+    ) -> @MainActor (IntatisThreadScrollRequest) -> Void {
+        { request in
+            let anchorID = IntatisThreadBottomAnchorID(scope: request.scope)
+            proxy.scrollTo(anchorID, anchor: .bottom)
         }
     }
 
     @ViewBuilder private func permissionArea(layout: IntatisThreadContentLayout) -> some View {
         if let pending {
             PermissionCard(permission: pending, onResolve: onResolve)
-                .frame(maxWidth: layout.contentMaxWidth)
+                .frame(maxWidth: layout.contentMaxWidth, alignment: .leading)
                 .padding(.horizontal, layout.horizontalPadding)
         } else if let permissionNotice {
             PermissionResolutionNoticeView(notice: permissionNotice)
-                .frame(maxWidth: layout.contentMaxWidth)
+                .frame(maxWidth: layout.contentMaxWidth, alignment: .leading)
                 .padding(.horizontal, layout.horizontalPadding)
         }
     }
@@ -208,21 +447,31 @@ public struct CodeShell: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             IntatisThreadComposer(
-                placeholder: "Message Coder...",
+                placeholder: IntatisLocalization.string("Message Coder..."),
                 input: $input,
                 canSend: !isWorking
                     && !permissionBlocksComposer
                     && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 isInputDisabled: isWorking || permissionBlocksComposer,
                 style: threadStyle,
-                accessory: {
-                    if let composerAccessory {
-                        composerAccessory
-                    } else if let latestTurnStats {
-                        IntatisTurnStatsSummaryView(stats: latestTurnStats, style: threadStyle)
+                leadingAccessory: composerAccessory,
+                stopAction: isWorking
+                    ? onCancelCurrent.map { onCancelCurrent in
+                        IntatisThreadComposerSecondaryAction(
+                            systemImage: "stop.fill",
+                            help: IntatisLocalization.string("Stop"),
+                            action: onCancelCurrent)
                     }
+                    : nil,
+                accessory: {
+                    IntatisComposerUsageStrip(
+                        stats: latestTurnStats,
+                        style: threadStyle)
                 },
-                onSend: onSend)
+                onSend: {
+                    selectHistoryWindow(nil)
+                    onSend()
+                })
         }
         .frame(maxWidth: layout.contentMaxWidth)
         .padding(.horizontal, layout.horizontalPadding)
@@ -235,44 +484,64 @@ struct CodeItemRow: View {
     let item: CodeItem
     let style: IntatisThreadStyle
     let layout: IntatisThreadContentLayout
+    let onRetrySubmission: ((SubmissionID) -> Void)?
 
     init(item: CodeItem,
          style: IntatisThreadStyle = .standard(.light),
-         layout: IntatisThreadContentLayout = IntatisThreadContentLayout(rawWidth: 900)) {
+         layout: IntatisThreadContentLayout = IntatisThreadContentLayout(rawWidth: 900),
+         onRetrySubmission: ((SubmissionID) -> Void)? = nil) {
         self.item = item
         self.style = style
         self.layout = layout
+        self.onRetrySubmission = onRetrySubmission
     }
 
     var body: some View {
         switch item.kind {
         case .user:
-            bubble(title: "You", body: item.body, isUser: true, tags: item.tags)
+            bubble(
+                title: nil,
+                body: item.body,
+                isUser: true,
+                tags: item.tags)
         case .agent:
             bubble(title: item.title, body: item.body.isEmpty && !item.complete ? "…" : item.body,
                    isUser: false)
         case .toolCall:
-            card(icon: "wrench.and.screwdriver", title: "tool · \(item.title)", body: item.body, tint: .blue)
+            card(
+                icon: "wrench.and.screwdriver",
+                title: IntatisLocalization.format("tool · %@", item.title),
+                body: item.body,
+                tint: .blue)
         case .toolResult:
             card(icon: item.isFailure ? "exclamationmark.triangle" : "arrow.turn.down.right",
                  title: item.title,
                  body: item.body,
                  tint: item.isFailure ? .red : .gray)
         case .patch:
-            card(icon: "doc.badge.gearshape", title: "patch · \(item.files.joined(separator: ", "))",
-                 body: item.body, tint: .purple)
+            card(
+                icon: "doc.badge.gearshape",
+                title: IntatisLocalization.format(
+                    "patch · %@",
+                    item.files.joined(separator: ", ")),
+                body: item.body,
+                tint: .purple)
         case .note:
             Text(item.body).font(.caption).foregroundStyle(.secondary)
         case .error:
             card(icon: "exclamationmark.triangle", title: item.title, body: item.body, tint: .red)
         case .agentToAgent:
-            card(icon: "arrow.left.arrow.right", title: "↔ \(item.title)", body: item.body, tint: .teal)
+            bubble(
+                title: item.title,
+                body: item.body.isEmpty && !item.complete ? "…" : item.body,
+                isUser: false)
         }
     }
 
-    private func bubble(title: String, body: String, isUser: Bool, tags: [String] = []) -> some View {
+    private func bubble(title: String?, body: String, isUser: Bool, tags: [String] = []) -> some View {
         IntatisThreadBubbleRow(
             isTrailing: isUser,
+            fillsAvailableWidth: !isUser,
             rowWidth: layout.contentWidth,
             maxWidth: layout.messageMaxWidth,
             gutter: layout.messageGutter) {
@@ -280,45 +549,160 @@ struct CodeItemRow: View {
             }
     }
 
-    private func bubbleContent(title: String, body: String, isUser: Bool, tags: [String]) -> some View {
+    @ViewBuilder private func bubbleContent(title: String?,
+                                            body: String,
+                                            isUser: Bool,
+                                            tags: [String]) -> some View {
+        if isUser || item.isFailure {
+            bubbleBody(title: title, body: body, isUser: isUser, tags: tags)
+                .padding(.horizontal, 15)
+                .padding(.vertical, 11)
+                .intatisContentSurface(cornerRadius: 16)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(bubbleStroke(isUser: isUser), lineWidth: 1)
+                }
+        } else {
+            bubbleBody(title: title, body: body, isUser: false, tags: tags)
+                .padding(.vertical, 8)
+        }
+    }
+
+    private func bubbleBody(title: String?,
+                            body: String,
+                            isUser: Bool,
+                            tags: [String]) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Text(title.uppercased())
-                    .font(.caption2.bold())
-                    .foregroundStyle(isUser ? style.accent : style.tertiaryText)
-                ForEach(tags, id: \.self) { tag in
-                    tagBadge(tag)
+            if title != nil || !tags.isEmpty {
+                HStack(spacing: 6) {
+                    if let title {
+                        Text(displayTitle(title))
+                            .font(.caption2.bold())
+                            .foregroundStyle(
+                                isUser ? style.accent : style.tertiaryText)
+                    }
+                    if !isUser, let timestamp = item.timestamp {
+                        Text(IntatisMessageTimestampPresentation.string(for: timestamp))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(style.tertiaryText)
+                    }
+                    ForEach(tags, id: \.self) { tag in
+                        tagBadge(tag)
+                    }
                 }
             }
-            Text(body)
-                .font(.system(size: 15))
-                .foregroundStyle(style.primaryText)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            if isUser {
+                if !body.isEmpty {
+                    Text(body)
+                        .font(.system(size: 15))
+                        .foregroundStyle(style.primaryText)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !item.attachments.isEmpty {
+                    Label(
+                        item.attachments.count == 1
+                            ? IntatisLocalization.format(
+                                "%lld attachment",
+                                Int64(item.attachments.count))
+                            : IntatisLocalization.format(
+                                "%lld attachments",
+                                Int64(item.attachments.count)),
+                        systemImage: "paperclip")
+                        .font(.caption)
+                        .foregroundStyle(style.secondaryText)
+                }
+            } else {
+                IntatisMessageContentView(
+                    messageID: item.id,
+                    rawText: item.body,
+                    isComplete: item.complete,
+                    policy: .richText,
+                    style: style)
+            }
             if let advice = item.recoveryAdvice {
                 IntatisRecoveryAdviceView(
                     advice: advice,
                     tint: item.isFailure ? style.error : style.accent,
                     style: style)
             }
+            if isUser,
+               let submissionID = item.submissionID,
+               let submissionStatus = item.submissionStatus {
+                submissionStatusView(
+                    id: submissionID,
+                    status: submissionStatus,
+                    failure: item.submissionFailure)
+            }
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 11)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(isUser ? style.userBubble : style.assistantBubble)
-                .background(style.material, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(bubbleStroke(isUser: isUser), lineWidth: 1)
+    }
+
+    private func displayTitle(_ title: String) -> String {
+        title == "Agent" ? "Councis" : title
+    }
+
+    private func submissionStatusView(
+        id: SubmissionID,
+        status: SubmissionStatus,
+        failure: SubmissionFailure?
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: submissionStatusIcon(status))
+                .foregroundStyle(status == .failed || status == .cancelled
+                    ? style.error
+                    : style.secondaryText)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(submissionStatusLabel(status))
+                    .font(.caption2.bold())
+                    .foregroundStyle(status == .failed || status == .cancelled
+                        ? style.error
+                        : style.secondaryText)
+                if let failure {
+                    Text(failure.message)
+                        .font(.caption2)
+                        .foregroundStyle(style.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            Spacer(minLength: 4)
+            if failure?.retryable == true, let onRetrySubmission {
+                Button("Retry") { onRetrySubmission(id) }
+                    .buttonStyle(.borderless)
+                    .font(.caption.bold())
+                    .accessibilityIdentifier("submission.\(id.rawValue).retry")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("submission.\(id.rawValue).status")
+    }
+
+    private func submissionStatusLabel(_ status: SubmissionStatus) -> String {
+        switch status {
+        case .queued: return IntatisLocalization.string("Queued locally")
+        case .running: return IntatisLocalization.string("Running")
+        case .completed: return IntatisLocalization.string("Completed")
+        case .failed: return IntatisLocalization.string("Needs attention")
+        case .cancelled: return IntatisLocalization.string("Cancelled")
+        }
+    }
+
+    private func submissionStatusIcon(_ status: SubmissionStatus) -> String {
+        switch status {
+        case .queued: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        case .cancelled: return "xmark.circle.fill"
         }
     }
 
     private func bubbleStroke(isUser: Bool) -> Color {
-        if isUser { return style.accentSoft }
+        if isUser && item.isFailure { return style.error.opacity(0.48) }
+        if isUser { return style.accent.opacity(0.48) }
         if item.isFailure { return style.error.opacity(0.36) }
-        return style.stroke
+        return .clear
     }
 
     private func card(icon: String, title: String, body: String, tint: Color) -> some View {
@@ -331,7 +715,7 @@ struct CodeItemRow: View {
             }
         }
         .padding(11)
-        .background(style.cardSurface)
+        .intatisContentSurface(cornerRadius: 8)
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(tint.opacity(0.25)))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .frame(maxWidth: min(layout.contentMaxWidth, 740), alignment: .leading)
@@ -344,7 +728,7 @@ struct CodeItemRow: View {
             .foregroundStyle(style.accent)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(style.accentSoft, in: Capsule())
+            .overlay { Capsule().stroke(style.stroke, lineWidth: 1) }
     }
 }
 
@@ -358,88 +742,365 @@ private struct CodeEmptyThreadView: View {
                 .font(.system(size: 30, weight: .semibold))
                 .foregroundStyle(style.accent)
                 .frame(width: 76, height: 76)
-                .background(style.accentSoft, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             Spacer()
         }
         .multilineTextAlignment(.center)
     }
 }
 
+private struct PermissionReviewSurfaceModifier: ViewModifier {
+    let isEnabled: Bool
+    let cornerRadius: CGFloat
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if isEnabled {
+            content.intatisSubtleContentSurface(cornerRadius: cornerRadius)
+        } else {
+            content
+        }
+    }
+}
+
 public struct PermissionResolutionNoticeView: View {
     let notice: PermissionResolutionNotice
+    private let embedsSurface: Bool
 
-    public init(notice: PermissionResolutionNotice) {
+    public init(notice: PermissionResolutionNotice,
+                embedsSurface: Bool = true) {
         self.notice = notice
+        self.embedsSurface = embedsSurface
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: notice.decision == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: notice.decision == .allow
+                ? "checkmark.circle.fill"
+                : "xmark.circle.fill")
+                .font(.caption)
                 .foregroundStyle(notice.decision == .allow ? .green : .orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(notice.tool) \(notice.decision == .allow ? "approved" : "rejected")")
-                    .font(.caption.bold())
+                .padding(.top, 1)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption.weight(.medium))
                 Text(notice.reason)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
         }
-        .padding(10)
-        .background(Color.gray.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 620, alignment: .leading)
+        .modifier(PermissionReviewSurfaceModifier(
+            isEnabled: embedsSurface,
+            cornerRadius: 10))
+        .accessibilityIdentifier("permission.resolution")
+    }
+
+    private var title: String {
+        if notice.decision == .allow {
+            return IntatisLocalization.format("%@ approved", notice.tool)
+        }
+        if notice.action == .cancelTurn {
+            return IntatisLocalization.string("Turn cancelled")
+        }
+        switch notice.failureSource {
+        case .userDenied:
+            return IntatisLocalization.format("%@ call declined", notice.tool)
+        case .userCancelled, .turnCancelled:
+            return IntatisLocalization.string("Turn cancelled")
+        case .policyDenied:
+            return IntatisLocalization.format("%@ call denied by policy", notice.tool)
+        case .reviewerTimedOut:
+            return IntatisLocalization.string("Automatic review timed out")
+        case .reviewerFailed:
+            return IntatisLocalization.string("Automatic review failed")
+        case .sandboxDenied:
+            return IntatisLocalization.format("Sandbox denied %@", notice.tool)
+        case .runtimeFailed:
+            return IntatisLocalization.format("%@ runtime failed", notice.tool)
+        case nil:
+            return IntatisLocalization.format("%@ denied", notice.tool)
+        }
+    }
+}
+
+struct PermissionReviewDetail: Equatable, Identifiable {
+    let id: String
+    let systemImage: String
+    let text: String
+}
+
+enum PermissionReviewPresentation {
+    /// Builds a small, secret-safe review summary from the structured
+    /// authorization snapshot. Raw JSON arguments are deliberately excluded.
+    static func details(
+        for request: PermissionRequestPayload
+    ) -> [PermissionReviewDetail] {
+        if let preview = request.context?.authorization?.actionPreview {
+            let previewDetails: [PermissionReviewDetail] = preview.fields.keys
+                .sorted()
+                .compactMap { key -> PermissionReviewDetail? in
+                guard let value = preview.fields[key], !value.isEmpty else {
+                    return nil
+                }
+                return PermissionReviewDetail(
+                    id: "preview.\(key)",
+                    systemImage: "info.circle",
+                    text: "\(humanized(key)): \(value)")
+            }
+            if !previewDetails.isEmpty {
+                return previewDetails
+            }
+        }
+
+        let intent = request.context?.intent
+            ?? request.context?.authorization?.intent
+        var details: [PermissionReviewDetail] = []
+        if let action = intent?.action, !action.isEmpty {
+            details.append(PermissionReviewDetail(
+                id: "action",
+                systemImage: "bolt",
+                text: action))
+        }
+
+        let resources = intent?.resources.map(\.value).filter { !$0.isEmpty }
+            ?? []
+        if !resources.isEmpty {
+            details.append(PermissionReviewDetail(
+                id: "resources",
+                systemImage: "scope",
+                text: resources.joined(separator: ", ")))
+        } else if let paths = request.context?.touchedPaths,
+                  !paths.isEmpty {
+            details.append(PermissionReviewDetail(
+                id: "paths",
+                systemImage: "folder",
+                text: paths.joined(separator: ", ")))
+        }
+        return details
+    }
+
+    private static func humanized(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
     }
 }
 
 public struct PermissionCard: View {
     let permission: PendingPermission
-    let onResolve: (PermissionDecision) -> Void
+    let onResolve: (PermissionResponseAction) -> Void
+    private let embedsSurface: Bool
+    @State private var showsDetails = false
 
-    public init(permission: PendingPermission, onResolve: @escaping (PermissionDecision) -> Void) {
+    public init(permission: PendingPermission,
+                embedsSurface: Bool = true,
+                onResolve: @escaping (PermissionResponseAction) -> Void) {
         self.permission = permission
+        self.embedsSurface = embedsSurface
         self.onResolve = onResolve
     }
 
     private var request: PermissionRequestPayload { permission.request }
+    private var reviewDetails: [PermissionReviewDetail] {
+        PermissionReviewPresentation.details(for: request)
+    }
+    private var proposedDiff: String? { Self.diff(from: request.args) }
+    private var hasDetails: Bool {
+        !reviewDetails.isEmpty || proposedDiff != nil
+    }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Permission needed", systemImage: "lock.shield").font(.headline)
-                Spacer()
-                Text(request.risk.rawValue.uppercased()).font(.caption.bold()).foregroundStyle(riskColor)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "lock.shield")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(riskColor)
+                    .frame(width: 18)
+                    .padding(.top, 1)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Text(IntatisLocalization.string("Permission needed"))
+                            .font(.callout.weight(.semibold))
+                        Text(riskLabel)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(riskColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(riskColor.opacity(0.10), in: Capsule())
+                    }
+                    Text(request.tool)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    Text(request.reason)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
             }
-            Text("\(request.tool) — \(request.reason)").font(.callout)
-            Text(statusText)
-                .font(.caption)
-                .foregroundStyle(statusColor)
-            if let diff = Self.diff(from: request.args) {
-                ScrollView { Text(diff).font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 160)
-                    .padding(6)
-                    .background(Color.gray.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if hasDetails {
+                DisclosureGroup(
+                    isExpanded: $showsDetails,
+                    content: {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(reviewDetails) { detail in
+                                Label {
+                                    Text(detail.text)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                } icon: {
+                                    Image(systemName: detail.systemImage)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            if let proposedDiff {
+                                ScrollView {
+                                    Text(proposedDiff)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .frame(
+                                            maxWidth: .infinity,
+                                            alignment: .leading)
+                                }
+                                .frame(maxHeight: 150)
+                                .padding(8)
+                                .intatisSubtleContentSurface(cornerRadius: 7)
+                            }
+                        }
+                        .padding(.top, 6)
+                        .padding(.leading, 4)
+                    },
+                    label: {
+                        Text(IntatisLocalization.string("Details"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                )
+                .tint(.secondary)
+                .accessibilityIdentifier("permission.details")
             }
-            HStack {
-                Spacer()
-                if permission.state == .resolving {
-                    ProgressView().controlSize(.small)
-                    Text("Resolving…").font(.caption).foregroundStyle(.secondary)
-                } else if permission.state.isActionable {
-                    Button("Reject") { onResolve(.deny) }
-                    Button("Approve") { onResolve(.allow) }.keyboardShortcut(.defaultAction)
+
+            permissionFooter
+        }
+        .padding(13)
+        .frame(maxWidth: 720, alignment: .leading)
+        .modifier(PermissionReviewSurfaceModifier(
+            isEnabled: embedsSurface,
+            cornerRadius: 14))
+        .onChange(of: request.requestId) { _, _ in
+            showsDetails = false
+        }
+    }
+
+    private var permissionFooter: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                permissionStatus
+                Spacer(minLength: 8)
+                if permission.state.isActionable {
+                    horizontalPermissionActions
+                }
+            }
+            VStack(alignment: .leading, spacing: 9) {
+                permissionStatus
+                if permission.state.isActionable {
+                    compactPermissionActions
                 }
             }
         }
-        .padding(12)
-        .background(Color.yellow.opacity(0.10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.yellow.opacity(0.4)))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .padding(.horizontal)
+        .controlSize(.small)
+    }
+
+    @ViewBuilder private var permissionStatus: some View {
+        if permission.state == .resolving {
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(request.effectiveApprovalMode == .automaticReviewer
+                     ? IntatisLocalization.string("Automatic review in progress…")
+                     : IntatisLocalization.string("Resolving…"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var horizontalPermissionActions: some View {
+        HStack(spacing: 8) {
+            cancelTurnButton
+            declineCallButton
+            approveCallButton
+            if permitsRememberedApproval {
+                rememberApprovalButton
+            }
+        }
+    }
+
+    private var compactPermissionActions: some View {
+        VStack(alignment: .trailing, spacing: 7) {
+            approveCallButton
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            if permitsRememberedApproval {
+                rememberApprovalButton
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            HStack(spacing: 8) {
+                cancelTurnButton
+                Spacer(minLength: 8)
+                declineCallButton
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private var cancelTurnButton: some View {
+        Button("Cancel Turn") { onResolve(.cancelTurn) }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("permission.cancel-turn")
+    }
+
+    private var declineCallButton: some View {
+        Button("Decline Call") { onResolve(.decline) }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("permission.decline-call")
+    }
+
+    private var approveCallButton: some View {
+        Button(
+            request.context?.authorization?.mcp == nil
+                ? "Approve Call"
+                : "Allow Call Once"
+        ) {
+            onResolve(.approve)
+        }
+        .intatisGlassButton(prominent: true)
+        .keyboardShortcut(.defaultAction)
+        .accessibilityIdentifier("permission.approve-call")
+    }
+
+    private var rememberApprovalButton: some View {
+        Button("Remember Exact Tool Approval") {
+            onResolve(.approveAndRemember)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("permission.approve-and-remember")
+    }
+
+    private var permitsRememberedApproval: Bool {
+        request.context?.authorization?.permitsMCPRememberedApproval == true
     }
 
     private var riskColor: Color {
@@ -450,31 +1111,33 @@ public struct PermissionCard: View {
         }
     }
 
-    private var statusText: String {
-        switch permission.state {
-        case .livePending:
-            return "Waiting for your decision."
-        case .resolving:
-            return "Applying your decision."
-        case .approved:
-            return "Approved."
-        case .rejected:
-            return "Rejected."
-        case .expired:
-            return "This approval channel expired. Rerun the task to continue."
-        case .needsRerun:
-            return "This request was restored from history. Rerun the task to continue."
+    private var riskLabel: String {
+        switch request.risk {
+        case .low: return IntatisLocalization.string("LOW")
+        case .medium: return IntatisLocalization.string("MEDIUM")
+        case .high: return IntatisLocalization.string("HIGH")
         }
     }
 
-    private var statusColor: Color {
+    private var statusText: String {
         switch permission.state {
-        case .livePending, .resolving:
-            return .secondary
+        case .livePending:
+            return IntatisLocalization.string("Waiting for your decision.")
+        case .resolving:
+            return request.effectiveApprovalMode == .automaticReviewer
+                ? IntatisLocalization.string(
+                    "The reserved permission reviewer is evaluating this call.")
+                : IntatisLocalization.string("Applying your decision.")
         case .approved:
-            return .green
-        case .rejected, .expired, .needsRerun:
-            return .orange
+            return IntatisLocalization.string("Approved.")
+        case .rejected:
+            return IntatisLocalization.string("Rejected.")
+        case .expired:
+            return IntatisLocalization.string(
+                "This approval channel expired. Rerun the task to continue.")
+        case .needsRerun:
+            return IntatisLocalization.string(
+                "This request was restored from history. Rerun the task to continue.")
         }
     }
 
@@ -489,7 +1152,6 @@ private struct CodeInspectorView: View {
     let agentState: String
     let itemCount: Int
     let pending: PendingPermission?
-    let latestTurnStats: TurnStatsSnapshot?
     let failedItems: [CodeItem]
     let style: IntatisThreadStyle
 
@@ -497,24 +1159,32 @@ private struct CodeInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 inspectorHeader
-                inspectorSection("Plan") {
-                    inspectorRow("Current task", value: agentState)
-                    inspectorRow("Thread events", value: "\(itemCount)")
+                inspectorSection(IntatisLocalization.string("Plan")) {
+                    inspectorRow(
+                        IntatisLocalization.string("Current task"),
+                        value: intatisLocalizedAgentState(agentState))
+                    inspectorRow(IntatisLocalization.string("Thread events"), value: "\(itemCount)")
                     if let pending {
-                        inspectorRow("Permission", value: pending.request.tool)
+                        inspectorRow(
+                            IntatisLocalization.string("Permission"),
+                            value: pending.request.tool)
                     } else {
-                        inspectorRow("Permission", value: "none pending")
+                        inspectorRow(
+                            IntatisLocalization.string("Permission"),
+                            value: IntatisLocalization.string("none pending"))
                     }
                 }
-                inspectorSection("Workspace") {
-                    inspectorRow("Root", value: workspaceName)
-                    inspectorRow("Git", value: "status only")
+                inspectorSection(IntatisLocalization.string("Workspace")) {
+                    inspectorRow(IntatisLocalization.string("Root"), value: workspaceName)
+                    inspectorRow(
+                        IntatisLocalization.string("Git"),
+                        value: IntatisLocalization.string("status only"))
                     Text("Commit, branch, PR, CI, and review workflows are deferred.")
                         .font(.caption2)
                         .foregroundStyle(style.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                inspectorSection("Recent Failures") {
+                inspectorSection(IntatisLocalization.string("Recent Failures")) {
                     if failedItems.isEmpty {
                         Text("No failed tool or runtime events in the current projection.")
                             .font(.caption)
@@ -536,15 +1206,9 @@ private struct CodeInspectorView: View {
                         }
                     }
                 }
-                if let latestTurnStats {
-                    inspectorSection("Last Turn") {
-                        IntatisTurnStatsSummaryView(stats: latestTurnStats, style: style)
-                    }
-                }
             }
             .padding(16)
         }
-        .background(style.cardSurface.opacity(0.38))
     }
 
     private var inspectorHeader: some View {
@@ -568,11 +1232,7 @@ private struct CodeInspectorView: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(style.cardSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(style.cardStroke, lineWidth: 1)
-        }
+        .intatisContentSurface(cornerRadius: 8)
     }
 
     private func inspectorRow(_ title: String, value: String) -> some View {

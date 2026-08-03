@@ -131,7 +131,18 @@ public struct ContextProjector: Sendable {
                         taskContract: TaskContract?,
                         events: [Envelope],
                         allowedToolNames: [String],
-                        workspaceRoot: URL?) -> ContextBundle {
+                        workspaceRoot: URL?,
+                        projectsCompletedRootAnswersIntoConversation: Bool = false) -> ContextBundle {
+        let submissionBoundary = taskContract.flatMap {
+            Self.submissionContextBoundary(for: $0, events: events)
+        }
+        // Task-group state is metadata-only and may use the complete verified
+        // event snapshot. Content-bearing history is stricter: once a task is
+        // bound to a durable submission, only output proven to belong to an
+        // earlier accepted submission may enter the model request.
+        let scopedContentEvents = submissionBoundary.map {
+            $0.scopedContentEvents(from: events)
+        } ?? events
         let globalBrief = Self.globalBrief(
             for: agentID,
             taskContract: taskContract,
@@ -141,7 +152,9 @@ public struct ContextProjector: Sendable {
             Self.lineage(for: agentID, taskContract: taskContract),
             budget: budget)
         let relevantTaskIDs = taskContract.map { Self.taskGroupTaskIDs(for: $0, events: events) } ?? []
-        let taskAnchor = taskContract.flatMap { Self.firstTaskEventSequence(for: $0.id, events: events) }
+        let taskAnchor = submissionBoundary == nil
+            ? taskContract.flatMap { Self.firstTaskEventSequence(for: $0.id, events: events) }
+            : nil
         let taskGroupEvents = Self.taskGroupEvents(
             taskContract: taskContract,
             events: events,
@@ -152,17 +165,41 @@ public struct ContextProjector: Sendable {
             taskContract: taskContract,
             relevantTaskIDs: relevantTaskIDs,
             taskAnchor: taskAnchor,
-            events: events,
+            events: scopedContentEvents,
             duplicateTexts: duplicateTexts,
             budget: budget)
-        let agentLocalEvents = Self.agentLocalEvents(
+        let toolTaskByCallID = submissionBoundary?.taskByToolCallID ?? [:]
+        var agentLocalEvents = Self.agentLocalEvents(
             for: agentID,
             taskContract: taskContract,
             relevantTaskIDs: relevantTaskIDs,
             taskAnchor: taskAnchor,
-            events: events,
+            events: scopedContentEvents,
+            toolAgentByCallID: Self.toolAgentByCallID(from: events),
+            toolTaskByCallID: toolTaskByCallID,
             duplicateTexts: duplicateTexts,
             budget: budget)
+        if projectsCompletedRootAnswersIntoConversation,
+           let taskContract,
+           taskContract.kind == .root,
+           taskContract.issuer == nil,
+           taskContract.submissionID != nil {
+            // AgentLoop reconstructs completed root-turn answers as real
+            // assistant-role thread history. Direct model-history tool pairs
+            // likewise supersede their bounded audit previews. Keep legacy
+            // tool facts until a direct model record exists; they cannot be
+            // safely promoted into assistant/tool roles, but remain useful
+            // as explicitly untrusted context data.
+            let redundantToolAuditSequences =
+                Self.modelHistoryBackedToolAuditSequences(
+                    agentID: agentID,
+                    events: events,
+                    toolTaskByCallID: toolTaskByCallID)
+            agentLocalEvents.removeAll {
+                $0.kind == "agent_message_completed"
+                    || redundantToolAuditSequences.contains($0.seq)
+            }
+        }
         return ContextBundle(
             globalBrief: globalBrief,
             safetyPolicy: "Follow workspace confinement, permission policy, and the current task constraints.",
@@ -197,6 +234,29 @@ public struct ContextProjector: Sendable {
 
         let contracts = taskContractsByID(from: events)
         let rootContract = rootContract(for: taskContract, contracts: contracts)
+        if let submissionID = rootContract.submissionID {
+            let exactPayload = events.compactMap { envelope -> UserMessagePayload? in
+                guard case .userMessage(let payload) = envelope.event,
+                      payload.submissionID == submissionID else { return nil }
+                return payload
+            }.first
+            let fallback = rootContract.objective
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let selected: String
+            if let exactPayload,
+               let exactObjective = validUserObjective(exactPayload) {
+                selected = exactObjective
+            } else if let count = exactPayload?.attachments?.count, count > 0 {
+                selected = "The user submitted \(count) attachment\(count == 1 ? "" : "s") for this task."
+            } else {
+                // A correlated submission must never fall back to a different
+                // user turn merely because its text is empty or unavailable.
+                selected = fallback.isEmpty
+                    ? "The correlated user submission has no textual objective."
+                    : fallback
+            }
+            return truncate(selected, maxCharacters: maxCharacters)
+        }
         let anchorSequence = firstTaskEventSequence(for: rootContract.id, events: events)
             ?? firstTaskEventSequence(for: taskContract.id, events: events)
             ?? Int.max
@@ -461,10 +521,18 @@ public struct ContextProjector: Sendable {
                                        events: [Envelope],
                                        duplicateTexts: Set<String>,
                                        budget: ContextProjectionBudget) -> [ContextEventSummary] {
-        let consumedAt = events.reduce(into: [MessageID: Int]()) { result, envelope in
-            guard case .agentMessageConsumed(let payload) = envelope.event,
-                  payload.agent == agentID else { return }
-            result[payload.messageID] = max(result[payload.messageID] ?? Int.min, envelope.seq)
+        let settledAt = events.reduce(into: [MessageID: Int]()) { result, envelope in
+            let settlement: (MessageID, AgentID)?
+            switch envelope.event {
+            case .agentMessageConsumed(let payload):
+                settlement = (payload.messageID, payload.agent)
+            case .agentMessageDiscarded(let payload):
+                settlement = (payload.messageID, payload.agent)
+            default:
+                settlement = nil
+            }
+            guard let settlement, settlement.1 == agentID else { return }
+            result[settlement.0] = max(result[settlement.0] ?? Int.min, envelope.seq)
         }
         let candidates = events.compactMap { envelope -> ContextEventSummary? in
             switch envelope.event {
@@ -483,7 +551,7 @@ public struct ContextProjector: Sendable {
                     recipient: payload.to,
                     content: payload.content)
             case .agentMessage(let payload) where payload.to == agentID:
-                guard consumedAt[payload.messageId].map({ $0 > envelope.seq }) != true else { return nil }
+                guard settledAt[payload.messageId].map({ $0 > envelope.seq }) != true else { return nil }
                 guard isRelevant(payload.taskID, taskContract: taskContract, relevantTaskIDs: relevantTaskIDs) else {
                     return nil
                 }
@@ -496,7 +564,7 @@ public struct ContextProjector: Sendable {
                     taskID: payload.taskID,
                     content: payload.content)
             case .informationRequested(let payload) where payload.to == agentID:
-                guard consumedAt[payload.requestID].map({ $0 > envelope.seq }) != true else { return nil }
+                guard settledAt[payload.requestID].map({ $0 > envelope.seq }) != true else { return nil }
                 guard isRelevant(payload.taskID, taskContract: taskContract, relevantTaskIDs: relevantTaskIDs) else {
                     return nil
                 }
@@ -509,7 +577,7 @@ public struct ContextProjector: Sendable {
                     taskID: payload.taskID,
                     content: payload.question)
             case .informationReplied(let payload) where payload.to == agentID:
-                guard consumedAt[payload.replyID].map({ $0 > envelope.seq }) != true else { return nil }
+                guard settledAt[payload.replyID].map({ $0 > envelope.seq }) != true else { return nil }
                 guard isRelevant(payload.taskID, taskContract: taskContract, relevantTaskIDs: relevantTaskIDs) else {
                     return nil
                 }
@@ -538,6 +606,8 @@ public struct ContextProjector: Sendable {
                                          relevantTaskIDs: Set<TaskID>,
                                          taskAnchor: Int?,
                                          events: [Envelope],
+                                         toolAgentByCallID: [String: AgentID],
+                                         toolTaskByCallID: [String: TaskID],
                                          duplicateTexts: Set<String>,
                                          budget: ContextProjectionBudget) -> [ContextEventSummary] {
         let candidates = events.compactMap { envelope -> ContextEventSummary? in
@@ -653,7 +723,22 @@ public struct ContextProjector: Sendable {
                     seq: envelope.seq,
                     kind: "tool_call",
                     agent: payload.agent,
+                    taskID: toolTaskByCallID[payload.toolCallId],
                     content: "\(payload.name): \(payload.args)")
+            case .toolResult(let payload) where toolAgentByCallID[payload.toolCallId] == agentID:
+                guard isWithinTaskWindow(
+                    sequence: envelope.seq,
+                    taskID: toolTaskByCallID[payload.toolCallId],
+                    taskContract: taskContract,
+                    taskAnchor: taskAnchor) else {
+                    return nil
+                }
+                return ContextEventSummary(
+                    seq: envelope.seq,
+                    kind: "tool_result",
+                    agent: agentID,
+                    taskID: toolTaskByCallID[payload.toolCallId],
+                    content: payload.observation)
             case .taskAssigned(let payload) where payload.contract.assignee == agentID:
                 guard isRelevant(payload.contract.id, taskContract: taskContract, relevantTaskIDs: relevantTaskIDs) else {
                     return nil
@@ -714,6 +799,333 @@ public struct ContextProjector: Sendable {
             maxCount: budget.maxAgentLocalEvents,
             maxCharacters: budget.maxAgentLocalCharacters,
             maxEventCharacters: budget.maxEventCharacters)
+    }
+
+    /// Submission-aware content boundary for Cowork prompts. Event append
+    /// order is not conversation order: submission B may be accepted while A
+    /// is still running, and an older submission may finish after both. The
+    /// accepted user-message sequence is therefore the only ordering key.
+    private struct SubmissionContextBoundary {
+        let currentSubmissionID: SubmissionID
+        let currentAcceptedSequence: Int?
+        let acceptedSequenceBySubmission: [SubmissionID: Int]
+        let submissionByTaskID: [TaskID: SubmissionID]
+        let submissionByToolCallID: [String: SubmissionID]
+        let taskByToolCallID: [String: TaskID]
+
+        func scopedContentEvents(from events: [Envelope]) -> [Envelope] {
+            events.filter(allowsContentEvent)
+        }
+
+        private func allowsContentEvent(_ envelope: Envelope) -> Bool {
+            switch envelope.event {
+            case .userMessage(let payload):
+                return allows(submissionID: payload.submissionID)
+            case .messageDelta(let payload):
+                return allows(submissionID: payload.submissionID)
+            case .messageCompleted(let payload):
+                return allows(submissionID: payload.submissionID)
+            case .error(let payload):
+                return allows(submissionID: payload.submissionID)
+            case .toolCall(let payload):
+                return allows(toolCallID: payload.toolCallId)
+            case .toolResult(let payload):
+                return allows(toolCallID: payload.toolCallId)
+            case .agentToAgentMessage:
+                // This legacy payload has no task/submission identity. Once a
+                // durable submission boundary exists, guessing by raw seq can
+                // replay a current attempt or a logically later queued turn.
+                return false
+            case .agentMessage(let payload):
+                return allows(taskID: payload.taskID)
+            case .informationRequested(let payload):
+                return allows(taskID: payload.taskID)
+            case .informationReplied(let payload):
+                return allows(taskID: payload.taskID)
+            case .delegationRequested(let payload):
+                return allows(taskID: payload.parentTaskID)
+            case .taskCreated(let payload):
+                return allows(taskID: payload.contract.id)
+            case .taskAssigned(let payload):
+                return allows(taskID: payload.contract.id)
+            case .taskQueued(let payload):
+                return allows(taskID: payload.contract.id)
+            case .taskDelegated(let payload):
+                return allows(taskID: payload.contract.id)
+            case .delegationApproved(let payload):
+                return allows(taskID: payload.contract.id)
+            case .taskStarted(let payload):
+                return allows(taskID: payload.taskID)
+            case .taskCompleted(let payload):
+                return allows(taskID: payload.taskID)
+            case .taskFailed(let payload):
+                return allows(taskID: payload.taskID)
+            case .taskCancelled(let payload):
+                return allows(taskID: payload.taskID)
+            case .taskRejected(let payload):
+                return allows(taskID: payload.contract?.id)
+            default:
+                // Settlement and authorization records are not projected as
+                // model-visible content. Keep them so pending-message state
+                // remains correct while their content records are filtered.
+                return true
+            }
+        }
+
+        private func allows(submissionID: SubmissionID?) -> Bool {
+            guard let submissionID,
+                  let currentAcceptedSequence,
+                  let acceptedSequence = acceptedSequenceBySubmission[submissionID] else {
+                return false
+            }
+            return acceptedSequence < currentAcceptedSequence
+        }
+
+        private func allows(taskID: TaskID?) -> Bool {
+            guard let taskID else { return false }
+            return allows(submissionID: submissionByTaskID[taskID])
+        }
+
+        private func allows(toolCallID: String) -> Bool {
+            allows(submissionID: submissionByToolCallID[toolCallID])
+        }
+    }
+
+    private static func submissionContextBoundary(
+        for current: TaskContract,
+        events: [Envelope]
+    ) -> SubmissionContextBoundary? {
+        var acceptedSequenceBySubmission: [SubmissionID: Int] = [:]
+        var submissionCandidatesByTaskID: [TaskID: Set<SubmissionID>] = [:]
+        var parentCandidatesByTaskID: [TaskID: Set<TaskID>] = [:]
+        var taskCandidatesByToolCallID: [String: Set<TaskID>] = [:]
+
+        func record(contract: TaskContract) {
+            if let submissionID = contract.submissionID {
+                submissionCandidatesByTaskID[contract.id, default: []].insert(submissionID)
+            }
+            if let parentTaskID = contract.parentTaskID {
+                parentCandidatesByTaskID[contract.id, default: []].insert(parentTaskID)
+            }
+        }
+
+        func recordLineage(taskID: TaskID?, parentTaskID: TaskID?, rootTaskID: TaskID?) {
+            guard let taskID else { return }
+            if let parentTaskID, parentTaskID != taskID {
+                parentCandidatesByTaskID[taskID, default: []].insert(parentTaskID)
+            } else if let rootTaskID, rootTaskID != taskID {
+                parentCandidatesByTaskID[taskID, default: []].insert(rootTaskID)
+            }
+        }
+
+        func recordTool(taskID: TaskID?, toolCallID: String?) {
+            guard let taskID, let toolCallID, !toolCallID.isEmpty else { return }
+            taskCandidatesByToolCallID[toolCallID, default: []].insert(taskID)
+        }
+
+        func record(authorization: ResolvedToolAuthorization?) {
+            guard let authorization else { return }
+            recordTool(taskID: authorization.taskID, toolCallID: authorization.toolCallID)
+            recordLineage(
+                taskID: authorization.taskID,
+                parentTaskID: authorization.parentTaskID,
+                rootTaskID: authorization.rootTaskID)
+        }
+
+        record(contract: current)
+        for envelope in events {
+            if case .userMessage(let payload) = envelope.event,
+               let submissionID = payload.submissionID {
+                acceptedSequenceBySubmission[submissionID] = min(
+                    acceptedSequenceBySubmission[submissionID] ?? Int.max,
+                    envelope.seq)
+            }
+            if let contract = taskContract(from: envelope.event) {
+                record(contract: contract)
+            }
+
+            switch envelope.event {
+            case .toolExecutionPrepared(let payload):
+                recordTool(taskID: payload.taskID, toolCallID: payload.toolCallID)
+                recordTool(taskID: payload.authorization?.taskID, toolCallID: payload.toolCallID)
+                record(authorization: payload.authorization)
+                recordLineage(
+                    taskID: payload.taskID,
+                    parentTaskID: payload.authorization?.parentTaskID,
+                    rootTaskID: payload.authorization?.rootTaskID)
+            case .toolExecutionSettled(let payload):
+                recordTool(taskID: payload.taskID, toolCallID: payload.toolCallID)
+                recordTool(taskID: payload.authorization?.taskID, toolCallID: payload.toolCallID)
+                record(authorization: payload.authorization)
+                recordLineage(
+                    taskID: payload.taskID,
+                    parentTaskID: payload.authorization?.parentTaskID,
+                    rootTaskID: payload.authorization?.rootTaskID)
+            case .permissionRequest(let payload):
+                if let context = payload.context {
+                    if let contract = context.taskContract { record(contract: contract) }
+                    recordTool(taskID: context.taskID, toolCallID: context.toolCallID)
+                    recordTool(taskID: context.taskContract?.id, toolCallID: context.toolCallID)
+                    recordTool(taskID: context.authorization?.taskID, toolCallID: context.toolCallID)
+                    record(authorization: context.authorization)
+                    recordLineage(
+                        taskID: context.taskID,
+                        parentTaskID: context.parentTaskID,
+                        rootTaskID: context.rootTaskID)
+                }
+            case .permissionResolved(let payload):
+                record(authorization: payload.authorization)
+            default:
+                break
+            }
+        }
+
+        // Propagate submission identity through task parentage. Multiple
+        // conflicting candidates deliberately produce no mapping.
+        var changed = true
+        while changed {
+            changed = false
+            for (taskID, parentIDs) in parentCandidatesByTaskID {
+                var candidates = submissionCandidatesByTaskID[taskID] ?? []
+                for parentID in parentIDs {
+                    candidates.formUnion(submissionCandidatesByTaskID[parentID] ?? [])
+                }
+                if candidates != submissionCandidatesByTaskID[taskID] ?? [] {
+                    submissionCandidatesByTaskID[taskID] = candidates
+                    changed = true
+                }
+            }
+        }
+
+        let submissionByTaskID = submissionCandidatesByTaskID.compactMapValues { candidates in
+            candidates.count == 1 ? candidates.first : nil
+        }
+        guard let currentSubmissionID = current.submissionID ?? submissionByTaskID[current.id] else {
+            return nil
+        }
+
+        var submissionByToolCallID: [String: SubmissionID] = [:]
+        var taskByToolCallID: [String: TaskID] = [:]
+        for (toolCallID, taskIDs) in taskCandidatesByToolCallID {
+            let submissions = taskIDs.compactMap { submissionByTaskID[$0] }
+            guard submissions.count == taskIDs.count,
+                  Set(submissions).count == 1,
+                  let submissionID = submissions.first else {
+                continue
+            }
+            submissionByToolCallID[toolCallID] = submissionID
+            if taskIDs.count == 1 {
+                taskByToolCallID[toolCallID] = taskIDs.first
+            }
+        }
+
+        return SubmissionContextBoundary(
+            currentSubmissionID: currentSubmissionID,
+            currentAcceptedSequence: acceptedSequenceBySubmission[currentSubmissionID],
+            acceptedSequenceBySubmission: acceptedSequenceBySubmission,
+            submissionByTaskID: submissionByTaskID,
+            submissionByToolCallID: submissionByToolCallID,
+            taskByToolCallID: taskByToolCallID)
+    }
+
+    private static func toolAgentByCallID(from events: [Envelope]) -> [String: AgentID] {
+        var candidatesByCallID: [String: Set<AgentID>] = [:]
+        func record(_ toolCallID: String?, _ agent: AgentID?) {
+            guard let toolCallID, !toolCallID.isEmpty, let agent else { return }
+            candidatesByCallID[toolCallID, default: []].insert(agent)
+        }
+        func record(_ authorization: ResolvedToolAuthorization?) {
+            guard let authorization else { return }
+            record(authorization.toolCallID, authorization.agent)
+        }
+
+        for envelope in events {
+            switch envelope.event {
+            case .toolCall(let payload):
+                record(payload.toolCallId, payload.agent)
+            case .toolExecutionPrepared(let payload):
+                record(payload.toolCallID, payload.agent)
+                record(payload.toolCallID, payload.authorization?.agent)
+                record(payload.authorization)
+            case .toolExecutionSettled(let payload):
+                record(payload.toolCallID, payload.agent)
+                record(payload.toolCallID, payload.authorization?.agent)
+                record(payload.authorization)
+            case .permissionRequest(let payload):
+                record(payload.context?.toolCallID, payload.agent)
+                record(payload.context?.toolCallID, payload.context?.authorization?.agent)
+                record(payload.context?.authorization)
+            case .permissionResolved(let payload):
+                record(payload.authorization)
+            default:
+                break
+            }
+        }
+        return candidatesByCallID.compactMapValues { candidates in
+            candidates.count == 1 ? candidates.first : nil
+        }
+    }
+
+    private struct ModelHistoryToolKey: Hashable {
+        var taskID: TaskID
+        var callID: String
+    }
+
+    private static func modelHistoryBackedToolAuditSequences(
+        agentID: AgentID,
+        events: [Envelope],
+        toolTaskByCallID: [String: TaskID]
+    ) -> Set<Int> {
+        var directCallKeys = Set<ModelHistoryToolKey>()
+        var directOutputKeys = Set<ModelHistoryToolKey>()
+        for envelope in events {
+            guard case .modelHistoryItem(let payload) = envelope.event,
+                  payload.schemaVersion == ModelHistoryItemPayload.currentSchemaVersion,
+                  payload.agent == agentID,
+                  let taskID = payload.taskID else {
+                continue
+            }
+            switch payload.kind {
+            case .functionCallBatch:
+                for call in payload.functionCalls ?? [] {
+                    directCallKeys.insert(ModelHistoryToolKey(
+                        taskID: taskID,
+                        callID: call.callID))
+                }
+            case .functionCallOutput, .toolSearchOutput:
+                if let callID = payload.callID {
+                    directOutputKeys.insert(ModelHistoryToolKey(
+                        taskID: taskID,
+                        callID: callID))
+                }
+            case .message, .reasoning:
+                break
+            }
+        }
+
+        var result = Set<Int>()
+        for envelope in events {
+            let callID: String
+            let matchingKeys: Set<ModelHistoryToolKey>
+            switch envelope.event {
+            case .toolCall(let payload) where payload.agent == agentID:
+                callID = payload.toolCallId
+                matchingKeys = directCallKeys
+            case .toolResult(let payload):
+                callID = payload.toolCallId
+                matchingKeys = directOutputKeys
+            default:
+                continue
+            }
+            guard let taskID = toolTaskByCallID[callID],
+                  matchingKeys.contains(ModelHistoryToolKey(
+                      taskID: taskID,
+                      callID: callID)) else {
+                continue
+            }
+            result.insert(envelope.seq)
+        }
+        return result
     }
 
     private static func validUserObjective(_ payload: UserMessagePayload) -> String? {

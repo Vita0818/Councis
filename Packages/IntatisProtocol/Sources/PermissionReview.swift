@@ -27,13 +27,16 @@ public struct PermissionReviewGateSnapshot: Codable, Equatable, Sendable {
     public var decision: PermissionReviewGateDecision
     public var risk: RiskLevel
     public var reason: String
+    public var policyVersion: String?
 
     public init(decision: PermissionReviewGateDecision,
                 risk: RiskLevel,
-                reason: String) {
+                reason: String,
+                policyVersion: String? = nil) {
         self.decision = decision
         self.risk = risk
         self.reason = reason
+        self.policyVersion = policyVersion
     }
 }
 
@@ -67,6 +70,7 @@ public struct PermissionReviewCausalContext: Codable, Equatable, Sendable {
 /// Every field is additive/optional so old JSONL and non-Cowork responders keep
 /// decoding and constructing PermissionRequestPayload exactly as before.
 public struct PermissionRequestContext: Codable, Equatable, Sendable {
+    public var turnID: TurnID?
     public var taskID: TaskID?
     public var rootTaskID: TaskID?
     public var parentTaskID: TaskID?
@@ -76,18 +80,23 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
     public var touchedPaths: [String]
     public var risksNetwork: Bool?
     public var sideEffect: SideEffect?
+    public var intent: PermissionIntent?
     public var gate: PermissionReviewGateSnapshot?
     public var capabilityLease: CapabilityLease?
     public var workspaceLease: WorkspaceLease?
     public var taskContract: TaskContract?
     public var causalContext: PermissionReviewCausalContext?
+    /// Host-resolved concrete tool/capability facts. Reviewers consume this
+    /// snapshot instead of inferring tool membership from capability names.
+    public var authorization: ResolvedToolAuthorization?
     /// Reserved for crash-reconciliation/idempotency integration.
     public var executionID: String?
     /// Forward-compatible policy label such as `safe_replay` or
     /// `requires_reconciliation`; interpretation remains in AgentKernel.
     public var replayPolicy: String?
 
-    public init(taskID: TaskID? = nil,
+    public init(turnID: TurnID? = nil,
+                taskID: TaskID? = nil,
                 rootTaskID: TaskID? = nil,
                 parentTaskID: TaskID? = nil,
                 attempt: Int? = nil,
@@ -96,13 +105,16 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
                 touchedPaths: [String] = [],
                 risksNetwork: Bool? = nil,
                 sideEffect: SideEffect? = nil,
+                intent: PermissionIntent? = nil,
                 gate: PermissionReviewGateSnapshot? = nil,
                 capabilityLease: CapabilityLease? = nil,
                 workspaceLease: WorkspaceLease? = nil,
                 taskContract: TaskContract? = nil,
                 causalContext: PermissionReviewCausalContext? = nil,
+                authorization: ResolvedToolAuthorization? = nil,
                 executionID: String? = nil,
                 replayPolicy: String? = nil) {
+        self.turnID = turnID
         self.taskID = taskID
         self.rootTaskID = rootTaskID
         self.parentTaskID = parentTaskID
@@ -112,23 +124,26 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         self.touchedPaths = touchedPaths
         self.risksNetwork = risksNetwork
         self.sideEffect = sideEffect
+        self.intent = intent
         self.gate = gate
         self.capabilityLease = capabilityLease
         self.workspaceLease = workspaceLease
         self.taskContract = taskContract
         self.causalContext = causalContext
+        self.authorization = authorization
         self.executionID = executionID
         self.replayPolicy = replayPolicy
     }
 
     private enum CodingKeys: String, CodingKey {
-        case taskID, rootTaskID, parentTaskID, attempt, toolCallID, normalizedArgs
-        case touchedPaths, risksNetwork, sideEffect, gate, capabilityLease
-        case workspaceLease, taskContract, causalContext, executionID, replayPolicy
+        case turnID, taskID, rootTaskID, parentTaskID, attempt, toolCallID, normalizedArgs
+        case touchedPaths, risksNetwork, sideEffect, intent, gate, capabilityLease
+        case workspaceLease, taskContract, causalContext, authorization, executionID, replayPolicy
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        turnID = try container.decodeIfPresent(TurnID.self, forKey: .turnID)
         taskID = try container.decodeIfPresent(TaskID.self, forKey: .taskID)
         rootTaskID = try container.decodeIfPresent(TaskID.self, forKey: .rootTaskID)
         parentTaskID = try container.decodeIfPresent(TaskID.self, forKey: .parentTaskID)
@@ -138,17 +153,20 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         touchedPaths = try container.decodeIfPresent([String].self, forKey: .touchedPaths) ?? []
         risksNetwork = try container.decodeIfPresent(Bool.self, forKey: .risksNetwork)
         sideEffect = try container.decodeIfPresent(SideEffect.self, forKey: .sideEffect)
+        intent = try container.decodeIfPresent(PermissionIntent.self, forKey: .intent)
         gate = try container.decodeIfPresent(PermissionReviewGateSnapshot.self, forKey: .gate)
         capabilityLease = try container.decodeIfPresent(CapabilityLease.self, forKey: .capabilityLease)
         workspaceLease = try container.decodeIfPresent(WorkspaceLease.self, forKey: .workspaceLease)
         taskContract = try container.decodeIfPresent(TaskContract.self, forKey: .taskContract)
         causalContext = try container.decodeIfPresent(PermissionReviewCausalContext.self, forKey: .causalContext)
+        authorization = try container.decodeIfPresent(ResolvedToolAuthorization.self, forKey: .authorization)
         executionID = try container.decodeIfPresent(String.self, forKey: .executionID)
         replayPolicy = try container.decodeIfPresent(String.self, forKey: .replayPolicy)
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(turnID, forKey: .turnID)
         try container.encodeIfPresent(taskID, forKey: .taskID)
         try container.encodeIfPresent(rootTaskID, forKey: .rootTaskID)
         try container.encodeIfPresent(parentTaskID, forKey: .parentTaskID)
@@ -158,11 +176,13 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         if !touchedPaths.isEmpty { try container.encode(touchedPaths, forKey: .touchedPaths) }
         try container.encodeIfPresent(risksNetwork, forKey: .risksNetwork)
         try container.encodeIfPresent(sideEffect, forKey: .sideEffect)
+        try container.encodeIfPresent(intent, forKey: .intent)
         try container.encodeIfPresent(gate, forKey: .gate)
         try container.encodeIfPresent(capabilityLease, forKey: .capabilityLease)
         try container.encodeIfPresent(workspaceLease, forKey: .workspaceLease)
         try container.encodeIfPresent(taskContract, forKey: .taskContract)
         try container.encodeIfPresent(causalContext, forKey: .causalContext)
+        try container.encodeIfPresent(authorization, forKey: .authorization)
         try container.encodeIfPresent(executionID, forKey: .executionID)
         try container.encodeIfPresent(replayPolicy, forKey: .replayPolicy)
     }
@@ -175,6 +195,7 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
     public var id: PermissionReviewTaskID
     public var sessionID: SessionID
     public var requestID: RequestID
+    public var turnID: TurnID?
     public var requestingAgent: AgentID?
     public var reviewerAgent: AgentID
     public var taskID: TaskID?
@@ -187,11 +208,13 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
     public var touchedPaths: [String]
     public var risksNetwork: Bool
     public var sideEffect: SideEffect?
+    public var intent: PermissionIntent?
     public var gate: PermissionReviewGateSnapshot
     public var capabilityLease: CapabilityLease?
     public var workspaceLease: WorkspaceLease?
     public var taskContract: TaskContract?
     public var causalContext: PermissionReviewCausalContext
+    public var authorization: ResolvedToolAuthorization?
     public var executionID: String?
     public var replayPolicy: String?
     public var createdAt: Date
@@ -200,6 +223,7 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
     public init(id: PermissionReviewTaskID = .new(),
                 sessionID: SessionID,
                 requestID: RequestID,
+                turnID: TurnID? = nil,
                 requestingAgent: AgentID?,
                 reviewerAgent: AgentID,
                 taskID: TaskID? = nil,
@@ -212,11 +236,13 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
                 touchedPaths: [String] = [],
                 risksNetwork: Bool = false,
                 sideEffect: SideEffect? = nil,
+                intent: PermissionIntent? = nil,
                 gate: PermissionReviewGateSnapshot,
                 capabilityLease: CapabilityLease? = nil,
                 workspaceLease: WorkspaceLease? = nil,
                 taskContract: TaskContract? = nil,
                 causalContext: PermissionReviewCausalContext = .init(),
+                authorization: ResolvedToolAuthorization? = nil,
                 executionID: String? = nil,
                 replayPolicy: String? = nil,
                 createdAt: Date = Date(),
@@ -224,6 +250,7 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
         self.id = id
         self.sessionID = sessionID
         self.requestID = requestID
+        self.turnID = turnID
         self.requestingAgent = requestingAgent
         self.reviewerAgent = reviewerAgent
         self.taskID = taskID
@@ -236,11 +263,13 @@ public struct PermissionReviewTask: Codable, Equatable, Sendable {
         self.touchedPaths = touchedPaths
         self.risksNetwork = risksNetwork
         self.sideEffect = sideEffect
+        self.intent = intent
         self.gate = gate
         self.capabilityLease = capabilityLease
         self.workspaceLease = workspaceLease
         self.taskContract = taskContract
         self.causalContext = causalContext
+        self.authorization = authorization
         self.executionID = executionID
         self.replayPolicy = replayPolicy
         self.createdAt = createdAt
@@ -286,6 +315,7 @@ public struct PermissionReviewUsage: Codable, Equatable, Sendable {
 public struct PermissionReviewSettledPayload: Codable, Equatable, Sendable {
     public var reviewTaskID: PermissionReviewTaskID
     public var requestID: RequestID
+    public var turnID: TurnID?
     public var requestingAgent: AgentID?
     public var reviewerAgent: AgentID
     public var reviewerModel: ModelID
@@ -294,6 +324,8 @@ public struct PermissionReviewSettledPayload: Codable, Equatable, Sendable {
     public var risk: RiskLevel
     public var status: PermissionReviewStatus
     public var reason: String
+    public var failureKind: PermissionApprovalFailureKind?
+    public var authorization: ResolvedToolAuthorization?
     public var usage: PermissionReviewUsage?
     public var cumulativeTokens: Int?
     public var durationMillis: Int
@@ -301,6 +333,7 @@ public struct PermissionReviewSettledPayload: Codable, Equatable, Sendable {
 
     public init(reviewTaskID: PermissionReviewTaskID,
                 requestID: RequestID,
+                turnID: TurnID? = nil,
                 requestingAgent: AgentID?,
                 reviewerAgent: AgentID,
                 reviewerModel: ModelID,
@@ -309,12 +342,15 @@ public struct PermissionReviewSettledPayload: Codable, Equatable, Sendable {
                 risk: RiskLevel,
                 status: PermissionReviewStatus,
                 reason: String,
+                failureKind: PermissionApprovalFailureKind? = nil,
+                authorization: ResolvedToolAuthorization? = nil,
                 usage: PermissionReviewUsage? = nil,
                 cumulativeTokens: Int? = nil,
                 durationMillis: Int,
                 settledAt: Date = Date()) {
         self.reviewTaskID = reviewTaskID
         self.requestID = requestID
+        self.turnID = turnID
         self.requestingAgent = requestingAgent
         self.reviewerAgent = reviewerAgent
         self.reviewerModel = reviewerModel
@@ -323,6 +359,8 @@ public struct PermissionReviewSettledPayload: Codable, Equatable, Sendable {
         self.risk = risk
         self.status = status
         self.reason = reason
+        self.failureKind = failureKind
+        self.authorization = authorization
         self.usage = usage
         self.cumulativeTokens = cumulativeTokens
         self.durationMillis = durationMillis

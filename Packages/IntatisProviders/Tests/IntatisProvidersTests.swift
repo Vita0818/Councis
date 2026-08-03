@@ -1,5 +1,6 @@
 import XCTest
 import IntatisCore
+import IntatisProtocol
 @testable import IntatisProviders
 
 private struct FakeHTTP: HTTPByteStreaming {
@@ -103,27 +104,6 @@ private struct StaticSecret: SecretResolver {
     func secret(for ref: KeychainRef) async throws -> String { key }
 }
 
-private actor SecretResolutionRecorder {
-    private var refs: [KeychainRef] = []
-
-    func record(_ ref: KeychainRef) {
-        refs.append(ref)
-    }
-
-    func snapshot() -> [KeychainRef] {
-        refs
-    }
-}
-
-private struct RecordingSecretResolver: SecretResolver {
-    let recorder: SecretResolutionRecorder
-
-    func secret(for ref: KeychainRef) async throws -> String {
-        await recorder.record(ref)
-        return "key-\(ref.account)"
-    }
-}
-
 private let openAIEndpoint = ProviderEndpoint(id: "e",
                                               baseURL: URL(string: "https://example.test/v1")!,
                                               apiKeyRef: KeychainRef(service: "s", account: "a"),
@@ -181,12 +161,118 @@ final class IntatisProvidersTests: XCTestCase {
                                                            messages: [ChatMessage(role: .user, content: "hi")])) {
             switch chunk {
             case .delta(let d): text += d
+            case .citation: break
             case .usage: break
             case .done: sawDone = true
             }
         }
         XCTAssertEqual(text, "Hello")
         XCTAssertTrue(sawDone)
+    }
+
+    func testWebSearchUsesResponsesHostedToolRequest() async throws {
+        let sse = """
+        data: {"type":"response.completed","response":{"id":"resp_search"}}
+
+        """
+        let http = CapturingHTTP(chunks: [Data(sse.utf8)])
+        let provider = OpenAIWireProvider(
+            endpoint: openAIEndpoint,
+            apiKey: "k",
+            http: http)
+        let request = ChatRequest(
+            model: ModelID(rawValue: "gpt-search"),
+            messages: [
+                ChatMessage(role: .system, content: "Be concise."),
+                ChatMessage(role: .user, content: "What changed?"),
+                ChatMessage(role: .assistant, content: "I will check."),
+            ],
+            webSearch: ChatWebSearchConfiguration(contextSize: .high))
+
+        var doneCount = 0
+        for try await chunk in provider.stream(request) {
+            if case .done = chunk { doneCount += 1 }
+        }
+
+        XCTAssertEqual(doneCount, 1)
+        XCTAssertEqual(http.lastRequest?.url?.absoluteString,
+                       "https://example.test/v1/responses")
+        let bodyData = try XCTUnwrap(http.lastBody)
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "gpt-search")
+        XCTAssertEqual(body["instructions"] as? String, "Be concise.")
+        XCTAssertEqual(body["stream"] as? Bool, true)
+        XCTAssertEqual(body["store"] as? Bool, false)
+        XCTAssertEqual(body["tool_choice"] as? String, "auto")
+        XCTAssertNil(body["messages"])
+        XCTAssertNil(body["n"])
+
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 1)
+        XCTAssertEqual(tools[0]["type"] as? String, "web_search")
+        XCTAssertEqual(tools[0]["search_context_size"] as? String, "high")
+
+        let input = try XCTUnwrap(body["input"] as? [[String: Any]])
+        XCTAssertEqual(input.count, 2)
+        XCTAssertEqual(input[0]["role"] as? String, "user")
+        XCTAssertEqual(input[1]["role"] as? String, "assistant")
+        let userContent = try XCTUnwrap(input[0]["content"] as? [[String: Any]])
+        let assistantContent = try XCTUnwrap(input[1]["content"] as? [[String: Any]])
+        XCTAssertEqual(userContent.first?["type"] as? String, "input_text")
+        XCTAssertEqual(assistantContent.first?["type"] as? String, "output_text")
+    }
+
+    func testWebSearchStreamingParsesAndDeduplicatesSafeCitations() async throws {
+        let sse = """
+        data: {"type":"response.output_text.delta","delta":"Latest"}
+
+        data: {"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","url":"https://example.com/story","title":"Example\\nNews"}}
+
+        data: {"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","url":"javascript:alert(1)","title":"Unsafe"}}
+
+        data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Latest facts","annotations":[{"type":"url_citation","url":"https://example.com/story","title":"Example News"},{"type":"url_citation","url":"https://user:pass@unsafe.example/path","title":"Credentials"}]}]}}
+
+        data: {"type":"response.completed","response":{"id":"resp_search","output":[{"type":"message","content":[{"type":"output_text","text":"Latest facts","annotations":[{"type":"url_citation","url":"https://example.com/story","title":"Example News"}]}]}],"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15,"input_tokens_details":{"cached_tokens":2}}}}
+
+        """
+        let provider = OpenAIWireProvider(
+            endpoint: openAIEndpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: [Data(sse.utf8)]))
+        let request = ChatRequest(
+            model: ModelID(rawValue: "gpt-search"),
+            messages: [ChatMessage(role: .user, content: "latest")],
+            webSearch: ChatWebSearchConfiguration())
+
+        var text = ""
+        var citations: [MessageCitation] = []
+        var usage: Usage?
+        var doneCount = 0
+        for try await chunk in provider.stream(request) {
+            switch chunk {
+            case .delta(let value):
+                text += value
+            case .citation(let citation):
+                citations.append(citation)
+            case .usage(let value):
+                usage = value
+            case .done:
+                doneCount += 1
+            }
+        }
+
+        XCTAssertEqual(text, "Latest facts")
+        XCTAssertEqual(citations, [
+            MessageCitation(
+                url: "https://example.com/story",
+                title: "Example News"),
+        ])
+        XCTAssertEqual(usage?.promptTokens, 12)
+        XCTAssertEqual(usage?.cachedPromptTokens, 2)
+        XCTAssertEqual(usage?.completionTokens, 3)
+        XCTAssertEqual(usage?.totalTokens, 15)
+        XCTAssertEqual(doneCount, 1)
     }
 
     func testOpenAIStreamingNormalizesBearerAPIKeyInAuthorizationHeader() async throws {
@@ -256,6 +342,8 @@ final class IntatisProvidersTests: XCTestCase {
             switch chunk {
             case .delta(let value):
                 text += value
+            case .citation:
+                break
             case .usage:
                 break
             case .done:
@@ -283,6 +371,8 @@ final class IntatisProvidersTests: XCTestCase {
             switch chunk {
             case .delta(let value):
                 text += value
+            case .citation:
+                break
             case .usage:
                 break
             case .done:
@@ -317,6 +407,8 @@ final class IntatisProvidersTests: XCTestCase {
             switch chunk {
             case .delta:
                 break
+            case .citation:
+                break
             case .usage(let value):
                 usage = value
             case .done:
@@ -346,6 +438,8 @@ final class IntatisProvidersTests: XCTestCase {
                 switch chunk {
                 case .delta(let value):
                     text += value
+                case .citation:
+                    break
                 case .usage:
                     break
                 case .done:
@@ -386,6 +480,87 @@ final class IntatisProvidersTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.contains("code=invalid_key"))
     }
 
+    func testProviderDiagnosticsRedactEchoedAuthorizationBeforePersistence() {
+        let secret = "opaque-credential-that-must-not-survive"
+        let body = Data(
+            #"{"error":{"message":"Authorization: Bearer \#(secret)","type":"auth"}}"#.utf8)
+        let httpError = ProviderErrorFormatting.httpStatus(
+            401,
+            body: body,
+            operation: "streaming request")
+        let streamError = ProviderErrorFormatting.streamErrorPayload(body)
+        let usageError = ProviderUsageLimitError(
+            signal: "insufficient_quota",
+            providerMessage: "api_key=\(secret)")
+
+        for message in [
+            httpError.localizedDescription,
+            streamError?.localizedDescription ?? "",
+            usageError.localizedDescription,
+        ] {
+            XCTAssertFalse(message.contains(secret))
+            XCTAssertTrue(message.contains("REDACTED"))
+        }
+    }
+
+    func testProviderDiagnosticsRedactPrivateURLsFromStructuredMessageAndDetail() throws {
+        let nestedURL = "http://10.24.8.9:8080/private/v1/chat/completions"
+        let nestedBody = Data(
+            #"{"error":{"message":"upstream \#(nestedURL) failed","type":"gateway","code":"upstream_502"}}"#.utf8)
+        let detailURL = "https://internal-gateway.example.test/provider/v1?token=opaque-token"
+        let detailBody = Data(#"{"detail":"proxy could not reach \#(detailURL)"}"#.utf8)
+
+        let httpMessage = ProviderErrorFormatting.httpStatus(
+            502,
+            body: nestedBody,
+            operation: "streaming request").localizedDescription
+        let streamMessage = try XCTUnwrap(
+            ProviderErrorFormatting.streamErrorPayload(detailBody)).localizedDescription
+        let transportedMessage = ProviderErrorFormatting.transport(
+            IntatisError.provider(
+                "custom runtime could not reach \(nestedURL); status=502")).localizedDescription
+
+        for message in [httpMessage, streamMessage, transportedMessage] {
+            XCTAssertTrue(message.contains("[REDACTED_URL]"))
+            XCTAssertFalse(message.contains("http://"))
+            XCTAssertFalse(message.contains("https://"))
+            XCTAssertFalse(message.contains("10.24.8.9"))
+            XCTAssertFalse(message.contains("internal-gateway"))
+            XCTAssertFalse(message.contains("opaque-token"))
+        }
+        XCTAssertTrue(httpMessage.contains("HTTP 502 Bad Gateway"))
+        XCTAssertTrue(httpMessage.contains("type=gateway"))
+        XCTAssertTrue(httpMessage.contains("code=upstream_502"))
+        XCTAssertTrue(streamMessage.contains("Provider rejected the streaming request"))
+        XCTAssertTrue(transportedMessage.contains("status=502"))
+    }
+
+    func testProviderTransportRejectsHTTPRedirectBeforeFollowingRoute() throws {
+        let original = try XCTUnwrap(URL(string: "https://approved.example/v1/chat/completions"))
+        let redirected = try XCTUnwrap(URL(string: "https://unreviewed.example/collect"))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: original,
+            statusCode: 307,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Location": redirected.absoluteString]))
+        let session = ProviderURLSession.makeNoRedirectSession()
+        let task = session.dataTask(with: URLRequest(url: original))
+        var redirectDecision: URLRequest? = URLRequest(url: redirected)
+
+        ProviderNoRedirectURLSessionDelegate.shared.urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: response,
+            newRequest: URLRequest(url: redirected)) { request in
+                redirectDecision = request
+            }
+
+        XCTAssertNil(redirectDecision)
+        XCTAssertFalse(session.configuration.httpShouldSetCookies)
+        XCTAssertNil(session.configuration.urlCache)
+        session.invalidateAndCancel()
+    }
+
     func testProviderHTTPErrorUsesPreviewForUnstructuredBody() {
         let body = Data(#"<html><body>gateway generated an HTML error page</body></html>"#.utf8)
         let error = ProviderErrorFormatting.httpStatus(502, body: body, operation: "streaming request")
@@ -407,6 +582,83 @@ final class IntatisProvidersTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.contains("retry after about 2s"))
         XCTAssertTrue(error.localizedDescription.contains("retry-after"))
         XCTAssertTrue(error.localizedDescription.contains("rate limited"))
+    }
+
+    func testProviderUsageLimitTypeSurvivesRuntimeNormalizationAndExhaustion() throws {
+        let original = ProviderUsageLimitError(
+            signal: "insufficient_quota",
+            providerMessage: "Account credits are exhausted.",
+            statusCode: 429,
+            operation: "streaming request")
+        let policy = ProviderRuntimePolicy(maxAttempts: 3)
+
+        let transported = try XCTUnwrap(
+            ProviderErrorFormatting.transport(original) as? ProviderUsageLimitError)
+        let exhausted = try XCTUnwrap(
+            ProviderRuntime.exhausted(
+                original,
+                attempts: 3,
+                operation: "streaming request") as? ProviderUsageLimitError)
+
+        XCTAssertEqual(transported, original)
+        XCTAssertEqual(exhausted, original)
+        XCTAssertFalse(ProviderRuntime.shouldRetry(
+            error: original,
+            attempt: 1,
+            policy: policy))
+    }
+
+    func testContextWindowOverflowRequiresStructuredProviderSignal()
+        throws
+    {
+        let body = Data(
+            #"{"error":{"message":"maximum input reached","type":"invalid_request_error","code":"context_length_exceeded"}}"#.utf8)
+        let typed = try XCTUnwrap(
+            ProviderErrorFormatting.httpStatus(
+                400,
+                body: body,
+                operation: "streaming request")
+                as? ProviderContextWindowExceededError)
+        XCTAssertEqual(typed.signal, "context_length_exceeded")
+        XCTAssertEqual(typed.statusCode, 400)
+
+        let proseOnly = Data(
+            #"{"error":{"message":"context length exceeded","type":"invalid_request_error","code":"bad_request"}}"#.utf8)
+        XCTAssertFalse(
+            ProviderErrorFormatting.httpStatus(
+                400,
+                body: proseOnly,
+                operation: "streaming request")
+                is ProviderContextWindowExceededError)
+    }
+
+    func testContextWindowTypeSurvivesRuntimeNormalizationAndExhaustion()
+        throws
+    {
+        let original = ProviderContextWindowExceededError(
+            signal: "context_window_exceeded",
+            providerMessage: "input is too large",
+            statusCode: 400,
+            operation: "streaming request")
+        let policy = ProviderRuntimePolicy(maxAttempts: 3)
+
+        XCTAssertEqual(
+            try XCTUnwrap(
+                ProviderErrorFormatting.transport(original)
+                    as? ProviderContextWindowExceededError),
+            original)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                ProviderRuntime.exhausted(
+                    original,
+                    attempts: 3,
+                    operation: "streaming request")
+                    as? ProviderContextWindowExceededError),
+            original)
+        XCTAssertFalse(ProviderRuntime.shouldRetry(
+            error: original,
+            attempt: 1,
+            policy: policy))
     }
 
     func testRetryAfterHeaderControlsRuntimeDelayAndCapsLongValues() {
@@ -589,8 +841,99 @@ final class IntatisProvidersTests: XCTestCase {
             endpoints: [endpoint],
             models: ResolvedModels(chat: ModelRef(endpoint: "default", model: ModelID(rawValue: "gpt-x"))))
         let registry = ProviderRegistry(config: config, resolver: StaticSecret(key: "k"), http: FakeHTTP(chunks: []))
-        let provider = try await registry.defaultChatProvider()
-        XCTAssertTrue(provider is OpenAIWireProvider)
+        let resolved = try await registry.defaultChatProvider()
+        let provider = try XCTUnwrap(resolved as? OpenAIWireProvider)
+        XCTAssertEqual(provider.runtimePolicy, .streaming)
+        XCTAssertEqual(provider.runtimePolicy.requestTimeoutSeconds, 120)
+    }
+
+    func testRegistryAtomicallyResolvesConfiguredWebSearchRoute() async throws {
+        let chatEndpoint = ProviderEndpoint(
+            id: "chat",
+            baseURL: URL(string: "https://chat.example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "chat"),
+            wire: .openai)
+        let searchEndpoint = ProviderEndpoint(
+            id: "search",
+            baseURL: URL(string: "https://search.example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "search"),
+            wire: .openai)
+        let registry = ProviderRegistry(
+            config: ProviderConfig(
+                endpoints: [chatEndpoint, searchEndpoint],
+                models: ResolvedModels(
+                    chat: ModelRef(
+                        endpoint: "chat",
+                        model: ModelID(rawValue: "chat-model")),
+                    webSearch: ModelRef(
+                        endpoint: "search",
+                        model: ModelID(rawValue: "search-model")))),
+            resolver: StaticSecret(key: "k"),
+            http: FakeHTTP(chunks: []))
+
+        let searched = try await registry.hostedSearchChatRuntimeRoute()
+
+        XCTAssertEqual(searched.model.rawValue, "search-model")
+        XCTAssertEqual(
+            try XCTUnwrap(searched.provider as? OpenAIWireProvider)
+                .endpoint.id,
+            "search")
+    }
+
+    func testRegistryWebSearchRouteFallsBackToChatOnlyWhenUnconfigured()
+        async throws
+    {
+        let endpoint = ProviderEndpoint(
+            id: "chat",
+            baseURL: URL(string: "https://chat.example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "chat"),
+            wire: .openai)
+        let registry = ProviderRegistry(
+            config: ProviderConfig(
+                endpoints: [endpoint],
+                models: ResolvedModels(chat: ModelRef(
+                    endpoint: "chat",
+                    model: ModelID(rawValue: "chat-model")))),
+            resolver: StaticSecret(key: "k"),
+            http: FakeHTTP(chunks: []))
+
+        let route = try await registry.hostedSearchChatRuntimeRoute()
+
+        XCTAssertEqual(route.model.rawValue, "chat-model")
+        XCTAssertEqual(
+            try XCTUnwrap(route.provider as? OpenAIWireProvider).endpoint.id,
+            "chat")
+    }
+
+    func testRegistryUsesLongRunningStreamingPolicyOnlyForAgentProvider() async throws {
+        let endpoint = ProviderEndpoint(
+            id: "default",
+            baseURL: URL(string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "a"),
+            wire: .openai)
+        let config = ProviderConfig(
+            endpoints: [endpoint],
+            models: ResolvedModels(
+                chat: ModelRef(
+                    endpoint: "default",
+                    model: ModelID(rawValue: "gpt-chat")),
+                agent: ModelRef(
+                    endpoint: "default",
+                    model: ModelID(rawValue: "gpt-agent"))))
+        let registry = ProviderRegistry(
+            config: config,
+            resolver: StaticSecret(key: "k"),
+            http: FakeHTTP(chunks: []))
+
+        let resolvedChat = try await registry.defaultChatProvider()
+        let resolvedAgent = try await registry.defaultAgentProvider()
+        let chat = try XCTUnwrap(resolvedChat as? OpenAIWireProvider)
+        let agent = try XCTUnwrap(resolvedAgent as? OpenAIWireProvider)
+
+        XCTAssertEqual(chat.runtimePolicy, .streaming)
+        XCTAssertEqual(chat.runtimePolicy.requestTimeoutSeconds, 120)
+        XCTAssertEqual(agent.runtimePolicy, .agentStreaming)
+        XCTAssertEqual(agent.runtimePolicy.requestTimeoutSeconds, 180)
     }
 
     func testRegistryUnknownEndpointThrows() async {
@@ -606,113 +949,7 @@ final class IntatisProvidersTests: XCTestCase {
         }
     }
 
-    func testAgentModelBindingBridgesToModelRefWithoutLosingIdentity() throws {
-        let binding = AgentModelBinding(
-            providerID: "provider-a",
-            modelID: ModelID(rawValue: "vendor/model-a"))
-        let ref = ModelRef(binding: binding)
-
-        XCTAssertEqual(ref.endpoint, "provider-a")
-        XCTAssertEqual(ref.model, ModelID(rawValue: "vendor/model-a"))
-        XCTAssertEqual(try ref.validatedAgentModelBinding(), binding)
-    }
-
-    func testRegistryRoutesAgentBindingToItsProviderEndpoint() async throws {
-        let first = ProviderEndpoint(
-            id: "provider-a",
-            baseURL: URL(string: "https://a.example.test/v1")!,
-            apiKeyRef: KeychainRef(service: "s", account: "a"),
-            wire: .openai)
-        let second = ProviderEndpoint(
-            id: "provider-b",
-            baseURL: URL(string: "https://b.example.test/v1")!,
-            apiKeyRef: KeychainRef(service: "s", account: "b"),
-            wire: .openai)
-        let http = CapturingHTTP(chunks: [Data("data: [DONE]\n\n".utf8)])
-        let recorder = SecretResolutionRecorder()
-        let registry = ProviderRegistry(
-            config: ProviderConfig(
-                endpoints: [first, second],
-                models: ResolvedModels(chat: ModelRef(
-                    endpoint: first.id,
-                    model: ModelID(rawValue: "default")))),
-            resolver: RecordingSecretResolver(recorder: recorder),
-            http: http)
-        let binding = AgentModelBinding(
-            providerID: second.id,
-            modelID: ModelID(rawValue: "vendor/model-b"))
-
-        let provider = try await registry.agentProvider(for: binding)
-        for try await _ in provider.stream(AgentRequest(
-            model: binding.modelID,
-            messages: [.user("hello")],
-            tools: [])) {}
-
-        XCTAssertEqual(http.lastRequest?.url, second.chatCompletionsURL)
-        XCTAssertEqual(http.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer key-b")
-        let resolvedRefs = await recorder.snapshot()
-        XCTAssertEqual(resolvedRefs, [second.apiKeyRef])
-    }
-
-    func testUnknownAgentBindingFailsBeforeSecretResolution() async {
-        let endpoint = ProviderEndpoint(
-            id: "known",
-            baseURL: URL(string: "https://known.example.test/v1")!,
-            apiKeyRef: KeychainRef(service: "s", account: "known"),
-            wire: .openai)
-        let recorder = SecretResolutionRecorder()
-        let registry = ProviderRegistry(
-            config: ProviderConfig(
-                endpoints: [endpoint],
-                models: ResolvedModels(chat: ModelRef(
-                    endpoint: endpoint.id,
-                    model: ModelID(rawValue: "default")))),
-            resolver: RecordingSecretResolver(recorder: recorder),
-            http: FakeHTTP(chunks: []))
-        let binding = AgentModelBinding(
-            providerID: "missing",
-            modelID: ModelID(rawValue: "model"))
-
-        do {
-            _ = try await registry.agentProvider(for: binding)
-            XCTFail("expected unknown-provider failure")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("unknown endpoint 'missing'"))
-        }
-        let resolvedRefs = await recorder.snapshot()
-        XCTAssertEqual(resolvedRefs, [])
-    }
-
-    func testUnresolvedLegacyBindingFailsBeforeSecretResolution() async {
-        let endpoint = ProviderEndpoint(
-            id: "known",
-            baseURL: URL(string: "https://known.example.test/v1")!,
-            apiKeyRef: KeychainRef(service: "s", account: "known"),
-            wire: .openai)
-        let recorder = SecretResolutionRecorder()
-        let registry = ProviderRegistry(
-            config: ProviderConfig(
-                endpoints: [endpoint],
-                models: ResolvedModels(chat: ModelRef(
-                    endpoint: endpoint.id,
-                    model: ModelID(rawValue: "default")))),
-            resolver: RecordingSecretResolver(recorder: recorder),
-            http: FakeHTTP(chunks: []))
-        let binding = AgentModelBinding(
-            providerID: AgentModelBinding.unresolvedLegacyProviderID,
-            modelID: ModelID(rawValue: "legacy-model"))
-
-        do {
-            _ = try await registry.agentProvider(for: binding)
-            XCTFail("expected unresolved-provider failure")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("no resolved provider"))
-        }
-        let resolvedRefs = await recorder.snapshot()
-        XCTAssertEqual(resolvedRefs, [])
-    }
-
-    func testHealthCheckReportsOKForCompletedChatStream() async {
+    func testHealthCheckReportsOKForCompletedChatStream() async throws {
         let sse = """
         data: {"choices":[{"delta":{"content":"OK"}}]}
 
@@ -724,7 +961,8 @@ final class IntatisProvidersTests: XCTestCase {
         let config = ProviderConfig(
             endpoints: [openAIEndpoint],
             models: ResolvedModels(chat: ModelRef(endpoint: "e", model: ModelID(rawValue: "gpt-health"))))
-        let registry = ProviderRegistry(config: config, resolver: StaticSecret(key: "k"), http: FakeHTTP(chunks: [Data(sse.utf8)]))
+        let http = CapturingHTTP(chunks: [Data(sse.utf8)])
+        let registry = ProviderRegistry(config: config, resolver: StaticSecret(key: "k"), http: http)
 
         let report = await registry.healthCheck()
 
@@ -736,6 +974,10 @@ final class IntatisProvidersTests: XCTestCase {
         XCTAssertEqual(report.totalTokens, 3)
         XCTAssertEqual(report.responsePreview, "OK")
         XCTAssertNil(report.code)
+        let body = try XCTUnwrap(http.lastBody)
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(root["temperature"])
     }
 
     func testHealthCheckReportsPartialStreamWhenDoneMarkerMissing() async {
@@ -854,5 +1096,522 @@ final class IntatisProvidersTests: XCTestCase {
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let streamOptions = try XCTUnwrap(root["stream_options"] as? [String: Any])
         XCTAssertEqual(streamOptions["include_usage"] as? Bool, true)
+    }
+
+    func testStrictRoutingHealthCheckPreservesOptionsWithoutInventingUnsupportedParameters()
+        async throws
+    {
+        let model = "openai/gpt-strict"
+        let endpoint = ProviderEndpoint(
+            id: "strict",
+            baseURL: URL(string: "https://openrouter.example.test/api/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "a"),
+            wire: .openai,
+            modelRequestOptions: [
+                model: [
+                    "provider": .object([
+                        "require_parameters": .bool(true),
+                    ]),
+                ],
+            ])
+        let sse = """
+        data: {"choices":[{"delta":{"content":"OK"}}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+        """
+        let http = CapturingHTTP(chunks: [Data(sse.utf8)])
+        let modelRef = ModelRef(
+            endpoint: "strict",
+            model: ModelID(rawValue: model))
+        let registry = ProviderRegistry(
+            config: ProviderConfig(
+                endpoints: [endpoint],
+                models: ResolvedModels(
+                    chat: modelRef,
+                    agent: modelRef)),
+            resolver: StaticSecret(key: "k"),
+            http: http)
+
+        let report = await registry.healthCheck(role: .agent)
+
+        XCTAssertEqual(report.status, .ok)
+        let data = try XCTUnwrap(http.lastBody)
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let routing = try XCTUnwrap(root["provider"] as? [String: Any])
+        XCTAssertEqual(routing["require_parameters"] as? Bool, true)
+        XCTAssertNil(root["temperature"])
+        XCTAssertNil(root["max_tokens"])
+        XCTAssertNil(root["max_completion_tokens"])
+        XCTAssertNil(root["max_output_tokens"])
+    }
+
+    func testConfiguredModelOptionsPassThroughChatBodyWithoutOverridingRuntimeStructure() throws {
+        let endpoint = ProviderEndpoint(
+            id: "generic",
+            baseURL: URL(string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "a"),
+            wire: .openai,
+            modelRequestOptions: [
+                "vendor/model": [
+                    "provider": .object([
+                        "only": .array([.string("vendor-a")]),
+                        "allow_fallbacks": .bool(false),
+                    ]),
+                    "vendor_extension": .object([
+                        "mode": .string("exact"),
+                        "threshold": .number(0.75),
+                    ]),
+                    "temperature": .number(0.9),
+                    "model": .string("must-not-win"),
+                    "messages": .array([]),
+                    "tools": .array([]),
+                    "stream": .bool(false),
+                    "stream_options": .object(["include_usage": .bool(true)]),
+                    "n": .number(8),
+                    "best_of": .number(8),
+                    "num_return_sequences": .number(8),
+                    "candidate_count": .number(8),
+                ],
+            ])
+        let provider = OpenAIWireProvider(endpoint: endpoint, apiKey: "k", http: FakeHTTP(chunks: []))
+        let request = try provider.buildRequest(ChatRequest(
+            model: ModelID(rawValue: "vendor/model"),
+            messages: [ChatMessage(role: .user, content: "hello")],
+            temperature: 0.2))
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: XCTUnwrap(request.httpBody))
+        guard case .object(let body) = decoded else { return XCTFail("request body is not an object") }
+
+        XCTAssertEqual(body["provider"], JSONValue.object([
+            "only": .array([.string("vendor-a")]),
+            "allow_fallbacks": .bool(false),
+        ]))
+        XCTAssertEqual(body["vendor_extension"], JSONValue.object([
+            "mode": .string("exact"),
+            "threshold": .number(0.75),
+        ]))
+        XCTAssertEqual(body["temperature"], JSONValue.number(0.2))
+        XCTAssertEqual(body["model"], JSONValue.string("vendor/model"))
+        XCTAssertEqual(body["stream"], JSONValue.bool(true))
+        XCTAssertEqual(body["n"], JSONValue.number(1))
+        XCTAssertNil(body["best_of"])
+        XCTAssertNil(body["num_return_sequences"])
+        XCTAssertNil(body["candidate_count"])
+        XCTAssertNil(body["stream_options"])
+        guard let messageValue = body["messages"],
+              case .array(let messages) = messageValue else {
+            return XCTFail("runtime messages were not encoded")
+        }
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertNil(body["tools"])
+    }
+
+    func testChatRequestCanonicalizesSDKReasoningAliasBeforeWire()
+        throws {
+        let endpoint = ProviderEndpoint(
+            id: "openrouter-compatible",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestOptions: [
+                "deepseek/model": [
+                    "reasoningEffort":
+                        .string("xhigh"),
+                    "provider": .object([
+                        "only": .array([
+                            .string("deepseek"),
+                        ]),
+                        "allow_fallbacks": .bool(false),
+                        "require_parameters": .bool(true),
+                    ]),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: []))
+
+        let request = try provider.buildRequest(
+            ChatRequest(
+                model: ModelID(
+                    rawValue: "deepseek/model"),
+                messages: [
+                    ChatMessage(
+                        role: .user,
+                        content: "hello"),
+                ]))
+        let decoded = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(request.httpBody))
+        guard case .object(let body) = decoded else {
+            return XCTFail(
+                "request body is not an object")
+        }
+
+        XCTAssertEqual(
+            body["reasoning_effort"],
+            .string("xhigh"))
+        XCTAssertNil(body["reasoningEffort"])
+        XCTAssertEqual(
+            body["provider"],
+            .object([
+                "only": .array([
+                    .string("deepseek"),
+                ]),
+                "allow_fallbacks": .bool(false),
+                "require_parameters": .bool(true),
+            ]))
+        XCTAssertNil(body["n"])
+        XCTAssertNil(body["parallel_tool_calls"])
+    }
+
+    func testOpenAICompatibleAdapterKeepsNestedReasoningAlongsideCamelAlias()
+        throws {
+        let endpoint = ProviderEndpoint(
+            id: "openrouter-compatible",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestOptions: [
+                "reasoning/model": [
+                    "reasoning_effort":
+                        .string("medium"),
+                    "reasoningEffort":
+                        .string("low"),
+                    "reasoning": .object([
+                        "effort": .string("xhigh"),
+                        "max_tokens": .number(2_000),
+                    ]),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: []))
+
+        let request = try provider.buildRequest(
+            ChatRequest(
+                model: ModelID(
+                    rawValue: "reasoning/model"),
+                messages: [
+                    ChatMessage(
+                        role: .user,
+                        content: "hello"),
+                ]))
+        let decoded = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(request.httpBody))
+        guard case .object(let body) = decoded else {
+            return XCTFail(
+                "request body is not an object")
+        }
+
+        XCTAssertNil(body["reasoningEffort"])
+        XCTAssertEqual(
+            body["reasoning_effort"],
+            .string("low"))
+        XCTAssertEqual(
+            body["reasoning"],
+            .object([
+                "effort": .string("xhigh"),
+                "max_tokens": .number(2_000),
+            ]))
+    }
+
+    func testOpenAICompatibleAdapterMatchesPinnedSDKAliasConflicts()
+        throws {
+        let endpoint = ProviderEndpoint(
+            id: "compatible",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestOptions: [
+                "camel-wins": [
+                    "reasoningEffort":
+                        .string("xhigh"),
+                    "reasoning_effort":
+                        .string("low"),
+                    "textVerbosity":
+                        .string("high"),
+                    "verbosity":
+                        .string("low"),
+                ],
+                "snake-only": [
+                    "reasoning_effort":
+                        .string("high"),
+                    "verbosity":
+                        .string("medium"),
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: []))
+
+        let camelRequest = try provider.buildRequest(
+            ChatRequest(
+                model: ModelID(
+                    rawValue: "camel-wins"),
+                messages: [
+                    ChatMessage(
+                        role: .user,
+                        content: "hello"),
+                ]))
+        let camelValue = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(camelRequest.httpBody))
+        guard case .object(let camelBody) =
+                camelValue else {
+            return XCTFail(
+                "request body is not an object")
+        }
+        XCTAssertEqual(
+            camelBody["reasoning_effort"],
+            .string("xhigh"))
+        XCTAssertEqual(
+            camelBody["verbosity"],
+            .string("high"))
+        XCTAssertNil(camelBody["reasoningEffort"])
+        XCTAssertNil(camelBody["textVerbosity"])
+
+        let snakeRequest = try provider.buildRequest(
+            ChatRequest(
+                model: ModelID(
+                    rawValue: "snake-only"),
+                messages: [
+                    ChatMessage(
+                        role: .user,
+                        content: "hello"),
+                ]))
+        let snakeValue = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(snakeRequest.httpBody))
+        guard case .object(let snakeBody) =
+                snakeValue else {
+            return XCTFail(
+                "request body is not an object")
+        }
+        XCTAssertNil(snakeBody["reasoning_effort"])
+        XCTAssertNil(snakeBody["verbosity"])
+    }
+
+    func testModelAdapterOverrideUsesOpenRouterOptionSemantics()
+        throws {
+        let endpoint = ProviderEndpoint(
+            id: "mixed",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter:
+                .openAICompatible,
+            modelRequestAdapters: [
+                "openrouter/model":
+                    .openRouter,
+            ],
+            modelRequestOptions: [
+                "openrouter/model": [
+                    "reasoningEffort":
+                        .string("xhigh"),
+                    "reasoning": .object([
+                        "effort":
+                            .string("high"),
+                    ]),
+                    "provider": .object([
+                        "only": .array([
+                            .string("deepseek"),
+                        ]),
+                        "require_parameters":
+                            .bool(true),
+                    ]),
+                    "cacheControl":
+                        .null,
+                ],
+            ])
+        let provider = OpenAIWireProvider(
+            endpoint: endpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: []))
+
+        let request = try provider.buildRequest(
+            ChatRequest(
+                model: ModelID(
+                    rawValue: "openrouter/model"),
+                messages: [
+                    ChatMessage(
+                        role: .user,
+                        content: "hello"),
+                ]))
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: XCTUnwrap(request.httpBody))
+        guard case .object(let body) = value else {
+            return XCTFail(
+                "request body is not an object")
+        }
+
+        XCTAssertEqual(
+            body["reasoningEffort"],
+            .string("xhigh"))
+        XCTAssertNil(body["reasoning_effort"])
+        XCTAssertNil(body["cacheControl"])
+        XCTAssertNil(body["cache_control"])
+        XCTAssertEqual(
+            body["reasoning"],
+            .object([
+                "effort": .string("high"),
+            ]))
+        XCTAssertEqual(
+            body["provider"],
+            .object([
+                "only": .array([
+                    .string("deepseek"),
+                ]),
+                "require_parameters": .bool(true),
+            ]))
+    }
+
+    func testUnknownProviderAdapterFailsBeforeBuildingNetworkRequest() {
+        for rawAdapter in [
+            "@private/adapter",
+            "",
+            "   ",
+        ] {
+            let endpoint = ProviderEndpoint(
+                id: "unsupported",
+                baseURL: URL(
+                    string: "https://example.test/v1")!,
+                apiKeyRef: KeychainRef(
+                    service: "s",
+                    account: "a"),
+                wire: .openai,
+                requestAdapter:
+                    ProviderRequestAdapter(
+                        rawValue: rawAdapter),
+                modelRequestOptions: [
+                    "m": [
+                        "opaque": .bool(true),
+                    ],
+                ])
+            let provider = OpenAIWireProvider(
+                endpoint: endpoint,
+                apiKey: "k",
+                http: FakeHTTP(chunks: []))
+
+            XCTAssertThrowsError(
+                try provider.buildRequest(
+                    ChatRequest(
+                        model: ModelID(rawValue: "m"),
+                        messages: [
+                            ChatMessage(
+                                role: .user,
+                                content: "hello"),
+                ])))
+        }
+
+        let modelOverrideEndpoint = ProviderEndpoint(
+            id: "unsupported-model-override",
+            baseURL: URL(
+                string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(
+                service: "s",
+                account: "a"),
+            wire: .openai,
+            requestAdapter: .openAICompatible,
+            modelRequestAdapters: [
+                "m": ProviderRequestAdapter(
+                    rawValue: "   "),
+            ])
+        let modelOverrideProvider = OpenAIWireProvider(
+            endpoint: modelOverrideEndpoint,
+            apiKey: "k",
+            http: FakeHTTP(chunks: []))
+        XCTAssertThrowsError(
+            try modelOverrideProvider.buildRequest(
+                ChatRequest(
+                    model: ModelID(rawValue: "m"),
+                    messages: [
+                        ChatMessage(
+                            role: .user,
+                            content: "hello"),
+                    ])))
+    }
+
+    func testProviderEndpointModelOptionsAreCodableAndLegacyEndpointsDefaultEmpty() throws {
+        let endpoint = ProviderEndpoint(
+            id: "generic",
+            baseURL: URL(string: "https://example.test/v1")!,
+            apiKeyRef: KeychainRef(service: "s", account: "a"),
+            wire: .openai,
+            modelRequestOptions: ["m": ["top_k": .number(7)]])
+        let roundTrip = try JSONDecoder().decode(
+            ProviderEndpoint.self,
+            from: JSONEncoder().encode(endpoint))
+        XCTAssertEqual(roundTrip, endpoint)
+
+        let legacy = #"{"id":"legacy","baseURL":"https:\/\/example.test\/v1","apiKeyRef":{"service":"s","account":"a"},"wire":"openai"}"#
+        let decoded = try JSONDecoder().decode(ProviderEndpoint.self, from: Data(legacy.utf8))
+        XCTAssertTrue(decoded.modelRequestOptions.isEmpty)
+        XCTAssertEqual(
+            decoded.requestAdapter,
+            .legacyOpenAIWire)
+    }
+
+    func testModelConfigurationPresentationReadsReasoningLabelsWithoutRewritingOptions() {
+        let cases: [([String: JSONValue], String)] = [
+            (["reasoning_effort": .string("max")], "max"),
+            (["reasoningEffort": .string("xhigh")], "xhigh"),
+            (["reasoning": .object(["effort": .string("high")])], "high"),
+            (["output_config": .object(["effort": .string("medium")])], "medium"),
+            (["thinking": .object(["budgetTokens": .number(16_000)])], "16000 tokens"),
+            (["reasoning": .object(["max_tokens": .number(2_000)])], "2000 tokens"),
+        ]
+
+        for (options, expected) in cases {
+            let original = options
+            let presentation = ModelConfigurationPresentation(requestOptions: options)
+            XCTAssertEqual(presentation.reasoningLabel, expected)
+            XCTAssertEqual(options, original)
+        }
+    }
+
+    func testModelConfigurationPresentationDoesNotPretendAnUnselectedVariantIsActive() {
+        let presentation = ModelConfigurationPresentation(
+            modelMetadata: [
+                "variants": .object([
+                    "high": .object(["reasoningEffort": .string("high")]),
+                    "low": .object(["reasoningEffort": .string("low")]),
+                ]),
+                "capabilities": .object(["effort": .string("unrelated")]),
+            ],
+            requestOptions: [:])
+
+        XCTAssertNil(presentation.reasoningLabel)
+    }
+
+    func testModelConfigurationPresentationCanReadDirectModelMetadata() {
+        let presentation = ModelConfigurationPresentation(
+            modelMetadata: ["reasoningEffort": .string("max")],
+            requestOptions: [:])
+
+        XCTAssertEqual(presentation.reasoningLabel, "max")
     }
 }

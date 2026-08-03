@@ -182,6 +182,46 @@ private actor CapturingPolicyResponder: PermissionResponder {
     func requests() -> [PermissionRequestPayload] { captured }
 }
 
+private actor SequencedStructuredPolicyResponder: PermissionResponder {
+    nonisolated let approvalMode: PermissionApprovalMode = .automaticReviewer
+
+    private var captured: [PermissionRequestPayload] = []
+    private let resolutions: [PermissionApprovalResolution]
+
+    init(_ resolutions: [PermissionApprovalResolution]) {
+        self.resolutions = resolutions
+    }
+
+    func requestApproval(_ request: PermissionRequestPayload) async -> PermissionDecision {
+        await requestResolution(request).decision
+    }
+
+    func requestResolution(_ request: PermissionRequestPayload) async -> PermissionApprovalResolution {
+        let index = min(captured.count, resolutions.count - 1)
+        captured.append(request)
+        return resolutions[index]
+    }
+
+    func requests() -> [PermissionRequestPayload] { captured }
+}
+
+private struct StructuredDenyPolicyResponder: PermissionResponder {
+    let reason: String
+
+    func requestApproval(_ request: PermissionRequestPayload) async -> PermissionDecision {
+        .deny
+    }
+
+    func requestResolution(_ request: PermissionRequestPayload) async -> PermissionApprovalResolution {
+        PermissionApprovalResolution(
+            decision: .deny,
+            reason: reason,
+            source: .automaticReviewer,
+            reviewTaskID: PermissionReviewTaskID(rawValue: "review-structured-deny"),
+            reviewStatus: .denied)
+    }
+}
+
 private struct DeleteAuditBeforeAllowResponder: PermissionResponder {
     let eventLogURL: URL
 
@@ -219,6 +259,134 @@ private struct PolicyUncertainWriteTool: Tool {
 
     func execute(_ args: ToolArgs, in context: ToolContext) async throws -> ToolObservation {
         throw IntatisError.io("the executor lost its completion acknowledgement")
+    }
+}
+
+private struct PolicyMCPErrorResultTool: Tool {
+    static let descriptor = ToolDescriptor(
+        name: "mcp__test__reported_error",
+        description: "Test-only MCP tool returning a typed isError result.",
+        sideEffect: .network,
+        parameters: .object([
+            "type": .string("object"),
+            "properties": .object([:]),
+            "additionalProperties": .bool(false),
+        ]))
+
+    func execute(
+        _ args: ToolArgs,
+        in context: ToolContext
+    ) async throws -> ToolObservation {
+        ToolObservation(
+            text: "remote MCP failure",
+            structuredResult: MCPStructuredToolResult(
+                content: [
+                    MCPContentBlock(
+                        kind: .text,
+                        text: "remote MCP failure"),
+                ],
+                isError: true))
+    }
+}
+
+private struct PolicyTaskUpdateArguments: Decodable {
+    var taskID: String
+    var expectedRevision: Int
+
+    enum CodingKeys: String, CodingKey {
+        case taskID = "task_id"
+        case expectedRevision = "expected_revision"
+    }
+}
+
+private actor PolicyStaleThenSuccessfulTaskUpdateState {
+    private var attemptedRevisions: [Int] = []
+
+    func execute(expectedRevision: Int) throws -> ToolObservation {
+        attemptedRevisions.append(expectedRevision)
+        if attemptedRevisions.count == 1 {
+            throw ToolExecutionRejectedWithoutSideEffect(
+                code: "stale_revision",
+                message: "task_update rejected without applying changes: expected_revision \(expectedRevision) is stale; the current revision is 2. Call task_get for task_id \"task-retry\", merge against the authoritative task state, then retry task_update using that revision as expected_revision.")
+        }
+        return ToolObservation(text: "task updated at revision \(expectedRevision)")
+    }
+
+    func revisions() -> [Int] { attemptedRevisions }
+}
+
+private struct PolicyStaleThenSuccessfulTaskUpdateTool: Tool {
+    static let descriptor = ToolDescriptor(
+        name: "task_update",
+        description: "Test-only optimistic task update.",
+        sideEffect: .write,
+        parameters: .object([
+            "type": .string("object"),
+            "properties": .object([
+                "task_id": .object([
+                    "type": .string("string"),
+                    "minLength": .number(1),
+                ]),
+                "expected_revision": .object([
+                    "type": .string("integer"),
+                    "minimum": .number(0),
+                ]),
+            ]),
+            "required": .array([.string("task_id"), .string("expected_revision")]),
+            "additionalProperties": .bool(false),
+        ]))
+
+    let state: PolicyStaleThenSuccessfulTaskUpdateState
+
+    func permissionIntent(_ args: ToolArgs, workspaceRoot: URL) -> PermissionIntent {
+        let value = try? args.decode(PolicyTaskUpdateArguments.self)
+        return PermissionIntent(
+            action: "task.update",
+            resources: [PermissionResource(kind: .task, value: value?.taskID ?? "unknown")],
+            metadata: [
+                "expectedRevision": .number(Double(value?.expectedRevision ?? -1)),
+            ],
+            dataEffects: [.none],
+            controlEffects: [.updateTask],
+            risks: [.controlPlaneMutation],
+            replayPolicy: .requiresManualReconciliation)
+    }
+
+    func execute(_ args: ToolArgs, in context: ToolContext) async throws -> ToolObservation {
+        let value = try args.decode(PolicyTaskUpdateArguments.self)
+        return try await state.execute(expectedRevision: value.expectedRevision)
+    }
+}
+
+private actor PolicyPostPrepareCancellationGate {
+    private var callCount = 0
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func revalidate() async -> String? {
+        callCount += 1
+        guard callCount == 3 else { return nil }
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+        return nil
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { continuation in
+            enteredWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 
@@ -261,6 +429,24 @@ private struct PolicyCancellableUncertainWriteTool: Tool {
     }
 }
 
+private actor PolicyAuthorizationRevalidationProbe {
+    private var calls = 0
+    private let failOnCall: Int
+
+    init(failOnCall: Int) {
+        self.failOnCall = failOnCall
+    }
+
+    func nextFailure() -> String? {
+        calls += 1
+        return calls == failOnCall
+            ? "permission denied: capability lease was revoked before tool execution"
+            : nil
+    }
+
+    func callCount() -> Int { calls }
+}
+
 final class AgentLoopPolicyTests: XCTestCase {
     private func makeWorkspaceAndLog(_ suffix: String) throws -> (URL, EventLog) {
         let workspace = FileManager.default.temporaryDirectory
@@ -283,6 +469,7 @@ final class AgentLoopPolicyTests: XCTestCase {
                           rootTaskID: TaskID? = nil,
                           taskAttempt: Int? = nil,
                           tokenBudgetMeter: AgentTokenBudgetMeter? = nil,
+                          authorizationRevalidator: ToolAuthorizationRevalidator? = nil,
                           agentName: String = "policy-agent") -> AgentLoop {
         AgentLoop(
             log: log,
@@ -303,7 +490,8 @@ final class AgentLoopPolicyTests: XCTestCase {
             workspaceLease: workspaceLease,
             rootTaskID: rootTaskID,
             taskAttempt: taskAttempt,
-            tokenBudgetMeter: tokenBudgetMeter)
+            tokenBudgetMeter: tokenBudgetMeter,
+            authorizationRevalidator: authorizationRevalidator)
     }
 
     private func json(_ object: [String: Any]) -> String {
@@ -512,6 +700,138 @@ final class AgentLoopPolicyTests: XCTestCase {
         XCTAssertFalse(prepared, "root replacement after approval must be rejected before executor prepare")
     }
 
+    func testLiveAuthorizationRevocationAfterDurablePrepareFailsClosed() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("live-authorization-revalidation")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let probe = PolicyAuthorizationRevalidationProbe(failOnCall: 3)
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "revoked-write",
+                    name: "write_file",
+                    arguments: json(["path": "must-not-exist.txt", "content": "blocked"]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("The revoked write was blocked."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            authorizationRevalidator: { _ in await probe.nextFailure() })
+
+        let answer = try await loop.send("Attempt a write whose live lease is revoked after prepare.")
+
+        XCTAssertEqual(answer, "The revoked write was blocked.")
+        let revalidationCount = await probe.callCount()
+        XCTAssertEqual(revalidationCount, 3)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("must-not-exist.txt").path))
+        let results = await toolResults(in: log)
+        XCTAssertEqual(
+            results.first?.observation,
+            "permission denied: capability lease was revoked before tool execution")
+        let events = await log.replay()
+        let prepared = events.compactMap { envelope -> ToolExecutionPreparedPayload? in
+            guard case .toolExecutionPrepared(let payload) = envelope.event else { return nil }
+            return payload
+        }
+        let settled = events.compactMap { envelope -> ToolExecutionSettledPayload? in
+            guard case .toolExecutionSettled(let payload) = envelope.event else { return nil }
+            return payload
+        }
+        XCTAssertEqual(prepared.count, 1)
+        XCTAssertEqual(settled.count, 1)
+        XCTAssertEqual(settled.first?.outcome, .denied)
+        XCTAssertEqual(settled.first?.effectDisposition, .notStarted)
+        XCTAssertEqual(settled.first?.authorization, prepared.first?.authorization)
+    }
+
+    func testHostAuthorizationFailureBeforeReviewSkipsReviewerAndPrepare() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("authorization-preflight")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let probe = PolicyAuthorizationRevalidationProbe(failOnCall: 1)
+        let responder = CapturingPolicyResponder(.allow)
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "preflight-write",
+                    name: "write_file",
+                    arguments: json(["path": "must-not-exist.txt", "content": "blocked"]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("The host rejected the stale authorization."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder,
+            authorizationRevalidator: { _ in await probe.nextFailure() })
+
+        let answer = try await loop.send("Attempt a write with an invalid live authorization.")
+
+        XCTAssertEqual(answer, "The host rejected the stale authorization.")
+        let capturedRequests = await responder.requests()
+        XCTAssertEqual(capturedRequests.count, 0)
+        let revalidationCount = await probe.callCount()
+        XCTAssertEqual(revalidationCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("must-not-exist.txt").path))
+        let prepared = await log.replay().contains { envelope in
+            if case .toolExecutionPrepared = envelope.event { return true }
+            return false
+        }
+        XCTAssertFalse(prepared)
+    }
+
+    func testLiveAuthorizationRevocationAfterReviewFailsBeforePrepare() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("authorization-post-review")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let probe = PolicyAuthorizationRevalidationProbe(failOnCall: 2)
+        let responder = CapturingPolicyResponder(.allow)
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "post-review-write",
+                    name: "write_file",
+                    arguments: json(["path": "must-not-exist.txt", "content": "blocked"]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("The revoked authorization was rejected."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder,
+            authorizationRevalidator: { _ in await probe.nextFailure() })
+
+        let answer = try await loop.send("Attempt a write revoked immediately after review.")
+
+        XCTAssertEqual(answer, "The revoked authorization was rejected.")
+        let capturedRequests = await responder.requests()
+        XCTAssertEqual(capturedRequests.count, 1)
+        let revalidationCount = await probe.callCount()
+        XCTAssertEqual(revalidationCount, 2)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("must-not-exist.txt").path))
+        let events = await log.replay()
+        XCTAssertFalse(events.contains { envelope in
+            if case .toolExecutionPrepared = envelope.event { return true }
+            return false
+        })
+        let resolved = events.compactMap { envelope -> PermissionResolvedPayload? in
+            guard case .permissionResolved(let payload) = envelope.event else { return nil }
+            return payload
+        }.last
+        XCTAssertEqual(resolved?.source, .authorizationRevalidation)
+        XCTAssertEqual(resolved?.failureKind, .authorizationSnapshotInvalid)
+    }
+
     func testPermissionAuditFailurePreventsAllowedToolExecution() async throws {
         let (workspace, log) = try makeWorkspaceAndLog("audit-fail-closed")
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -555,7 +875,7 @@ final class AgentLoopPolicyTests: XCTestCase {
             objective: "Write the scoped file",
             roleHint: "worker",
             expectedDeliverable: "one file")
-        let capability = CapabilityLease.worker(taskID: taskID)
+        let capability = CapabilityLease.worker(taskID: taskID, workspaceAccess: .readWrite)
         let workspaceLease = WorkspaceLease(
             taskID: taskID,
             rootPath: workspace.path,
@@ -575,7 +895,11 @@ final class AgentLoopPolicyTests: XCTestCase {
             workspace: workspace,
             log: log,
             provider: provider,
-            registry: ToolRegistry([WriteFileTool()]),
+            registry: ToolRegistry(
+                registrations: [ToolRegistration(
+                    tool: WriteFileTool(),
+                    grantingCapabilities: [.applyPatch])],
+                registryVersion: "test.cowork.v1"),
             responder: responder,
             context: ContextBuilder(taskContract: contract),
             capabilityLease: capability,
@@ -599,7 +923,156 @@ final class AgentLoopPolicyTests: XCTestCase {
         XCTAssertEqual(reviewContext.workspaceLease, workspaceLease)
         XCTAssertEqual(reviewContext.taskContract, contract)
         XCTAssertEqual(reviewContext.replayPolicy, ToolExecutionReplayPolicy.requiresManualReconciliation.rawValue)
+        XCTAssertEqual(reviewContext.gate?.decision, .pass)
+        let authorization = try XCTUnwrap(reviewContext.authorization)
+        XCTAssertEqual(authorization.registryVersion, "test.cowork.v1")
+        XCTAssertEqual(authorization.concreteToolID, "test.cowork.v1/write_file")
+        XCTAssertEqual(authorization.canonicalAction, "filesystem.write")
+        XCTAssertEqual(authorization.requiredCapabilities, [.applyPatch])
+        XCTAssertEqual(authorization.membership, .granted)
+        XCTAssertEqual(authorization.capabilityLeaseID, capability.id)
+        XCTAssertEqual(authorization.capabilityTaskID, taskID)
+        XCTAssertEqual(authorization.workspaceLeaseID, workspaceLease.id)
+        XCTAssertEqual(authorization.taskID, taskID)
+        XCTAssertEqual(authorization.rootTaskID, rootTaskID)
+        XCTAssertEqual(authorization.parentTaskID, parentTaskID)
+        XCTAssertEqual(authorization.attempt, 3)
+        XCTAssertEqual(authorization.toolCallID, "context-write")
+        XCTAssertEqual(authorization.deterministicGate?.decision, .pass)
+        XCTAssertEqual(authorization.normalizedArgumentsDigest.count, 64)
         XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.appendingPathComponent("scoped.txt").path))
+    }
+
+    func testUnleasedScopedToolIsDeniedBeforeResponder() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("unleased-tool")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let responder = CapturingPolicyResponder(.allow)
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "unleased-write",
+                    name: "write_file",
+                    arguments: json(["path": "blocked.txt", "content": "blocked"]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("Host denied it."), .done(finishReason: "stop")],
+        ])
+        let registry = ToolRegistry(
+            registrations: [ToolRegistration(
+                tool: WriteFileTool(),
+                grantingCapabilities: [.applyPatch])],
+            registryVersion: "test.cowork.v1")
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: registry,
+            responder: responder,
+            capabilityLease: CapabilityLease(tools: [.readWorkspace]),
+            workspaceLease: WorkspaceLease(rootPath: workspace.path, access: .readWrite))
+
+        let answer = try await loop.send("Try the unleased write.")
+        let responderRequests = await responder.requests()
+        let results = await toolResults(in: log)
+        XCTAssertEqual(answer, "Host denied it.")
+        XCTAssertTrue(responderRequests.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("blocked.txt").path))
+        let result = try XCTUnwrap(results.first)
+        XCTAssertTrue(result.observation.contains("not granted by the active capability lease"))
+        XCTAssertEqual(provider.requests.count, 2)
+    }
+
+    func testStructuredReviewerReasonReachesResolvedToolResultAndNextTurnExactlyOnce() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("structured-deny")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let exactReason = "requested overwrite is unrelated to the assigned report"
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "reviewed-write",
+                    name: "write_file",
+                    arguments: json(["path": "blocked.txt", "content": "blocked"]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("I could not perform the write."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: StructuredDenyPolicyResponder(reason: exactReason))
+
+        let answer = try await loop.send("Attempt the reviewed write.")
+        XCTAssertEqual(answer, "I could not perform the write.")
+        let events = await log.replay()
+        let resolved = try XCTUnwrap(events.compactMap { envelope -> PermissionResolvedPayload? in
+            if case .permissionResolved(let payload) = envelope.event,
+               payload.requestId != nil { return payload }
+            return nil
+        }.first)
+        XCTAssertEqual(resolved.reason, exactReason)
+        XCTAssertEqual(resolved.source, .automaticReviewer)
+        XCTAssertEqual(resolved.reviewTaskID?.rawValue, "review-structured-deny")
+        XCTAssertEqual(resolved.reviewStatus, .denied)
+        let observation = try XCTUnwrap(events.compactMap { envelope -> ToolResultPayload? in
+            if case .toolResult(let payload) = envelope.event { return payload }
+            return nil
+        }.first?.observation)
+        XCTAssertEqual(observation, "permission denied: \(exactReason)")
+        XCTAssertFalse(observation.contains("permission denied: permission denied:"))
+        let nextTurn = try XCTUnwrap(provider.requests.dropFirst().first)
+        XCTAssertTrue(nextTurn.messages.contains { $0.content == observation })
+    }
+
+    func testMCPIsErrorResultIsDurableTypedFailureWithUnknownEffect()
+        async throws {
+        let (workspace, log) = try makeWorkspaceAndLog(
+            "mcp-typed-error-result")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "mcp-error-call",
+                    name: "mcp__test__reported_error",
+                    arguments: "{}")]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [
+                .textDelta("The remote tool reported failure."),
+                .done(finishReason: "stop"),
+            ],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([PolicyMCPErrorResultTool()]))
+
+        let answer = try await loop.send("Call the remote tool.")
+
+        XCTAssertEqual(
+            answer,
+            "The remote tool reported failure.")
+        let events = await log.replay()
+        let result = try XCTUnwrap(events.compactMap {
+            envelope -> ToolResultPayload? in
+            guard case .toolResult(let payload) = envelope.event
+            else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(result.outcome, .failed)
+        XCTAssertEqual(result.failureSource, .runtimeFailed)
+        XCTAssertEqual(result.structuredResult?.isError, true)
+        let settled = try XCTUnwrap(events.compactMap {
+            envelope -> ToolExecutionSettledPayload? in
+            guard case .toolExecutionSettled(let payload) =
+                    envelope.event else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(settled.outcome, .failed)
+        XCTAssertEqual(settled.effectDisposition, .unknown)
     }
 
     func testNonReplayableToolFailureLeavesExecutionUnsettledForManualReconciliation() async throws {
@@ -659,6 +1132,145 @@ final class AgentLoopPolicyTests: XCTestCase {
         })
     }
 
+    func testRejectedWithoutSideEffectSettlesAndReturnsRecoveryToModel() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("rejected-without-side-effect")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-no-effect-retry")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Retry an optimistic task update.",
+            roleHint: "worker",
+            expectedDeliverable: "updated task")
+        let provider = PolicyScriptedProvider([
+            [
+                .toolCalls([ToolCall(
+                    id: "stale-update",
+                    name: "task_update",
+                    arguments: json(["task_id": "task-retry", "expected_revision": 1]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [
+                .toolCalls([ToolCall(
+                    id: "retried-update",
+                    name: "task_update",
+                    arguments: json(["task_id": "task-retry", "expected_revision": 2]))]),
+                .done(finishReason: "tool_calls"),
+            ],
+            [.textDelta("The task update succeeded after refreshing its revision."),
+             .done(finishReason: "stop")],
+        ])
+        let state = PolicyStaleThenSuccessfulTaskUpdateState()
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([PolicyStaleThenSuccessfulTaskUpdateTool(state: state)]),
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            taskAttempt: 1)
+
+        let answer = try await loop.send("Update the task.")
+
+        XCTAssertEqual(answer, "The task update succeeded after refreshing its revision.")
+        let attemptedRevisions = await state.revisions()
+        XCTAssertEqual(attemptedRevisions, [1, 2])
+        XCTAssertEqual(provider.requests.count, 3)
+        let recoveryRequest = try XCTUnwrap(provider.requests.dropFirst().first)
+        XCTAssertTrue(recoveryRequest.messages.contains { message in
+            message.content?.contains("Call task_get for task_id \"task-retry\"") == true
+                && message.content?.contains("current revision is 2") == true
+        })
+
+        let events = await log.replay()
+        let stalePrepared = try XCTUnwrap(events.compactMap { envelope -> ToolExecutionPreparedPayload? in
+            guard case .toolExecutionPrepared(let payload) = envelope.event,
+                  payload.toolCallID == "stale-update" else { return nil }
+            return payload
+        }.first)
+        let staleSettled = try XCTUnwrap(events.compactMap { envelope -> ToolExecutionSettledPayload? in
+            guard case .toolExecutionSettled(let payload) = envelope.event,
+                  payload.executionID == stalePrepared.executionID else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(staleSettled.outcome, .failed)
+        XCTAssertEqual(staleSettled.effectDisposition, .notStarted)
+        XCTAssertTrue(events.contains { envelope in
+            guard case .toolResult(let payload) = envelope.event else { return false }
+            return payload.toolCallId == "stale-update"
+                && payload.observation.contains("Call task_get")
+        })
+        XCTAssertFalse(CoworkProjection.build(from: events)
+            .unresolvedNonReplayableToolExecutions
+            .contains { $0.id == stalePrepared.executionID })
+        let successfulSettlement = try XCTUnwrap(events.compactMap { envelope -> ToolExecutionSettledPayload? in
+            guard case .toolExecutionSettled(let payload) = envelope.event,
+                  payload.toolCallID == "retried-update" else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(successfulSettlement.outcome, .succeeded)
+        XCTAssertEqual(successfulSettlement.effectDisposition, .committed)
+        XCTAssertFalse(events.contains { envelope in
+            guard case .error(let payload) = envelope.event else { return false }
+            return payload.code == "manual_reconciliation"
+        })
+    }
+
+    func testCancellationAfterPrepareBeforeExecutorSettlesNotStarted() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("cancel-before-executor")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = PolicyScriptedProvider([[
+            .toolCalls([ToolCall(
+                id: "cancelled-before-executor",
+                name: "write_file",
+                arguments: json(["path": "must-not-exist.txt", "content": "blocked"]))]),
+            .done(finishReason: "tool_calls"),
+        ]])
+        let gate = PolicyPostPrepareCancellationGate()
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            authorizationRevalidator: { _ in await gate.revalidate() })
+        let execution = Task { try await loop.send("Cancel after prepare.") }
+        await gate.waitUntilEntered()
+
+        execution.cancel()
+        await gate.release()
+        do {
+            _ = try await execution.value
+            XCTFail("Cancellation before executor entry must propagate.")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("must-not-exist.txt").path))
+        let events = await log.replay()
+        let prepared = try XCTUnwrap(events.compactMap { envelope -> ToolExecutionPreparedPayload? in
+            guard case .toolExecutionPrepared(let payload) = envelope.event else { return nil }
+            return payload
+        }.first)
+        let settled = try XCTUnwrap(events.compactMap { envelope -> ToolExecutionSettledPayload? in
+            guard case .toolExecutionSettled(let payload) = envelope.event,
+                  payload.executionID == prepared.executionID else { return nil }
+            return payload
+        }.first)
+        XCTAssertEqual(settled.outcome, .cancelled)
+        XCTAssertEqual(settled.effectDisposition, .notStarted)
+        XCTAssertTrue(events.contains { envelope in
+            guard case .toolResult(let payload) = envelope.event else { return false }
+            return payload.toolCallId == "cancelled-before-executor"
+                && payload.observation == "tool cancelled before execution started"
+        })
+        XCTAssertFalse(CoworkProjection.build(from: events)
+            .unresolvedNonReplayableToolExecutions
+            .contains { $0.id == prepared.executionID })
+    }
+
     func testCancelledNonReplayableToolLeavesExecutionUnsettledForManualReconciliation() async throws {
         let (workspace, log) = try makeWorkspaceAndLog("cancelled-uncertain-side-effect")
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -715,7 +1327,13 @@ final class AgentLoopPolicyTests: XCTestCase {
     }
 
     func testSharedSoftTokenBudgetReservesBeforeDispatchAndReportsProviderOverrun() async throws {
-        let meter = AgentTokenBudgetMeter(limit: 800)
+        // Leave ample room for the real model-facing prompt so this test stays
+        // focused on a provider ignoring its output ceiling rather than on the
+        // separately covered request-too-large admission path.
+        let budgetLimit = 100_000
+        let firstReportedTokens = 6
+        let overrunReportedTokens = budgetLimit - firstReportedTokens + 1
+        let meter = AgentTokenBudgetMeter(limit: budgetLimit)
         let (firstWorkspace, firstLog) = try makeWorkspaceAndLog("budget-first")
         let (secondWorkspace, secondLog) = try makeWorkspaceAndLog("budget-second")
         defer {
@@ -724,13 +1342,19 @@ final class AgentLoopPolicyTests: XCTestCase {
         }
         let firstProvider = PolicyScriptedProvider([[
             .textDelta("first"),
-            .usage(Usage(promptTokens: 4, completionTokens: 2, totalTokens: 6)),
+            .usage(Usage(
+                promptTokens: 4,
+                completionTokens: 2,
+                totalTokens: firstReportedTokens)),
             .done(finishReason: "stop"),
         ]])
         let secondProvider = PolicyScriptedProvider([[
             .textDelta("second"),
             // Simulates a provider that ignores the requested output ceiling.
-            .usage(Usage(promptTokens: 80, completionTokens: 715, totalTokens: 795)),
+            .usage(Usage(
+                promptTokens: 80,
+                completionTokens: overrunReportedTokens - 80,
+                totalTokens: overrunReportedTokens)),
             .done(finishReason: "stop"),
         ]])
         let firstLoop = makeLoop(
@@ -749,24 +1373,26 @@ final class AgentLoopPolicyTests: XCTestCase {
         let firstResult = try await firstLoop.send("Spend six tokens.")
         XCTAssertEqual(firstResult, "first")
         let afterFirst = await meter.snapshot()
-        XCTAssertEqual(afterFirst.consumed, 6)
-        XCTAssertEqual(afterFirst.remaining, 794)
+        XCTAssertEqual(afterFirst.consumed, firstReportedTokens)
+        XCTAssertEqual(afterFirst.remaining, budgetLimit - firstReportedTokens)
         XCTAssertNotNil(firstProvider.requests.first?.maxOutputTokens)
 
         do {
             _ = try await secondLoop.send("Simulate a provider that ignores its output ceiling.")
             XCTFail("Expected the explicitly soft budget to report the provider overrun.")
         } catch let error as AgentExecutionBudgetError {
-            XCTAssertEqual(error, .exhausted(limit: 800, consumed: 801))
+            XCTAssertEqual(
+                error,
+                .exhausted(limit: budgetLimit, consumed: budgetLimit + 1))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
 
         let finalSnapshot = await meter.snapshot()
-        XCTAssertEqual(finalSnapshot.consumed, 801)
+        XCTAssertEqual(finalSnapshot.consumed, budgetLimit + 1)
         XCTAssertEqual(finalSnapshot.remaining, 0)
         let requestedCeiling = try XCTUnwrap(secondProvider.requests.first?.maxOutputTokens)
-        XCTAssertLessThan(requestedCeiling, 795)
+        XCTAssertLessThan(requestedCeiling, overrunReportedTokens)
         let errorPayloads = await errors(in: secondLog)
         XCTAssertEqual(errorPayloads.count, 1)
         XCTAssertEqual(errorPayloads.first?.code, "token_budget_exhausted")
@@ -941,5 +1567,587 @@ final class AgentLoopPolicyTests: XCTestCase {
         XCTAssertEqual(
             toolMessages.compactMap(\.content),
             ["result:ask-slow", "result:delegate-fast", "result:ask-mid", "result:delegate-mid"])
+    }
+
+    func testRepeatedIdenticalDeniedToolCallIsReviewedOnceThenTerminates() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("denial-circuit-breaker")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let semanticallyIdenticalArguments = [
+            #"{"path":"blocked.txt","content":"blocked"}"#,
+            #"{ "content" : "blocked", "path" : "blocked.txt" }"#,
+            "{\n  \"path\": \"blocked.txt\",\n  \"content\": \"blocked\"\n}",
+        ]
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(id: "denied-1", name: "write_file", arguments: semanticallyIdenticalArguments[0])]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(id: "denied-2", name: "write_file", arguments: semanticallyIdenticalArguments[1])]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(id: "denied-3", name: "write_file", arguments: semanticallyIdenticalArguments[2])]),
+             .done(finishReason: "tool_calls")],
+        ])
+        let responder = CapturingPolicyResponder(.deny)
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder)
+
+        do {
+            _ = try await loop.send("Keep retrying the same denied write.")
+            XCTFail("The third identical denied call must terminate the run.")
+        } catch let error as AgentLoopError {
+            XCTAssertEqual(error, .repeatedDeniedToolCall(tool: "write_file"))
+        }
+
+        let approvalRequests = await responder.requests()
+        XCTAssertEqual(approvalRequests.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("blocked.txt").path))
+        let terminalErrors = await errors(in: log)
+        XCTAssertEqual(terminalErrors.last?.code, "repeated_denied_tool_call")
+    }
+
+    func testIdenticalToolCallGetsOneFreshReviewAfterTransientReviewerProviderFailure() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("transient-reviewer-retry")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-transient-reviewer-retry")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Create recovered.txt after a transient reviewer outage.",
+            roleHint: "worker",
+            expectedDeliverable: "recovered.txt")
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "reviewer-failed-1",
+                name: "write_file",
+                arguments: #"{"path":"recovered.txt","content":"recovered"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "reviewer-retry-2",
+                name: "write_file",
+                arguments: #"{ "content" : "recovered", "path" : "recovered.txt" }"#)]),
+             .done(finishReason: "tool_calls")],
+            [.textDelta("Write recovered."), .done(finishReason: "stop")],
+        ])
+        let responder = SequencedStructuredPolicyResponder([
+            PermissionApprovalResolution(
+                decision: .deny,
+                reason: "automatic reviewer provider failed: Network connection lost",
+                source: .automaticReviewerFailure,
+                reviewTaskID: PermissionReviewTaskID(rawValue: "review-provider-failure"),
+                reviewStatus: .failed,
+                failureKind: .providerFailure,
+                failureSource: .reviewerFailed),
+            PermissionApprovalResolution(
+                decision: .allow,
+                reason: "automatic reviewer allowed the fresh request",
+                source: .automaticReviewer,
+                reviewTaskID: PermissionReviewTaskID(rawValue: "review-retry-allow"),
+                reviewStatus: .allowed),
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            rootTaskID: taskID,
+            taskAttempt: 1)
+
+        let result = try await loop.send("Retry a write after a transient reviewer outage.")
+
+        XCTAssertEqual(result, "Write recovered.")
+        XCTAssertEqual(
+            try String(contentsOf: workspace.appendingPathComponent("recovered.txt"),
+                       encoding: .utf8),
+            "recovered")
+        let approvalRequests = await responder.requests()
+        XCTAssertEqual(approvalRequests.count, 2)
+        if approvalRequests.count == 2 {
+            XCTAssertNotEqual(approvalRequests[0].requestId, approvalRequests[1].requestId)
+        }
+        let preparedCount = await log.replay().filter { envelope in
+            if case .toolExecutionPrepared = envelope.event { return true }
+            return false
+        }.count
+        XCTAssertEqual(preparedCount, 1)
+    }
+
+    func testFreshReviewDoesNotRearmAfterSecondTransientReviewerFailure() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("bounded-transient-reviewer-retry")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let arguments = #"{"path":"never-written.txt","content":"blocked"}"#
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "transient-failure-1",
+                name: "write_file",
+                arguments: arguments)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "transient-failure-2",
+                name: "write_file",
+                arguments: arguments)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "transient-failure-3",
+                name: "write_file",
+                arguments: arguments)]),
+             .done(finishReason: "tool_calls")],
+        ])
+        let responder = SequencedStructuredPolicyResponder([
+            PermissionApprovalResolution(
+                decision: .deny,
+                reason: "first reviewer provider failure",
+                source: .automaticReviewerFailure,
+                reviewTaskID: PermissionReviewTaskID(rawValue: "review-provider-failure-1"),
+                reviewStatus: .failed,
+                failureKind: .providerFailure,
+                failureSource: .reviewerFailed),
+            PermissionApprovalResolution(
+                decision: .deny,
+                reason: "second reviewer provider failure",
+                source: .automaticReviewerFailure,
+                reviewTaskID: PermissionReviewTaskID(rawValue: "review-provider-failure-2"),
+                reviewStatus: .failed,
+                failureKind: .providerFailure,
+                failureSource: .reviewerFailed),
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder)
+
+        do {
+            _ = try await loop.send("Keep retrying through reviewer outages.")
+            XCTFail("A second transient failure must not re-arm another fresh review.")
+        } catch let error as AgentLoopError {
+            XCTAssertEqual(error, .repeatedDeniedToolCall(tool: "write_file"))
+        }
+
+        let approvalRequests = await responder.requests()
+        XCTAssertEqual(approvalRequests.count, 2)
+        let preparedCount = await log.replay().filter { envelope in
+            if case .toolExecutionPrepared = envelope.event { return true }
+            return false
+        }.count
+        XCTAssertEqual(preparedCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("never-written.txt").path))
+    }
+
+    func testRepeatedDeniedCoworkActionIsReportedOnce() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("deduplicated-denial-evidence")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-deduplicated-denial-evidence")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Attempt blocked.txt.",
+            roleHint: "worker",
+            expectedDeliverable: "blocked.txt")
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "denied-evidence-1",
+                name: "write_file",
+                arguments: #"{"path":"blocked.txt","content":"blocked"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "denied-evidence-2",
+                name: "write_file",
+                arguments: #"{ "content" : "blocked", "path" : "blocked.txt" }"#)]),
+             .done(finishReason: "tool_calls")],
+            [.textDelta("The write remained blocked."), .done(finishReason: "stop")],
+        ])
+        let responder = CapturingPolicyResponder(.deny)
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            rootTaskID: taskID,
+            taskAttempt: 1)
+
+        do {
+            _ = try await loop.send("Attempt the same denied write twice.")
+            XCTFail("A denied Cowork side effect cannot be reported as completed.")
+        } catch let error as AgentLoopError {
+            guard case .unresolvedDeniedSideEffects(let actions) = error else {
+                return XCTFail("Unexpected AgentLoopError: \(error)")
+            }
+            XCTAssertEqual(actions.count, 1)
+            XCTAssertEqual(actions.first?.contains("blocked.txt"), true)
+        }
+
+        let approvalRequests = await responder.requests()
+        XCTAssertEqual(approvalRequests.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("blocked.txt").path))
+    }
+
+    func testRepeatedIdenticalUnleasedToolCallTerminatesWithoutReviewer() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("unleased-denial-circuit-breaker")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "unleased-1",
+                name: "write_file",
+                arguments: #"{"content":"blocked","path":"blocked.txt"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "unleased-2",
+                name: "write_file",
+                arguments: #"{ "path": "blocked.txt", "content": "blocked" }"#)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "unleased-3",
+                name: "write_file",
+                arguments: #"{"path":"blocked.txt","content":"blocked"}"#)]),
+             .done(finishReason: "tool_calls")],
+        ])
+        let responder = CapturingPolicyResponder(.allow)
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry(
+                registrations: [ToolRegistration(
+                    tool: WriteFileTool(),
+                    grantingCapabilities: [.applyPatch])],
+                registryVersion: "test.cowork.v1"),
+            responder: responder,
+            capabilityLease: CapabilityLease(tools: [.readWorkspace]),
+            workspaceLease: WorkspaceLease(rootPath: workspace.path, access: .readWrite))
+
+        do {
+            _ = try await loop.send("Keep retrying an unleased write.")
+            XCTFail("The third identical unleased call must terminate the run.")
+        } catch let error as AgentLoopError {
+            XCTAssertEqual(error, .repeatedDeniedToolCall(tool: "write_file"))
+        }
+        let responderRequests = await responder.requests()
+        XCTAssertTrue(responderRequests.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("blocked.txt").path))
+    }
+
+    func testInvalidCoworkWriteCannotBeReportedAsCompleted() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("invalid-write-completion")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-invalid-write-completion")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Create invalid.txt.",
+            roleHint: "worker",
+            expectedDeliverable: "invalid.txt")
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "invalid-write",
+                name: "write_file",
+                arguments: #"{"path":"invalid.txt"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.textDelta("I created invalid.txt."), .done(finishReason: "stop")],
+        ])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            taskAttempt: 1)
+
+        do {
+            _ = try await loop.send("Create it.")
+            XCTFail("Invalid mutating input cannot count as execution evidence.")
+        } catch let error as AgentLoopError {
+            guard case .unresolvedDeniedSideEffects(let actions) = error else {
+                return XCTFail("Unexpected AgentLoopError: \(error)")
+            }
+            XCTAssertTrue(actions.contains { $0.contains("invalid.txt") })
+        }
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("invalid.txt").path))
+    }
+
+    func testChangedDeniedResourceHasDistinctActionIdentity() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("denial-action-identity")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = PolicyScriptedProvider([
+            [.toolCalls([ToolCall(
+                id: "denied-a",
+                name: "write_file",
+                arguments: #"{"path":"a.txt","content":"blocked"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.toolCalls([ToolCall(
+                id: "denied-b",
+                name: "write_file",
+                arguments: #"{"path":"b.txt","content":"blocked"}"#)]),
+             .done(finishReason: "tool_calls")],
+            [.textDelta("Both distinct writes were denied."), .done(finishReason: "stop")],
+        ])
+        let responder = CapturingPolicyResponder(.deny)
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: ToolRegistry([WriteFileTool()]),
+            responder: responder)
+
+        let answer = try await loop.send("Attempt two different writes.")
+
+        XCTAssertEqual(answer, "Both distinct writes were denied.")
+        let approvalRequests = await responder.requests()
+        XCTAssertEqual(approvalRequests.count, 2)
+    }
+
+    func testCoworkRunRejectsCorruptDurableHistoryBeforeProviderDispatch() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("corrupt-cowork-history")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = PolicyScriptedProvider([[
+            .textDelta("must not run"),
+            .done(finishReason: "stop"),
+        ]])
+        let contract = TaskContract(
+            id: TaskID(rawValue: "task-corrupt-cowork-history"),
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Do not continue from corrupt history.",
+            roleHint: "worker",
+            expectedDeliverable: "none")
+        try Data("{\"invalid\":true}\n".utf8)
+            .write(to: workspace.appendingPathComponent("events.jsonl"))
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork))
+
+        do {
+            _ = try await loop.send("Continue the task.")
+            XCTFail("Cowork AgentLoop must not dispatch against corrupt durable history.")
+        } catch let error as EventLogError {
+            XCTAssertEqual(error, .corruptedEvent(line: 1))
+        }
+        XCTAssertTrue(provider.requests.isEmpty)
+    }
+
+    func testRestoredCoworkTaskCannotCompleteAfterAllowedWriteWithoutExecutionSettlement() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("restore-permission-resolved-window")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-restore-permission-resolved")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Write the pending file.",
+            roleHint: "worker",
+            expectedDeliverable: "pending.txt")
+        let registry = ToolRegistry([WriteFileTool()])
+        let arguments = #"{"content":"pending","path":"pending.txt"}"#
+        let intent = WriteFileTool().permissionIntent(
+            ToolArgs(raw: arguments),
+            workspaceRoot: workspace)
+        let authorization = try registry.resolveAuthorization(
+            toolName: "write_file",
+            intent: intent,
+            risksNetwork: false,
+            normalizedArguments: arguments,
+            invocation: ToolAuthorizationInvocationContext(
+                agent: contract.assignee,
+                taskID: taskID,
+                attempt: 1,
+                toolCallID: "pending-write"),
+            capabilityLease: nil,
+            workspaceLease: nil)
+        try await log.append(.permissionResolved(PermissionResolvedPayload(
+            tool: "write_file",
+            decision: .allow,
+            risk: .medium,
+            reason: "approved before the prior process stopped",
+            intent: intent,
+            authorization: authorization,
+            source: .automaticReviewer,
+            reviewStatus: .allowed)))
+
+        let provider = PolicyScriptedProvider([[
+            .textDelta("The file is complete."),
+            .done(finishReason: "stop"),
+        ]])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: registry,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            taskAttempt: 2)
+
+        do {
+            _ = try await loop.send("Resume the task.")
+            XCTFail("A prior allow without successful settlement is not completion evidence.")
+        } catch let error as AgentLoopError {
+            guard case .unresolvedDeniedSideEffects(let actions) = error else {
+                return XCTFail("Unexpected AgentLoopError: \(error)")
+            }
+            XCTAssertTrue(actions.contains { $0.contains("pending.txt") })
+        }
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("pending.txt").path))
+    }
+
+    func testRestoredCoworkTaskCannotCompleteAfterReviewSettledBeforePermissionResolved() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("restore-review-settled-window")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-restore-review-settled")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Write the pending file.",
+            roleHint: "worker",
+            expectedDeliverable: "pending.txt")
+        let registry = ToolRegistry([WriteFileTool()])
+        let arguments = #"{"content":"pending","path":"pending.txt"}"#
+        let intent = WriteFileTool().permissionIntent(
+            ToolArgs(raw: arguments),
+            workspaceRoot: workspace)
+        let authorization = try registry.resolveAuthorization(
+            toolName: "write_file",
+            intent: intent,
+            risksNetwork: false,
+            normalizedArguments: arguments,
+            invocation: ToolAuthorizationInvocationContext(
+                agent: contract.assignee,
+                taskID: taskID,
+                attempt: 1,
+                toolCallID: "pending-write"),
+            capabilityLease: nil,
+            workspaceLease: nil)
+        try await log.append(.permissionReviewSettled(PermissionReviewSettledPayload(
+            reviewTaskID: PermissionReviewTaskID(rawValue: "review-before-crash"),
+            requestID: RequestID(rawValue: "request-before-crash"),
+            requestingAgent: contract.assignee,
+            reviewerAgent: AgentID(rawValue: "permission-reviewer"),
+            reviewerModel: ModelID(rawValue: "review-model"),
+            tool: "write_file",
+            decision: .allow,
+            risk: .medium,
+            status: .allowed,
+            reason: "approved before the prior process stopped",
+            authorization: authorization,
+            durationMillis: 1)))
+
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: PolicyScriptedProvider([[
+                .textDelta("The file is complete."),
+                .done(finishReason: "stop"),
+            ]]),
+            registry: registry,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            taskAttempt: 2)
+
+        do {
+            _ = try await loop.send("Resume the task.")
+            XCTFail("A settled review alone is not execution evidence.")
+        } catch let error as AgentLoopError {
+            guard case .unresolvedDeniedSideEffects(let actions) = error else {
+                return XCTFail("Unexpected AgentLoopError: \(error)")
+            }
+            XCTAssertTrue(actions.contains { $0.contains("pending.txt") })
+        }
+    }
+
+    func testRestoredSuccessfulSettlementClearsPriorPermissionEvidence() async throws {
+        let (workspace, log) = try makeWorkspaceAndLog("restore-successful-settlement")
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let taskID = TaskID(rawValue: "task-restore-success")
+        let contract = TaskContract(
+            id: taskID,
+            issuer: AgentID(rawValue: "main"),
+            assignee: AgentID(rawValue: "policy-agent"),
+            objective: "Write the completed file.",
+            roleHint: "worker",
+            expectedDeliverable: "completed.txt")
+        let registry = ToolRegistry([WriteFileTool()])
+        let arguments = #"{"content":"complete","path":"completed.txt"}"#
+        let intent = WriteFileTool().permissionIntent(
+            ToolArgs(raw: arguments),
+            workspaceRoot: workspace)
+        let authorization = try registry.resolveAuthorization(
+            toolName: "write_file",
+            intent: intent,
+            risksNetwork: false,
+            normalizedArguments: arguments,
+            invocation: ToolAuthorizationInvocationContext(
+                agent: contract.assignee,
+                taskID: taskID,
+                attempt: 1,
+                toolCallID: "completed-write"),
+            capabilityLease: nil,
+            workspaceLease: nil)
+        let prepared = ToolExecutionPreparedPayload(
+            executionID: "completed-execution",
+            taskID: taskID,
+            attempt: 1,
+            toolCallID: "completed-write",
+            agent: contract.assignee,
+            tool: "write_file",
+            sideEffect: .write,
+            intent: intent,
+            authorization: authorization)
+        try await log.append([
+            .permissionResolved(PermissionResolvedPayload(
+                tool: "write_file",
+                decision: .allow,
+                risk: .medium,
+                reason: "approved",
+                intent: intent,
+                authorization: authorization,
+                source: .automaticReviewer,
+                reviewStatus: .allowed)),
+            .toolExecutionPrepared(prepared),
+            .toolExecutionSettled(ToolExecutionSettledPayload(
+                prepared: prepared,
+                outcome: .succeeded)),
+        ])
+        let provider = PolicyScriptedProvider([[
+            .textDelta("The prior write is durably complete."),
+            .done(finishReason: "stop"),
+        ]])
+        let loop = makeLoop(
+            workspace: workspace,
+            log: log,
+            provider: provider,
+            registry: registry,
+            context: ContextBuilder(
+                taskContract: contract,
+                runtimeEnvironment: .cowork),
+            taskAttempt: 2)
+
+        let answer = try await loop.send("Confirm the recovered task.")
+        XCTAssertEqual(answer, "The prior write is durably complete.")
     }
 }

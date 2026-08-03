@@ -32,6 +32,12 @@ final class ToolExecutionProtocolTests: XCTestCase {
         let session = SessionID(rawValue: "sess_tool_execution")
         let taskID = TaskID(rawValue: "task_tool_execution")
         let agent = AgentID(rawValue: "worker")
+        let intent = PermissionIntent(
+            action: "filesystem.write",
+            resources: [PermissionResource(kind: .workspacePath, value: "a.swift", access: .readWrite)],
+            dataEffects: [.mutate],
+            risks: [.workspaceMutation],
+            replayPolicy: .requiresManualReconciliation)
         let prepared = ToolExecutionPreparedPayload(
             executionID: "exec_1",
             taskID: taskID,
@@ -39,10 +45,12 @@ final class ToolExecutionProtocolTests: XCTestCase {
             toolCallID: "call_1",
             agent: agent,
             tool: "write_file",
-            sideEffect: .write)
+            sideEffect: .write,
+            intent: intent)
         let settled = ToolExecutionSettledPayload(
             prepared: prepared,
             outcome: .succeeded,
+            effectDisposition: .committed,
             reason: "result persisted")
         let envelopes = [
             Envelope(
@@ -68,6 +76,7 @@ final class ToolExecutionProtocolTests: XCTestCase {
         XCTAssertEqual(wireTypes, ["tool_execution_prepared", "tool_execution_settled"])
         XCTAssertEqual(try encoded.map { try decoder.decode(Envelope.self, from: $0) }, envelopes)
         XCTAssertEqual(settled.prepared, prepared)
+        XCTAssertEqual(settled.effectDisposition, .committed)
     }
 
     func testLegacyToolResultStillDecodesWithoutExecutionEvents() throws {
@@ -78,5 +87,30 @@ final class ToolExecutionProtocolTests: XCTestCase {
         XCTAssertEqual(
             envelope.event,
             .toolResult(.init(toolCallId: "call_legacy", observation: "ok")))
+    }
+
+    func testLegacyPreparedExecutionWithoutIntentStillDecodes() throws {
+        let json = #"{"executionID":"exec_legacy","toolCallID":"call_legacy","tool":"read_file","sideEffect":"read_only","replayPolicy":"safe_to_replay"}"#
+
+        let payload = try JSONDecoder().decode(
+            ToolExecutionPreparedPayload.self,
+            from: Data(json.utf8))
+
+        XCTAssertEqual(payload.executionID, "exec_legacy")
+        XCTAssertNil(payload.intent)
+        XCTAssertNil(payload.authorization)
+        XCTAssertEqual(payload.replayPolicy, .safeToReplay)
+    }
+
+    func testLegacySettledExecutionWithoutEffectDispositionDecodesConservatively() throws {
+        let json = #"{"executionID":"exec_legacy","toolCallID":"call_legacy","tool":"task_update","sideEffect":"write","replayPolicy":"requires_manual_reconciliation","outcome":"failed","reason":"expected revision 1, actual 2"}"#
+
+        let payload = try JSONDecoder().decode(
+            ToolExecutionSettledPayload.self,
+            from: Data(json.utf8))
+
+        XCTAssertEqual(payload.outcome, .failed)
+        XCTAssertNil(payload.effectDisposition)
+        XCTAssertTrue(payload.prepared.requiresTaskReplayReconciliation)
     }
 }

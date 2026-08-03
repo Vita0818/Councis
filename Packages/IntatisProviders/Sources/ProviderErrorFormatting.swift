@@ -2,6 +2,89 @@ import Foundation
 import IntatisCore
 import IntatisProtocol
 
+/// A provider/account hard usage limit that cannot be resolved by retrying the
+/// current request. This is intentionally distinct from transient HTTP 429
+/// rate limiting, which remains a normal retryable provider error.
+public struct ProviderUsageLimitError: Error, LocalizedError, Equatable, Sendable {
+    public var signal: String
+    public var providerMessage: String?
+    public var statusCode: Int?
+    public var operation: String?
+
+    public init(signal: String,
+                providerMessage: String? = nil,
+                statusCode: Int? = nil,
+                operation: String? = nil) {
+        self.signal = signal
+        self.providerMessage = providerMessage
+        self.statusCode = statusCode
+        self.operation = operation
+    }
+
+    public var errorDescription: String? {
+        var parts: [String] = []
+        if let operation, let statusCode {
+            parts.append("\(operation) failed with HTTP \(statusCode).")
+        } else if let operation {
+            parts.append("\(operation) failed.")
+        }
+        parts.append("The provider account reached a hard usage limit.")
+        if !signal.isEmpty {
+            let safeSignal = PermissionReviewTextSanitizer.sanitizeDiagnostic(
+                signal,
+                maxCharacters: 80).text
+            parts.append("Provider signal: \(safeSignal).")
+        }
+        if let providerMessage, !providerMessage.isEmpty {
+            let safeMessage = PermissionReviewTextSanitizer.sanitizeDiagnostic(
+                providerMessage,
+                maxCharacters: 360).text
+            parts.append("Provider said: \(safeMessage)")
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
+/// Machine-classified provider rejection indicating that the request input
+/// exceeded the selected model's context window. Compaction may retry only
+/// this typed condition; arbitrary localized error text is never sufficient.
+public struct ProviderContextWindowExceededError:
+    Error, LocalizedError, Equatable, Sendable
+{
+    public var signal: String
+    public var providerMessage: String?
+    public var statusCode: Int?
+    public var operation: String?
+
+    public init(
+        signal: String,
+        providerMessage: String? = nil,
+        statusCode: Int? = nil,
+        operation: String? = nil
+    ) {
+        self.signal = signal
+        self.providerMessage = providerMessage
+        self.statusCode = statusCode
+        self.operation = operation
+    }
+
+    public var errorDescription: String? {
+        var parts = [operation.map { "\($0) exceeded the model context window." }
+            ?? "The request exceeded the model context window."]
+        if !signal.isEmpty {
+            parts.append("Provider signal: \(signal).")
+        }
+        if let providerMessage, !providerMessage.isEmpty {
+            parts.append(
+                "Provider said: "
+                + PermissionReviewTextSanitizer.sanitizeDiagnostic(
+                    providerMessage,
+                    maxCharacters: 360).text)
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
 struct ProviderRetryHint: Equatable, Sendable {
     var delaySeconds: Double
     var source: String
@@ -18,7 +101,21 @@ enum ProviderErrorFormatting {
     static func httpStatus(_ status: Int,
                            body: Data? = nil,
                            headers: [String: String] = [:],
-                           operation: String) -> IntatisError {
+                           operation: String) -> Error {
+        if let body,
+           let contextWindow = structuredContextWindowExceededError(
+               from: body,
+               statusCode: status,
+               operation: operation) {
+            return contextWindow
+        }
+        if let body,
+           let usageLimit = structuredUsageLimitError(
+               from: body,
+               statusCode: status,
+               operation: operation) {
+            return usageLimit
+        }
         var parts = ["\(operation) failed with HTTP \(status)\(statusLabel(status))."]
         if let guidance = statusGuidance(status) {
             parts.append(guidance)
@@ -33,7 +130,7 @@ enum ProviderErrorFormatting {
                 parts.append("Preview: \(preview)")
             }
         }
-        return .provider(parts.joined(separator: " "))
+        return IntatisError.provider(parts.joined(separator: " "))
     }
 
     static func isRetryableHTTPStatus(_ status: Int) -> Bool {
@@ -81,8 +178,15 @@ enum ProviderErrorFormatting {
         if error is CancellationError {
             return IntatisError.cancelled
         }
+        if let usageLimit = error as? ProviderUsageLimitError {
+            return usageLimit
+        }
+        if let contextWindow =
+            error as? ProviderContextWindowExceededError {
+            return contextWindow
+        }
         if let intatis = error as? IntatisError {
-            return intatis
+            return sanitized(intatis)
         }
         if let urlError = error as? URLError {
             return IntatisError.provider(transportMessage(urlError))
@@ -90,16 +194,41 @@ enum ProviderErrorFormatting {
         return IntatisError.provider(clean(error.localizedDescription))
     }
 
-    static func streamErrorPayload(_ data: Data) -> IntatisError? {
+    static func streamErrorPayload(_ data: Data) -> Error? {
+        if let contextWindow = structuredContextWindowExceededError(
+            from: data,
+            operation: "streaming request") {
+            return contextWindow
+        }
+        if let usageLimit = structuredUsageLimitError(
+            from: data,
+            operation: "streaming request") {
+            return usageLimit
+        }
         guard let message = providerErrorMessage(from: data) else { return nil }
-        return .provider("Provider rejected the streaming request. Provider said: \(message)")
+        return IntatisError.provider(
+            "Provider rejected the streaming request. Provider said: \(message)")
+    }
+
+    static func contextWindowExceeded(
+        from value: JSONValue,
+        statusCode: Int? = nil,
+        operation: String? = nil
+    ) -> ProviderContextWindowExceededError? {
+        guard let data = try? JSONEncoder().encode(value) else {
+            return nil
+        }
+        return structuredContextWindowExceededError(
+            from: data,
+            statusCode: statusCode,
+            operation: operation)
     }
 
     static func invalidStreamPayload(_ payload: String, underlying: Error) -> IntatisError {
         let preview = clean(payload, maxCharacters: 180)
         return .decoding(
             "provider stream returned non-JSON SSE data. Check endpoint compatibility. " +
-            "Preview: \(preview). \(underlying.localizedDescription)")
+            "Preview: \(preview). Decoder said: \(clean(underlying.localizedDescription, maxCharacters: 180))")
     }
 
     static func incompleteStream(operation: String) -> IntatisError {
@@ -110,7 +239,7 @@ enum ProviderErrorFormatting {
 
     static func invalidToolCallStream(_ message: String) -> IntatisError {
         .decoding(
-            "provider tool-call stream was incomplete. \(message) " +
+            "provider tool-call stream was incomplete. \(clean(message)) " +
             "Check tool-calling compatibility for this endpoint/model.")
     }
 
@@ -173,6 +302,107 @@ enum ProviderErrorFormatting {
             return nil
         }
         return clean(message)
+    }
+
+    /// Classification is deliberately limited to machine-readable fields in
+    /// a structured provider payload. Neither HTTP 429 alone nor arbitrary
+    /// unstructured body text is sufficient to claim an account hard limit.
+    private static func structuredUsageLimitError(
+        from data: Data,
+        statusCode: Int? = nil,
+        operation: String? = nil
+    ) -> ProviderUsageLimitError? {
+        let capped = Data(data.prefix(maxBodyBytes))
+        guard let value = try? JSONDecoder().decode(JSONValue.self, from: capped),
+              case .object(let root) = value else {
+            return nil
+        }
+
+        var objects: [[String: JSONValue]] = []
+        if let error = root["error"], case .object(let nestedError) = error {
+            objects.append(nestedError)
+        }
+        objects.append(root)
+
+        for object in objects {
+            for key in ["code", "type", "message"] {
+                guard let candidate = object[key]?.displayString,
+                      let signal = hardUsageLimitSignal(in: candidate) else {
+                    continue
+                }
+                return ProviderUsageLimitError(
+                    signal: signal,
+                    providerMessage: providerMessage(from: value).map { clean($0) },
+                    statusCode: statusCode,
+                    operation: operation)
+            }
+        }
+        return nil
+    }
+
+    private static func structuredContextWindowExceededError(
+        from data: Data,
+        statusCode: Int? = nil,
+        operation: String? = nil
+    ) -> ProviderContextWindowExceededError? {
+        let capped = Data(data.prefix(maxBodyBytes))
+        guard let value = try? JSONDecoder().decode(
+                  JSONValue.self,
+                  from: capped),
+              case .object(let root) = value else {
+            return nil
+        }
+        var objects: [[String: JSONValue]] = []
+        if let error = root["error"], case .object(let nested) = error {
+            objects.append(nested)
+        }
+        if let response = root["response"],
+           case .object(let responseObject) = response {
+            if let error = responseObject["error"],
+               case .object(let nested) = error {
+                objects.append(nested)
+            }
+            objects.append(responseObject)
+        }
+        objects.append(root)
+
+        let known = Set([
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "maximum_context_length_exceeded",
+            "prompt_too_long",
+        ])
+        for object in objects {
+            for key in ["code", "type"] {
+                guard let rawValue = object[key]?.displayString else {
+                    continue
+                }
+                let value = rawValue.lowercased()
+                guard known.contains(value) else { continue }
+                return ProviderContextWindowExceededError(
+                    signal: value,
+                    providerMessage:
+                        providerMessage(from: .object(root))
+                            .map { clean($0) },
+                    statusCode: statusCode,
+                    operation: operation)
+            }
+        }
+        return nil
+    }
+
+    private static func hardUsageLimitSignal(in value: String) -> String? {
+        let tokens = value.lowercased().split { character in
+            !character.isLetter && !character.isNumber && character != "_"
+        }
+        let knownSignals = [
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+            "usage_limit_reached",
+        ]
+        return knownSignals.first { signal in
+            tokens.contains { $0 == Substring(signal) }
+        }
     }
 
     private static func providerErrorMessage(from data: Data) -> String? {
@@ -348,8 +578,28 @@ enum ProviderErrorFormatting {
         let collapsed = value
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard collapsed.count > maxCharacters else { return collapsed }
-        return String(collapsed.prefix(maxCharacters)) + "..."
+        return PermissionReviewTextSanitizer.sanitizeDiagnostic(
+            collapsed,
+            maxCharacters: maxCharacters).text
+    }
+
+    private static func sanitized(_ error: IntatisError) -> IntatisError {
+        switch error {
+        case .config(let message):
+            return .config(clean(message))
+        case .provider(let message):
+            return .provider(clean(message))
+        case .decoding(let message):
+            return .decoding(clean(message))
+        case .io(let message):
+            return .io(clean(message))
+        case .notFound(let message):
+            return .notFound(clean(message))
+        case .permissionDenied(let message):
+            return .permissionDenied(clean(message))
+        case .cancelled:
+            return .cancelled
+        }
     }
 }
 

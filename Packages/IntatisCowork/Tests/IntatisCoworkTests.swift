@@ -15,10 +15,17 @@ private let B = AgentID(rawValue: "Kikaria")
 private final class ScriptedProvider: ToolCallingProvider, @unchecked Sendable {
     private var responses: [[AgentChunk]]
     private var index = 0
+    private var capturedRequests: [AgentRequest] = []
     private let lock = NSLock()
     init(_ responses: [[AgentChunk]]) { self.responses = responses }
+    var requests: [AgentRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedRequests
+    }
     func stream(_ request: AgentRequest) -> AsyncThrowingStream<AgentChunk, Error> {
         lock.lock()
+        capturedRequests.append(request)
         let chunks = responses.isEmpty ? [.done(finishReason: "stop")] : responses[min(index, responses.count - 1)]
         index += 1
         lock.unlock()
@@ -227,6 +234,232 @@ final class IntatisCoworkTests: XCTestCase {
         XCTAssertEqual(workerProvider.requests.count, 0)
     }
 
+    func testEachAgentInvocationBuildsSkillsFromItsOwnWorkspace() async throws {
+        let log = try tempLog()
+        let wsA = try tempWorkspace()
+        let wsB = try tempWorkspace()
+        defer {
+            try? FileManager.default.removeItem(at: wsA)
+            try? FileManager.default.removeItem(at: wsB)
+        }
+
+        func installSkill(
+            _ name: String,
+            marker: String,
+            in workspace: URL
+        ) throws {
+            let directory = workspace
+                .appendingPathComponent(
+                    ".agents/skills/\(name)",
+                    isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true)
+            try """
+            ---
+            name: \(name)
+            description: Workspace-local \(name) workflow.
+            ---
+            \(marker)
+            """.write(
+                to: directory.appendingPathComponent("SKILL.md"),
+                atomically: true,
+                encoding: .utf8)
+        }
+
+        try installSkill("alpha", marker: "ALPHA_BODY", in: wsA)
+        try installSkill("beta", marker: "BETA_BODY", in: wsB)
+        let providerA = CapturingProvider([
+            .textDelta("alpha done"),
+            .done(finishReason: "stop"),
+        ])
+        let providerB = CapturingProvider([
+            .textDelta("beta done"),
+            .done(finishReason: "stop"),
+        ])
+        let orchestrator = Orchestrator(
+            log: log,
+            allowsShell: false,
+            responder: FixedResponder(.allow)
+        ) { agent in
+            agent.name == A ? providerA : providerB
+        }
+
+        let attachedA = await orchestrator.attach(Agent(
+            name: A,
+            workspaceRoot: wsA,
+            model: ModelID(rawValue: "m"),
+            profile: .reviewed))
+        let attachedB = await orchestrator.attach(Agent(
+            name: B,
+            workspaceRoot: wsB,
+            model: ModelID(rawValue: "m"),
+            profile: .reviewed))
+        XCTAssertTrue(attachedA)
+        XCTAssertTrue(attachedB)
+
+        let sentA =
+            await orchestrator.send("Use $alpha.", to: A)
+        let sentB =
+            await orchestrator.send("Use $beta.", to: B)
+        XCTAssertEqual(sentA, .sent)
+        XCTAssertEqual(sentB, .sent)
+
+        let requestA = try XCTUnwrap(providerA.requests.first)
+        let requestB = try XCTUnwrap(providerB.requests.first)
+        let textA = requestA.messages.compactMap(\.content)
+            .joined(separator: "\n")
+        let textB = requestB.messages.compactMap(\.content)
+            .joined(separator: "\n")
+        XCTAssertTrue(textA.contains("alpha"))
+        XCTAssertTrue(textA.contains("ALPHA_BODY"))
+        XCTAssertFalse(textA.contains("beta"))
+        XCTAssertFalse(textA.contains("BETA_BODY"))
+        XCTAssertTrue(textB.contains("beta"))
+        XCTAssertTrue(textB.contains("BETA_BODY"))
+        XCTAssertFalse(textB.contains("alpha"))
+        XCTAssertFalse(textB.contains("ALPHA_BODY"))
+        XCTAssertEqual(
+            Set(requestA.tools.map(\.name))
+                .intersection(["activate_skill", "read_skill_resource"]),
+            ["activate_skill", "read_skill_resource"])
+        XCTAssertEqual(
+            Set(requestB.tools.map(\.name))
+                .intersection(["activate_skill", "read_skill_resource"]),
+            ["activate_skill", "read_skill_resource"])
+    }
+
+    func testMainProviderRequestCarriesCompletedConversationAcrossTurns() async throws {
+        let log = try tempLog()
+        let main = AgentID(rawValue: "main")
+        let workspace = try tempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = ScriptedProvider([
+            [.textDelta("A1"), .done(finishReason: "stop")],
+            [.textDelta("A2"), .done(finishReason: "stop")],
+            [.textDelta("A3"), .done(finishReason: "stop")],
+        ])
+        let orchestrator = Orchestrator(
+            log: log,
+            allowsShell: false,
+            responder: FixedResponder(.allow)) { _ in provider }
+        let submittedIntentStore = SubmittedIntentStore(log: log)
+
+        await orchestrator.attach(Agent(
+            name: main,
+            workspaceRoot: workspace,
+            model: ModelID(rawValue: "m"),
+            profile: .reviewed,
+            coordinationDepth: Agent.defaultCoordinationDepth))
+
+        let firstPayload = UserMessagePayload(
+            text: "U1",
+            to: main,
+            submissionID: SubmissionID(rawValue: "sub_main_u1"))
+        let secondPayload = UserMessagePayload(
+            text: "U2",
+            to: main,
+            submissionID: SubmissionID(rawValue: "sub_main_u2"))
+        let thirdPayload = UserMessagePayload(
+            text: "U3",
+            to: main,
+            submissionID: SubmissionID(rawValue: "sub_main_u3"))
+        _ = try await submittedIntentStore.accept(payload: firstPayload)
+        let first = await orchestrator.send(
+            "U1",
+            to: main,
+            userMessage: firstPayload,
+            recordUserMessage: false)
+        _ = try await submittedIntentStore.accept(payload: secondPayload)
+        let second = await orchestrator.send(
+            "U2",
+            to: main,
+            userMessage: secondPayload,
+            recordUserMessage: false)
+        _ = try await submittedIntentStore.accept(payload: thirdPayload)
+        let third = await orchestrator.send(
+            "U3",
+            to: main,
+            userMessage: thirdPayload,
+            recordUserMessage: false)
+        XCTAssertEqual(first, .sent)
+        XCTAssertEqual(second, .sent)
+        XCTAssertEqual(third, .sent)
+
+        let thirdRequest = try XCTUnwrap(provider.requests.last)
+        let expectedText = Set(["U1", "A1", "U2", "A2", "U3"])
+        let conversation: [(AgentRole, String)] = thirdRequest.messages.compactMap {
+            message -> (AgentRole, String)? in
+            guard let content = message.content,
+                  expectedText.contains(content) else {
+                return nil
+            }
+            return (message.role, content)
+        }
+
+        XCTAssertEqual(
+            conversation.map { $0.0 },
+            [AgentRole.user, .assistant, .user, .assistant, .user])
+        XCTAssertEqual(
+            conversation.map { $0.1 },
+            ["U1", "A1", "U2", "A2", "U3"])
+        XCTAssertEqual(
+            thirdRequest.messages.filter { $0.content == "U3" }.count,
+            1)
+    }
+
+    func testDirectWorkerRootRemainsTaskScopedAcrossTurns() async throws {
+        let log = try tempLog()
+        let worker = AgentID(rawValue: "worker")
+        let workspace = try tempWorkspace()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let provider = ScriptedProvider([
+            [.textDelta("worker A1"), .done(finishReason: "stop")],
+            [.textDelta("worker A2"), .done(finishReason: "stop")],
+        ])
+        let orchestrator = Orchestrator(
+            log: log,
+            allowsShell: false,
+            responder: FixedResponder(.allow)) { _ in provider }
+        let submittedIntentStore = SubmittedIntentStore(log: log)
+
+        await orchestrator.attach(Agent(
+            name: worker,
+            workspaceRoot: workspace,
+            model: ModelID(rawValue: "m"),
+            profile: .reviewed))
+
+        let firstPayload = UserMessagePayload(
+            text: "worker U1",
+            to: worker,
+            submissionID: SubmissionID(rawValue: "sub_worker_u1"))
+        let secondPayload = UserMessagePayload(
+            text: "worker U2",
+            to: worker,
+            submissionID: SubmissionID(rawValue: "sub_worker_u2"))
+        _ = try await submittedIntentStore.accept(payload: firstPayload)
+        let first = await orchestrator.send(
+            "worker U1",
+            to: worker,
+            userMessage: firstPayload,
+            recordUserMessage: false)
+        _ = try await submittedIntentStore.accept(payload: secondPayload)
+        let second = await orchestrator.send(
+            "worker U2",
+            to: worker,
+            userMessage: secondPayload,
+            recordUserMessage: false)
+        XCTAssertEqual(first, .sent)
+        XCTAssertEqual(second, .sent)
+
+        let secondRequest = try XCTUnwrap(provider.requests.last)
+        XCTAssertFalse(secondRequest.messages.contains { $0.content == "worker U1" })
+        XCTAssertFalse(secondRequest.messages.contains { $0.content == "worker A1" })
+        XCTAssertEqual(
+            secondRequest.messages.filter { $0.content == "worker U2" }.count,
+            1)
+    }
+
     func testSendReturnsFailureWhenAgentRunFails() async throws {
         let log = try tempLog()
         let wsA = try tempWorkspace()
@@ -374,7 +607,7 @@ final class IntatisCoworkTests: XCTestCase {
             $0.role == .user && $0.content?.contains("<<<UNTRUSTED_CONTEXT_DATA>>>") == true
         }?.content)
         XCTAssertFalse(systemPrompt.contains(contract.objective))
-        XCTAssertTrue(untrustedContext.contains("Current task data:"))
+        XCTAssertTrue(untrustedContext.contains("Current AgentInvocation data:"))
         XCTAssertTrue(untrustedContext.contains(contract.id.rawValue))
         XCTAssertTrue(untrustedContext.contains("@\(A.rawValue)"))
         XCTAssertTrue(untrustedContext.contains(contract.roleHint))
@@ -422,14 +655,14 @@ final class IntatisCoworkTests: XCTestCase {
         let main = AgentID(rawValue: "main")
         let worker = AgentID(rawValue: "worker")
         let wsMain = try tempWorkspace()
-        let wsWorker = try tempWorkspace()
+        let wsWorker = wsMain.appendingPathComponent("worker", isDirectory: true)
+        try FileManager.default.createDirectory(at: wsWorker, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(at: wsMain)
-            try? FileManager.default.removeItem(at: wsWorker)
         }
         let mainProvider = ScriptedProvider([
             [.toolCalls([ToolCall(id: "spawn", name: "spawn_agent",
-                                  arguments: spawnArgs(name: worker.rawValue, path: wsWorker.path))]),
+                                  arguments: spawnArgs(name: worker.rawValue, path: wsWorker.path, model: "m"))]),
              .done(finishReason: "tool_calls")],
             [.textDelta("worker ready"), .done(finishReason: "stop")],
         ])
@@ -458,8 +691,13 @@ final class IntatisCoworkTests: XCTestCase {
         XCTAssertFalse(toolNames.contains("ask_agent"))
         XCTAssertFalse(toolNames.contains("list_agents"))
         XCTAssertFalse(toolNames.contains("remove_agent"))
+        XCTAssertFalse(toolNames.contains("rename_session"))
 
         let systemPrompt = try XCTUnwrap(request.messages.first?.content)
+        XCTAssertTrue(systemPrompt.contains("running inside Intatis"))
+        XCTAssertTrue(systemPrompt.contains("in Cowork mode"))
+        XCTAssertTrue(systemPrompt.contains("authoritative API tools list"))
+        XCTAssertTrue(systemPrompt.contains("only after receiving its ToolResult"))
         XCTAssertTrue(systemPrompt.contains("You are executing the assigned task as a worker agent."))
         XCTAssertTrue(systemPrompt.contains("Do not create, remove, or coordinate other agents."))
         XCTAssertTrue(systemPrompt.contains("Only reply to task-related messages when reply_message is available."))
@@ -477,15 +715,16 @@ final class IntatisCoworkTests: XCTestCase {
         let main = AgentID(rawValue: "main")
         let lead = AgentID(rawValue: "feature-lead")
         let wsMain = try tempWorkspace()
-        let wsLead = try tempWorkspace()
+        let wsLead = wsMain.appendingPathComponent("feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: wsLead, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(at: wsMain)
-            try? FileManager.default.removeItem(at: wsLead)
         }
         let mainProvider = ScriptedProvider([
             [.toolCalls([ToolCall(id: "spawn", name: "spawn_agent",
                                   arguments: spawnArgs(name: lead.rawValue,
                                                        path: wsLead.path,
+                                                       model: "m",
                                                        canCoordinate: true))]),
              .done(finishReason: "tool_calls")],
             [.textDelta("lead ready"), .done(finishReason: "stop")],
@@ -506,9 +745,25 @@ final class IntatisCoworkTests: XCTestCase {
         XCTAssertTrue(attached)
         await orch.send("create a sub coordinator for this feature", to: main)
 
+        let mainRequest = try XCTUnwrap(mainProvider.requests.first)
+        let mainToolNames = Set(mainRequest.tools.map(\.name))
+        XCTAssertTrue(mainToolNames.contains("spawn_agent"))
+        XCTAssertTrue(mainToolNames.contains("delegate_task"))
+        XCTAssertTrue(mainToolNames.contains("rename_session"))
+        let spawnDescriptor = try XCTUnwrap(mainRequest.tools.first { $0.name == "spawn_agent" })
+        let spawnSchema = String(
+            decoding: try JSONEncoder().encode(spawnDescriptor.parameters),
+            as: UTF8.self)
+        XCTAssertTrue(spawnSchema.contains(#""additionalProperties":false"#))
+        let mainSystemPrompt = try XCTUnwrap(mainRequest.messages.first?.content)
+        XCTAssertTrue(mainSystemPrompt.contains("running inside Intatis"))
+        XCTAssertTrue(mainSystemPrompt.contains("in Cowork mode"))
+        XCTAssertTrue(mainSystemPrompt.contains("authoritative API tools list"))
+        XCTAssertTrue(mainSystemPrompt.contains("only after receiving its ToolResult"))
+
         let spawned = await orch.agentList().first { $0.name == lead }
         XCTAssertNotNil(spawned)
-        XCTAssertEqual(spawned?.coordinationDepth, Agent.defaultCoordinationDepth)
+        XCTAssertEqual(spawned?.coordinationDepth, 1)
 
         await orch.send("coordinate the nested implementation work", to: lead)
         let request = try XCTUnwrap(leadProvider.requests.last)
@@ -517,8 +772,13 @@ final class IntatisCoworkTests: XCTestCase {
         XCTAssertTrue(toolNames.contains("delegate_task"))
         XCTAssertTrue(toolNames.contains("list_agents"))
         XCTAssertTrue(toolNames.contains("remove_agent"))
+        XCTAssertFalse(toolNames.contains("rename_session"))
 
         let systemPrompt = try XCTUnwrap(request.messages.first?.content)
+        XCTAssertTrue(systemPrompt.contains("running inside Intatis"))
+        XCTAssertTrue(systemPrompt.contains("in Cowork mode"))
+        XCTAssertTrue(systemPrompt.contains("authoritative API tools list"))
+        XCTAssertTrue(systemPrompt.contains("only after receiving its ToolResult"))
         XCTAssertTrue(systemPrompt.contains("You may also act as a COORDINATOR"))
         XCTAssertTrue(systemPrompt.contains("Agents you create are"))
     }
@@ -548,6 +808,35 @@ final class IntatisCoworkTests: XCTestCase {
 
     func testSpawnAgentDescriptorIsNotReadOnly() {
         XCTAssertEqual(SpawnAgentTool.descriptor.sideEffect, .write)
+        XCTAssertTrue(
+            SpawnAgentTool.descriptor.description
+                .contains("recommended default"))
+        XCTAssertTrue(
+            SpawnAgentTool.descriptor.description
+                .contains("list_inference_profiles"))
+        XCTAssertTrue(
+            ListInferenceProfilesTool.descriptor.description
+                .contains("configuration-declared capabilities"))
+        XCTAssertTrue(
+            ListInferenceProfilesTool.descriptor.description
+                .contains("never infer a missing capability"))
+    }
+
+    func testSpawnAgentIntentIsControlPlaneAndDefaultsToReadOnly() throws {
+        let root = URL(fileURLWithPath: "/workspace")
+        let args = ToolArgs(raw: #"{"name":"counter","path":"/workspace","model":"m","canCoordinate":false}"#)
+        let tool = SpawnAgentTool()
+        let intent = tool.permissionIntent(args, workspaceRoot: root)
+
+        XCTAssertEqual(intent.action, "agent.spawn")
+        XCTAssertEqual(intent.dataEffects, [.none])
+        XCTAssertEqual(intent.controlEffects, [.createAgent, .attachWorkspace, .grantCapability])
+        XCTAssertEqual(intent.metadata["requestedAccess"], .string(WorkspaceAccess.readOnly.rawValue))
+        XCTAssertTrue(tool.touchedPaths(args).isEmpty)
+        XCTAssertFalse(intent.resources.contains { $0.kind == .workspacePath })
+        XCTAssertTrue(intent.resources.contains {
+            $0.kind == .workspace && $0.access == .readOnly
+        })
     }
 
     func testCountScenarioCreatesSeparateWorkerContracts() async throws {

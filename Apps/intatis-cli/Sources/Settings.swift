@@ -2,8 +2,8 @@ import Foundation
 
 private let bold = "\u{001B}[1m", dim = "\u{001B}[2m", reset = "\u{001B}[0m", green = "\u{001B}[32m"
 
-/// `councis settings` — interactive editor for the persistent config file
-/// (~/.councis/config.json). Endpoint and API key are the must-haves;
+/// `intatis settings` — interactive editor for the persistent config file
+/// (~/.config/intatis/config.json). Endpoint and API key are the must-haves;
 /// model / reasoning / default mode are here too.
 func runSettings() throws {
     var cfg = ConfigFile.read()
@@ -16,7 +16,7 @@ func runSettings() throws {
     while true {
         out("""
 
-        \(bold)Councis settings\(reset)  \(dim)\(ConfigFile.url.path)\(reset)
+        \(bold)Intatis settings\(reset)  \(dim)\(ConfigFile.url.path)\(reset)
 
           1) Endpoint (base URL) : \(display("baseURL", default: CLIConfig.defaultBaseURL))
           2) API key             : \(cfg["apiKey"]?.isEmpty == false ? "\(green)(set)\(reset)" : "\(dim)(not set)\(reset)")
@@ -47,18 +47,11 @@ func runSettings() throws {
                 if t.isEmpty || t == "off" { cfg["reasoning"] = nil } else { cfg["reasoning"] = t }
             }
         case "5":
-            out("Default mode [chat|work]: ")
-            if let v = readLine() {
-                let raw = v.trimmingCharacters(in: .whitespaces).lowercased()
-                if let mode = Mode.parse(raw) {
-                    cfg["mode"] = mode.rawValue
-                } else if !raw.isEmpty {
-                    out("Unknown mode; keeping \(cfg["mode"] ?? "chat").\n")
-                }
-            }
+            out("Default mode [chat|code|cowork]: ")
+            if let v = readLine() { cfg["mode"] = v.trimmingCharacters(in: .whitespaces).lowercased() }
         case "s":
             try ConfigFile.write(cfg.filter { !$0.value.isEmpty })
-            out("\n\(green)Saved.\(reset) Now run `councis` (or `councis work`).\n")
+            out("\n\(green)Saved.\(reset) Now just run `intatis` (or `intatis chat`).\n")
             return
         case "q", "":
             out("\nNo changes saved.\n")

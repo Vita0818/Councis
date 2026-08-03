@@ -8,7 +8,7 @@ import IntatisPermission
 import IntatisAgentKernel
 import IntatisCowork
 
-// Built-in fake models — let `councis selftest` prove the shared kernel paths work
+// Built-in fake models — let `intatis selftest` prove the chat + code paths work
 // offline, with no API key and no network. They drive the exact same ChatLoop /
 // AgentLoop / renderer / approval code the real commands use.
 
@@ -41,38 +41,38 @@ private final class FakeAgent: ToolCallingProvider, @unchecked Sendable {
 
 private func tempLog(_ tag: String) throws -> EventLog {
     let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("councis-\(tag)-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("intatis-\(tag)-\(UUID().uuidString)", isDirectory: true)
     return try EventLog(session: SessionID.new(), fileURL: dir.appendingPathComponent("events.jsonl"))
 }
 
 private let green = "\u{001B}[32m", red = "\u{001B}[31m", bold = "\u{001B}[1m", reset = "\u{001B}[0m"
 
 func runSelfTest() async throws {
-    out("\(bold)Councis self-test\(reset) — offline, no API key, no network.\n")
+    out("\(bold)Intatis self-test\(reset) — offline, no API key, no network.\n")
 
     // 1) CHAT: a full streamed turn.
     out("\n\(bold)[chat]\(reset)\n› hi")
     let chatLog = try tempLog("chat")
     let chatLoop = ChatLoop(log: chatLog,
-                            provider: FakeChat(parts: ["Hello! ", "I am Councis."]),
+                            provider: FakeChat(parts: ["Hello! ", "I am Intatis."]),
                             model: ModelID(rawValue: "fake"))
     let r1 = Task { await renderLoop(chatLog) }
     try await chatLoop.send("hi")
     try? await Task.sleep(nanoseconds: 60_000_000)
     r1.cancel()
     let chatMsgs = ConversationProjection.build(from: await chatLog.replay()).messages
-    let okChat = chatMsgs.contains { $0.role == .assistant && $0.text == "Hello! I am Councis." }
+    let okChat = chatMsgs.contains { $0.role == .assistant && $0.text == "Hello! I am Intatis." }
     out(okChat ? "\(green)PASS\(reset) streamed a complete reply\n"
                : "\(red)FAIL\(reset) chat reply not assembled\n")
 
     // 2) CODE: write a file, then read it back.
-    out("\n\(bold)[work kernel]\(reset)\n› create note.txt and read it back")
+    out("\n\(bold)[code]\(reset)\n› create note.txt and read it back")
     let workspace = FileManager.default.temporaryDirectory
-        .appendingPathComponent("councis-ws-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("intatis-ws-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
     let codeLog = try tempLog("code")
     let writeArgs = String(decoding: try JSONSerialization.data(
-        withJSONObject: ["path": "note.txt", "content": "hello from councis"]), as: UTF8.self)
+        withJSONObject: ["path": "note.txt", "content": "hello from intatis"]), as: UTF8.self)
     let agent = Agent(name: AgentID(rawValue: "selftest"), workspaceRoot: workspace,
                       model: ModelID(rawValue: "fake"), profile: .reviewed)
     let codeLoop = AgentLoop(
@@ -95,195 +95,424 @@ func runSelfTest() async throws {
     try? await Task.sleep(nanoseconds: 60_000_000)
     r2.cancel()
     let onDisk = (try? String(contentsOf: workspace.appendingPathComponent("note.txt"), encoding: .utf8)) ?? ""
-    let okCode = onDisk == "hello from councis"
+    let okCode = onDisk == "hello from intatis"
     out(okCode ? "\(green)PASS\(reset) wrote + read note.txt in the workspace\n"
                : "\(red)FAIL\(reset) file not written (got: \(onDisk.isEmpty ? "<empty>" : onDisk))\n")
 
-    // 3) TEAM PRESET: both the v2 schema and the old candidates/judge schema
-    // decode without any endpoint URL or secret in the preset.
-    out("\n\(bold)[team preset]\(reset)\n")
-    let modern = #"{"schemaVersion":2,"name":"modern","mode":"chat","main":{"providerID":"p","model":"main"},"judge":{"providerID":"p","model":"judge"},"workerModelPool":[{"providerID":"p","model":"worker"}],"modelAssignment":{"strategy":"unique","onPoolExhaustion":"fail","excludeControlPlaneAgents":true},"providers":[{"id":"p"}]}"#
-    let legacy = #"{"name":"legacy","mode":"chat","candidates":[{"provider":"p","model":"main"},{"provider":"p","model":"worker"}],"judge":{"provider":"p","model":"judge"}}"#
-    let modernPreset = try? JSONDecoder().decode(TeamPreset.self, from: Data(modern.utf8))
-    let legacyPreset = try? JSONDecoder().decode(TeamPreset.self, from: Data(legacy.utf8))
-    let okPreset = modernPreset?.source == .team
-        && modernPreset?.workerModelPool.count == 1
-        && legacyPreset?.source == .legacyCouncil
-        && legacyPreset?.main.model == "main"
-        && legacyPreset?.workerModelPool.first?.model == "worker"
-    out(okPreset ? "\(green)PASS\(reset) decoded v2 and legacy team presets\n"
-                 : "\(red)FAIL\(reset) team preset compatibility decode failed\n")
+    // 3) COWORK INFERENCE: compile two routes/models/variants from the shared
+    // advanced config schema, resolve both in one session, retain an old exact
+    // binding after route A changes, and prove credentials never cross routes.
+    out("\n\(bold)[cowork inference profiles]\(reset)\n")
+    let profileDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("intatis-profile-selftest-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: profileDirectory, withIntermediateDirectories: true)
+    let catalogURL = profileDirectory.appendingPathComponent("catalog.json")
+    let configURL = profileDirectory.appendingPathComponent("intatis.json")
+    let routeAKeyURL = profileDirectory.appendingPathComponent("route-a.key")
+    let routeBKeyURL = profileDirectory.appendingPathComponent("route-b.key")
+    let routeAKey = "offline-route-a-key"
+    let routeBKey = "offline-route-b-key"
+    try Data(routeAKey.utf8).write(to: routeAKeyURL, options: .atomic)
+    try Data(routeBKey.utf8).write(to: routeBKeyURL, options: .atomic)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: routeAKeyURL.path)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: routeBKeyURL.path)
 
-    // 4) LEGACY RUN LOG: decode old Council output without reviving its engine.
-    out("\n\(bold)[legacy run log]\(reset)\n")
-    let legacyRunJSON = #"{"prompt":"compare answers","finalAnswer":"approved","startedAt":"2026-06-22T00:00:00Z","completedAt":"2026-06-22T00:00:01Z","surface":"chat","mock":true,"preset":{"name":"smoke","mode":"chat","engine":"council"},"candidateResults":[{"name":"A","provider":"p","model":"a","status":"succeeded","ok":true}],"judgeResult":{"name":"Judge","provider":"p","model":"j","status":"succeeded","ok":true}}"#
-    let legacyRun = try? JSONDecoder().decode(
-        LegacyCouncilRun.self,
-        from: Data(legacyRunJSON.utf8))
-    let okLegacyRun = legacyRun?.preset?.engine == "council"
-        && legacyRun?.candidateResults?.first?.model == "a"
-        && legacyRun?.judgeResult?.model == "j"
-        && legacyRun?.finalAnswer == "approved"
-    out(okLegacyRun ? "\(green)PASS\(reset) decoded legacy Council run read-only\n"
-                    : "\(red)FAIL\(reset) legacy Council run decode failed\n")
+    func writeMultiRouteConfig(routeAPort: Int, selectedModel: String) throws {
+        let object: [String: Any] = [
+            "model": selectedModel,
+            "enabled_providers": ["route-a", "route-b", "anthropic"],
+            "provider": [
+                "route-a": [
+                    "name": "Offline A",
+                    "options": [
+                        "baseURL": "http://127.0.0.1:\(routeAPort)/v1",
+                        "apiKey": "{file:route-a.key}",
+                    ],
+                    "models": [
+                        "model-alpha": [
+                            "name": "Alpha",
+                            "options": ["temperature": 0.2],
+                            "variants": [
+                                "careful": [
+                                    "reasoning_effort": "low",
+                                    "temperature": 0.15,
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                "route-b": [
+                    "name": "Offline B",
+                    "options": [
+                        "baseURL": "http://127.0.0.1:28282/v1",
+                        "apiKey": "{file:route-b.key}",
+                    ],
+                    "models": [
+                        "model-beta": [
+                            "name": "Beta",
+                            "options": ["temperature": 0.4],
+                            "variants": [
+                                "deep": [
+                                    "reasoning_effort": "high",
+                                    "temperature": 0.1,
+                                ],
+                            ],
+                        ],
+                        "anthropic/claude-sonnet": [
+                            "name": "Gateway Sonnet",
+                            "options": ["temperature": 0.25],
+                        ],
+                    ],
+                ],
+                "anthropic": [
+                    "name": "Offline Anthropic-compatible",
+                    "options": [
+                        "baseURL": "http://127.0.0.1:29292/v1",
+                        "apiKey": "{file:route-a.key}",
+                    ],
+                    "models": [
+                        "claude-sonnet": [
+                            "name": "Direct Sonnet",
+                            "options": ["temperature": 0.5],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: configURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+    }
 
-    // 5) LAUNCH PARSER: one-shot prompt forms, explicit Work workspace,
-    // narrowly-scoped `work DIR`, `--`, and the retired --mock rejection.
-    out("\n\(bold)[one-shot launch parser]\(reset)\n")
-    let parserRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("councis-parser-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: parserRoot, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: parserRoot) }
-    let parserConfig = CLIConfig(
-        providers: [CLIProviderRuntime(
-            id: "fake",
-            baseURL: URL(string: "https://example.invalid/v1")!,
-            wire: .openai,
-            apiKey: "offline")],
-        defaultProviderID: "fake",
-        model: "fake-model",
-        reasoningEffort: nil,
-        mode: .chat,
-        preset: nil,
-        includeUsage: false,
-        maxSteps: 4)
-    let chatLaunch = try parseLaunchArguments(
-        ["--preset", "smoke", "explain", "this"],
-        mode: .chat,
-        config: parserConfig,
-        currentDirectory: parserRoot)
-    let chatREPL = try parseLaunchArguments(
-        [],
-        mode: .chat,
-        config: parserConfig,
-        currentDirectory: parserRoot)
-    let chatDirectoryToken = try parseLaunchArguments(
-        [parserRoot.path],
-        mode: .chat,
-        config: parserConfig,
-        currentDirectory: parserRoot)
-    let legacyWorkDirectory = try parseLaunchArguments(
-        [parserRoot.path],
-        mode: .work,
-        config: parserConfig,
-        currentDirectory: FileManager.default.temporaryDirectory)
-    let explicitWork = try parseLaunchArguments(
-        ["--workspace", parserRoot.path, "create", "a note"],
-        mode: .work,
-        config: parserConfig,
-        currentDirectory: FileManager.default.temporaryDirectory)
-    let separatorPrompt = try parseLaunchArguments(
-        ["--dir=\(parserRoot.path)", "--", "--literal", "words"],
-        mode: .work,
-        config: parserConfig,
-        currentDirectory: FileManager.default.temporaryDirectory)
-    let forcedDirectoryPrompt = try parseLaunchArguments(
-        ["--", parserRoot.path],
-        mode: .work,
-        config: parserConfig,
-        currentDirectory: FileManager.default.temporaryDirectory)
-    let mockRejected: Bool
+    let offlineEnvironment = [
+        "INTATIS_MODE": "cowork",
+        "INTATIS_USAGE": "0",
+        "INTATIS_MAX_STEPS": "3",
+        "INTATIS_REASONING": "low",
+    ]
+    try writeMultiRouteConfig(
+        routeAPort: 18181,
+        selectedModel: "route-a/model-alpha")
+    let firstConfig = try CLIConfig.load(
+        configurationFileURL: configURL,
+        environment: offlineEnvironment)
+    var uniqueUnqualifiedEnvironment = offlineEnvironment
+    uniqueUnqualifiedEnvironment["INTATIS_MODEL"] = "model-beta"
+    uniqueUnqualifiedEnvironment["INTATIS_REASONING"] = "high"
+    let uniqueUnqualifiedConfig = try CLIConfig.load(
+        configurationFileURL: configURL,
+        environment: uniqueUnqualifiedEnvironment)
+    let uniqueUnqualifiedModelSelectedItsRoute =
+        uniqueUnqualifiedConfig.selectedProviderID == "route-b"
+            && uniqueUnqualifiedConfig.model == "model-beta"
+            && uniqueUnqualifiedConfig.selectedVariantID == "deep"
+
+    var slashModelEnvironment = offlineEnvironment
+    slashModelEnvironment.removeValue(forKey: "INTATIS_REASONING")
+    slashModelEnvironment["INTATIS_MODEL"] = "anthropic/claude-sonnet"
+    let slashModelOverrideConfig = try CLIConfig.load(
+        configurationFileURL: configURL,
+        environment: slashModelEnvironment)
+    let slashModelOverridePreferredExactKey =
+        slashModelOverrideConfig.selectedProviderID == "route-b"
+            && slashModelOverrideConfig.model == "anthropic/claude-sonnet"
+
+    try writeMultiRouteConfig(
+        routeAPort: 18181,
+        selectedModel: "anthropic/claude-sonnet")
+    var slashTopLevelEnvironment = offlineEnvironment
+    slashTopLevelEnvironment.removeValue(forKey: "INTATIS_REASONING")
+    let slashTopLevelConfig = try CLIConfig.load(
+        configurationFileURL: configURL,
+        environment: slashTopLevelEnvironment)
+    let slashTopLevelPreferredExactKey =
+        slashTopLevelConfig.selectedProviderID == "route-b"
+            && slashTopLevelConfig.model == "anthropic/claude-sonnet"
+    try writeMultiRouteConfig(
+        routeAPort: 18181,
+        selectedModel: "route-a/model-alpha")
+
+    var unavailableReasoningEnvironment = offlineEnvironment
+    unavailableReasoningEnvironment["INTATIS_MODEL"] = "route-a/model-alpha"
+    unavailableReasoningEnvironment["INTATIS_REASONING"] = "minimal"
+    let unavailableReasoningRejected: Bool
     do {
-        _ = try parseLaunchArguments(
-            ["--mock", "hello"],
-            mode: .chat,
-            config: parserConfig,
-            currentDirectory: parserRoot)
-        mockRejected = false
+        _ = try CLIConfig.load(
+            configurationFileURL: configURL,
+            environment: unavailableReasoningEnvironment)
+        unavailableReasoningRejected = false
     } catch {
-        mockRejected = error.localizedDescription.contains("legacy Council engine was removed")
+        unavailableReasoningRejected = true
     }
-    let okLaunchParser = chatLaunch.presetName == "smoke"
-        && chatLaunch.prompt == "explain this"
-        && chatREPL.prompt == nil
-        && chatDirectoryToken.prompt == parserRoot.path
-        && legacyWorkDirectory.workspace == parserRoot.standardizedFileURL
-        && legacyWorkDirectory.prompt == nil
-        && explicitWork.workspace == parserRoot.standardizedFileURL
-        && explicitWork.prompt == "create a note"
-        && separatorPrompt.prompt == "--literal words"
-        && forcedDirectoryPrompt.prompt == parserRoot.path
-        && mockRejected
-    out(okLaunchParser
-        ? "\(green)PASS\(reset) parsed Chat/Work one-shot, workspace, separator, and --mock cases\n"
-        : "\(red)FAIL\(reset) one-shot launch argument semantics regressed\n")
+    var invalidReasoningEnvironment = offlineEnvironment
+    invalidReasoningEnvironment["INTATIS_REASONING"] = "not-a-reasoning-effort"
+    let invalidReasoningRejected: Bool
+    do {
+        _ = try CLIConfig.load(
+            configurationFileURL: configURL,
+            environment: invalidReasoningEnvironment)
+        invalidReasoningRejected = false
+    } catch {
+        invalidReasoningRejected = true
+    }
 
-    // 6) ONE-SHOT ROOT: exercise the exact CLI submission helper with offline
-    // providers and prove the @main root is durable and Judge settles before it.
-    out("\n\(bold)[one-shot durable root + Judge]\(reset)\n")
-    let rootLog = try tempLog("one-shot-root")
-    let mainProvider = FakeAgent([
-        [.textDelta("reviewed one-shot answer"), .done(finishReason: "stop")],
-    ])
-    let judgeProvider = FakeAgent([
-        [.textDelta(#"{"decision":"approve","summary":"The answer satisfies the task.","findings":[],"requiredRevisions":[]}"#),
-         .done(finishReason: "stop")],
-    ])
-    let rootOrchestrator = try Orchestrator.runtime(
-        log: rootLog,
-        allowsShell: false,
+    var ambiguousRoot = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: configURL)) as! [String: Any]
+    var ambiguousProviders = ambiguousRoot["provider"] as! [String: Any]
+    var ambiguousRoute = ambiguousProviders["route-b"] as! [String: Any]
+    var ambiguousModels = ambiguousRoute["models"] as! [String: Any]
+    var ambiguousModel = ambiguousModels["model-beta"] as! [String: Any]
+    var ambiguousVariants = ambiguousModel["variants"] as! [String: Any]
+    ambiguousVariants["deep-alternate"] = [
+        "reasoning_effort": "high",
+        "temperature": 0.3,
+    ]
+    ambiguousModel["variants"] = ambiguousVariants
+    ambiguousModels["model-beta"] = ambiguousModel
+    ambiguousRoute["models"] = ambiguousModels
+    ambiguousProviders["route-b"] = ambiguousRoute
+    ambiguousRoot["provider"] = ambiguousProviders
+    try JSONSerialization.data(
+        withJSONObject: ambiguousRoot,
+        options: [.prettyPrinted, .sortedKeys])
+        .write(to: configURL, options: .atomic)
+    let ambiguousReasoningRejected: Bool
+    do {
+        _ = try CLIConfig.load(
+            configurationFileURL: configURL,
+            environment: uniqueUnqualifiedEnvironment)
+        ambiguousReasoningRejected = false
+    } catch {
+        ambiguousReasoningRejected = true
+    }
+    try writeMultiRouteConfig(
+        routeAPort: 18181,
+        selectedModel: "route-a/model-alpha")
+
+    let firstProfiles = try await CLIInferenceProfiles.load(
+        config: firstConfig,
+        fileURL: catalogURL)
+    guard let firstRouteA = firstProfiles.option(
+        routeID: "route-a",
+        model: "model-alpha",
+        variantID: "careful") else {
+        throw IntatisError.config("offline profile fixture did not compile")
+    }
+
+    // Change route A's upstream while retaining both route credentials and all
+    // logical profiles. The old exact binding must remain resolvable.
+    try writeMultiRouteConfig(
+        routeAPort: 38383,
+        selectedModel: "route-b/model-beta")
+    var secondEnvironment = offlineEnvironment
+    secondEnvironment["INTATIS_REASONING"] = "high"
+    let secondConfig = try CLIConfig.load(
+        configurationFileURL: configURL,
+        environment: secondEnvironment)
+    let secondProfiles = try await CLIInferenceProfiles.load(
+        config: secondConfig,
+        fileURL: catalogURL)
+
+    guard let currentRouteA = secondProfiles.option(
+            routeID: "route-a",
+            model: "model-alpha",
+            variantID: "careful"),
+          let currentRouteB = secondProfiles.option(
+            routeID: "route-b",
+            model: "model-beta",
+            variantID: "deep") else {
+        throw IntatisError.config("offline multi-route profiles did not compile")
+    }
+
+    let exactRegistry = ProviderRegistry(
+        config: secondConfig.providerConfig(),
+        resolver: CLIExactSecretResolver(config: secondConfig),
+        inferenceCatalogSnapshot: secondProfiles.snapshot)
+    let oldDefinition = try secondProfiles.snapshot.resolve(firstRouteA.binding)
+    let currentADefinition = try secondProfiles.snapshot.resolve(currentRouteA.binding)
+    let currentBDefinition = try secondProfiles.snapshot.resolve(currentRouteB.binding)
+    let profileIDsStable = Set(firstProfiles.options.map(\.id))
+        == Set(secondProfiles.options.map(\.id))
+    let oldRevisionStillRetained = oldDefinition.binding == firstRouteA.binding
+        && oldDefinition.connection.connectionRef.inferenceConnectionID
+            == currentADefinition.connection.connectionRef.inferenceConnectionID
+        && oldDefinition.connection.connectionRef.inferenceConnectionRevision
+            != currentADefinition.connection.connectionRef.inferenceConnectionRevision
+    let routeIdentitiesAreDistinct = currentADefinition.connection.connectionRef
+        != currentBDefinition.connection.connectionRef
+        && currentADefinition.connection.credentialRef
+            != currentBDefinition.connection.credentialRef
+        && currentADefinition.connection.trust.trustDomain
+            != currentBDefinition.connection.trust.trustDomain
+    let routeIdentitiesHideURLs = [
+        oldDefinition.connection.connectionRef.inferenceConnectionID.rawValue,
+        currentADefinition.connection.connectionRef.inferenceConnectionID.rawValue,
+        currentBDefinition.connection.connectionRef.inferenceConnectionID.rawValue,
+        firstRouteA.binding.inferenceProfileID.rawValue,
+        currentRouteB.binding.inferenceProfileID.rawValue,
+        oldDefinition.connection.trust.trustDomain,
+        currentADefinition.connection.trust.trustDomain,
+        currentBDefinition.connection.trust.trustDomain,
+    ].allSatisfy {
+        !$0.contains("127.0.0.1")
+            && !$0.contains("18181")
+            && !$0.contains("28282")
+            && !$0.contains("38383")
+    }
+    let exactResolver = CLIExactSecretResolver(config: secondConfig)
+    let recoveredOldRouteAKey = try await exactResolver.secret(
+        for: oldDefinition.connection.credentialRef)
+    let exactRouteBKey = try await exactResolver.secret(
+        for: currentBDefinition.connection.credentialRef)
+    let credentialsStayRouteScoped = recoveredOldRouteAKey == routeAKey
+        && exactRouteBKey == routeBKey
+        && recoveredOldRouteAKey != exactRouteBKey
+    let recoveredOldProvider = try await exactRegistry.agentInference(
+        for: firstRouteA.binding)
+    let currentAResolution = try await exactRegistry.agentInference(
+        for: currentRouteA.binding)
+    let currentBResolution = try await exactRegistry.agentInference(
+        for: currentRouteB.binding)
+    let oldAndBothCurrentRoutesResolve = recoveredOldProvider.binding == firstRouteA.binding
+        && currentAResolution.binding == currentRouteA.binding
+        && currentBResolution.binding == currentRouteB.binding
+        && currentAResolution.model.rawValue == "model-alpha"
+        && currentBResolution.model.rawValue == "model-beta"
+    let variantOverlayIsExact = currentBDefinition.profile.effectiveRequestOptions["temperature"]
+        == .number(0.1)
+        && currentBDefinition.profile.effectiveRequestOptions["reasoning_effort"]
+            == .string("high")
+
+    let frozenControlPlane = CLIControlPlaneInferenceBinding()
+    let firstFrozen = await frozenControlPlane.freeze(firstProfiles.defaultBinding)
+    let secondFreezeAttempt = await frozenControlPlane.freeze(secondProfiles.defaultBinding)
+    let controlPlaneStayedFrozen = firstFrozen == secondFreezeAttempt
+
+    let bindingData = try JSONEncoder().encode(firstProfiles.defaultBinding)
+    let bindingJSON = String(decoding: bindingData, as: UTF8.self)
+    let bindingIsRouteSafe = !bindingJSON.contains("127.0.0.1")
+        && !bindingJSON.contains("reasoning_effort")
+        && !bindingJSON.contains(routeAKey)
+        && !bindingJSON.contains(routeBKey)
+
+    let coworkWorkspace = profileDirectory.appendingPathComponent("workspace", isDirectory: true)
+    try FileManager.default.createDirectory(at: coworkWorkspace, withIntermediateDirectories: true)
+    let coworkLog = try tempLog("cowork-profile")
+    let strictOrchestrator = try Orchestrator.runtime(
+        log: coworkLog,
+        allowsShell: true,
         responder: FixedResponder(.allow),
-        executionPolicy: CoworkExecutionPolicy(maxConcurrentTasks: 2),
-        taskReviewPolicy: .always,
-        surfaceProfile: .chat,
-        providerFor: { agent in
-            agent.name == Orchestrator.taskReviewerID ? judgeProvider : mainProvider
+        availableInferenceProfiles: secondProfiles.bindings,
+        requiresInferenceBindings: true,
+        resolvedInferenceFor: { agent in
+            guard let binding = agent.agentInferenceBinding else {
+                throw InferenceCatalogError.unresolvedProfile
+            }
+            return try await exactRegistry.agentInference(for: binding)
         })
-    let mainAttached = await rootOrchestrator.attach(Agent(
+    let missingBindingRejected: Bool
+    switch await strictOrchestrator.bootstrapMainAgent(Agent(
         name: Orchestrator.mainAgentID,
-        workspaceRoot: parserRoot,
-        modelBinding: AgentModelBinding(
-            providerID: "fake-main",
-            modelID: ModelID(rawValue: "main")),
+        workspaceRoot: coworkWorkspace,
+        model: secondProfiles.defaultBinding.modelID,
         profile: .reviewed,
-        coordinationDepth: Agent.defaultCoordinationDepth))
-    let judgeAttached = await rootOrchestrator.attachTaskReviewer(Agent(
-        name: Orchestrator.taskReviewerID,
-        workspaceRoot: parserRoot,
-        modelBinding: AgentModelBinding(
-            providerID: "fake-judge",
-            modelID: ModelID(rawValue: "judge")),
-        profile: .readOnly,
-        coordinationDepth: 0))
-    let rootResult = try await submitRootTask(
-        "produce one reviewed answer",
-        to: Orchestrator.mainAgentID,
-        orchestrator: rootOrchestrator)
-    let rootEvents = await rootLog.replay()
-    let durableRoot = rootEvents.compactMap { envelope -> TaskContract? in
-        guard case .taskCreated(let payload) = envelope.event,
-              payload.contract.id == rootResult.taskID else { return nil }
-        return payload.contract
-    }.first
-    let settledSequence = rootEvents.first { envelope in
-        guard case .taskReviewSettled(let payload) = envelope.event else { return false }
-        return payload.rootTaskID == rootResult.taskID
-            && payload.verdict?.decision == .approve
-    }?.seq
-    let completionSequence = rootEvents.first { envelope in
-        guard case .taskCompleted(let payload) = envelope.event else { return false }
-        return payload.taskID == rootResult.taskID
-    }?.seq
-    let okOneShotRoot = mainAttached
-        && judgeAttached
-        && rootResult.succeeded
-        && rootResult.reviewVerdict?.decision == .approve
-        && durableRoot?.kind == .root
-        && durableRoot?.assignee == Orchestrator.mainAgentID
-        && settledSequence != nil
-        && completionSequence != nil
-        && settledSequence! < completionSequence!
-    await rootOrchestrator.cancelAll(reason: "one-shot self-test complete")
-    out(okOneShotRoot
-        ? "\(green)PASS\(reset) @main root persisted and @judge settled before completion\n"
-        : "\(red)FAIL\(reset) one-shot did not cross the durable Judge-gated root path\n")
-
-    let allOK = okChat && okCode && okPreset && okLegacyRun
-        && okLaunchParser && okOneShotRoot
-    out("\n" + (allOK
-        ? "\(green)\(bold)All good.\(reset) Point it at a real endpoint:\n  COUNCIS_API_KEY='your-key' swift run councis chat\n"
-        : "\(red)\(bold)Self-test failed.\(reset)\n"))
-    if !allOK {
-        throw IntatisError.config("selftest failed")
+        coordinationDepth: Agent.defaultCoordinationDepth)) {
+    case .failed:
+        missingBindingRejected = true
+    default:
+        missingBindingRejected = false
     }
+    let boundBootstrapAccepted: Bool
+    switch await strictOrchestrator.bootstrapMainAgent(Agent(
+        name: Orchestrator.mainAgentID,
+        workspaceRoot: coworkWorkspace,
+        model: secondProfiles.defaultBinding.modelID,
+        agentInferenceBinding: secondProfiles.defaultBinding,
+        profile: .reviewed,
+        coordinationDepth: Agent.defaultCoordinationDepth)) {
+    case .attached, .alreadyAttached:
+        boundBootstrapAccepted = true
+    case .failed:
+        boundBootstrapAccepted = false
+    }
+    let alternate = secondProfiles.options.first {
+        $0.binding != secondProfiles.defaultBinding
+    }!.binding
+    let idleRebindAccepted: Bool
+    switch await strictOrchestrator.rebindAgentInferenceProfile(
+        agentID: Orchestrator.mainAgentID,
+        binding: alternate,
+        hostAuthorized: true) {
+    case .rebound:
+        idleRebindAccepted = true
+    case .unchanged, .failed:
+        idleRebindAccepted = false
+    }
+    let coworkEvents = await coworkLog.replay()
+    let eventData = try JSONEncoder().encode(coworkEvents)
+    let eventJSON = String(decoding: eventData, as: UTF8.self)
+    let eventLogIsRouteSafe = !eventJSON.contains("127.0.0.1")
+        && !eventJSON.contains("reasoning_effort")
+        && !eventJSON.contains(routeAKey)
+        && !eventJSON.contains(routeBKey)
+    await strictOrchestrator.cancelAll(reason: "offline self-test complete")
+
+    let legacyLog = try tempLog("cowork-profile-legacy")
+    try await legacyLog.append(.agentAttached(AgentAttachedPayload(
+        agent: Orchestrator.mainAgentID,
+        path: coworkWorkspace.path,
+        model: secondProfiles.defaultBinding.modelID,
+        profile: PermissionProfile.reviewed.rawValue,
+        agentInferenceBinding: nil)))
+    let legacyProjection = CoworkProjection.build(from: await legacyLog.replay())
+    let legacyOrchestrator = try Orchestrator.runtime(
+        log: legacyLog,
+        allowsShell: true,
+        responder: FixedResponder(.allow),
+        availableInferenceProfiles: secondProfiles.bindings,
+        requiresInferenceBindings: true,
+        resolvedInferenceFor: { agent in
+            guard let binding = agent.agentInferenceBinding else {
+                throw InferenceCatalogError.unresolvedProfile
+            }
+            return try await exactRegistry.agentInference(for: binding)
+        })
+    await legacyOrchestrator.restore(from: legacyProjection)
+    let restoredLegacyMain = await legacyOrchestrator.agentList().first {
+        $0.name == Orchestrator.mainAgentID
+    }
+    let legacyInferenceFailures = await legacyOrchestrator.inferenceResolutionFailures()
+    let legacyRestoreStayedUnbound = restoredLegacyMain?.agentInferenceBinding == nil
+        && legacyInferenceFailures[Orchestrator.mainAgentID] != nil
+    await legacyOrchestrator.cancelAll(reason: "offline legacy restore self-test complete")
+
+    let okProfiles = profileIDsStable
+        && uniqueUnqualifiedModelSelectedItsRoute
+        && slashModelOverridePreferredExactKey
+        && slashTopLevelPreferredExactKey
+        && unavailableReasoningRejected
+        && invalidReasoningRejected
+        && ambiguousReasoningRejected
+        && oldRevisionStillRetained
+        && routeIdentitiesAreDistinct
+        && routeIdentitiesHideURLs
+        && credentialsStayRouteScoped
+        && oldAndBothCurrentRoutesResolve
+        && variantOverlayIsExact
+        && controlPlaneStayedFrozen
+        && bindingIsRouteSafe
+        && missingBindingRejected
+        && boundBootstrapAccepted
+        && idleRebindAccepted
+        && eventLogIsRouteSafe
+        && legacyRestoreStayedUnbound
+    out(okProfiles
+        ? "\(green)PASS\(reset) two-route/model resolution, retained exact revisions, route-scoped credentials, strict/legacy fail-closed binding, frozen controls, idle rebind, and route-safe audit\n"
+        : "\(red)FAIL\(reset) Cowork inference profile invariant failed\n")
+
+    out("\n" + (okChat && okCode && okProfiles
+        ? "\(green)\(bold)All good.\(reset) Point it at a real endpoint:\n  INTATIS_API_KEY=sk-... swift run intatis chat\n"
+        : "\(red)\(bold)Self-test failed.\(reset)\n"))
 }

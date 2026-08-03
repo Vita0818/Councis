@@ -10,8 +10,10 @@ private func ctx(profile: PermissionProfile = .reviewed,
 }
 
 private func call(_ name: String, _ side: SideEffect,
-                  paths: [String] = [], network: Bool = false, args: String = "{}") -> ToolCallContext {
-    ToolCallContext(toolName: name, sideEffect: side, touchedPaths: paths, risksNetwork: network, rawArgs: args)
+                  paths: [String] = [], network: Bool = false, args: String = "{}",
+                  intent: PermissionIntent? = nil) -> ToolCallContext {
+    ToolCallContext(toolName: name, sideEffect: side, touchedPaths: paths,
+                    risksNetwork: network, rawArgs: args, intent: intent)
 }
 
 final class IntatisPermissionTests: XCTestCase {
@@ -58,18 +60,18 @@ final class IntatisPermissionTests: XCTestCase {
         }
     }
 
-    func testGateWriteReviewedAsks() {
-        guard case .ask(let reason, let risk) = gate.evaluate(call("write_file", .write, paths: ["a.swift"]),
+    func testGateWriteReviewedPassesToReviewer() {
+        guard case .pass(let reason, let risk) = gate.evaluate(call("write_file", .write, paths: ["a.swift"]),
                                                              ctx(profile: .reviewed)) else {
-            return XCTFail("write in reviewed should ask")
+            return XCTFail("write in reviewed should pass to the configured reviewer route")
         }
-        XCTAssertEqual(reason, "write to workspace")
+        XCTAssertEqual(reason, "modify workspace resource")
         XCTAssertEqual(risk, .medium)
     }
 
-    func testGateWriteManualAsks() {
-        guard case .ask = gate.evaluate(call("write_file", .write, paths: ["a.swift"]), ctx(profile: .manual)) else {
-            return XCTFail("write in manual should ask")
+    func testGateWriteManualPassesToReviewer() {
+        guard case .pass = gate.evaluate(call("write_file", .write, paths: ["a.swift"]), ctx(profile: .manual)) else {
+            return XCTFail("write in manual should pass to the configured reviewer route")
         }
     }
 
@@ -106,17 +108,17 @@ final class IntatisPermissionTests: XCTestCase {
         }
     }
 
-    func testGateShellBackedNetworkAsksWhenShellAllowed() {
-        guard case .ask = gate.evaluate(call("browser_navigate", .exec, network: true, args: #"{"url":"https://example.com"}"#),
+    func testGateShellBackedNetworkPassesWhenShellAllowed() {
+        guard case .pass = gate.evaluate(call("browser_navigate", .exec, network: true, args: #"{"url":"https://example.com"}"#),
                                         ctx(profile: .reviewed, allowsShell: true)) else {
-            return XCTFail("shell-backed browser network should ask when shell is allowed")
+            return XCTFail("shell-backed browser network should pass to reviewer when shell is allowed")
         }
     }
 
-    func testGateDestructiveNetworkAsksHighRisk() {
-        guard case .ask(let reason, let risk) = gate.evaluate(call("git_push", .destructive, paths: [".git"], network: true),
+    func testGateDestructiveNetworkPassesHighRisk() {
+        guard case .pass(let reason, let risk) = gate.evaluate(call("git_push", .destructive, paths: [".git"], network: true),
                                                              ctx(profile: .reviewed, allowsShell: true)) else {
-            return XCTFail("destructive network operation should ask")
+            return XCTFail("destructive network operation should pass to reviewer")
         }
         XCTAssertEqual(risk, .high)
         XCTAssertTrue(reason.contains("destructive network"))
@@ -142,6 +144,52 @@ final class IntatisPermissionTests: XCTestCase {
         }
     }
 
+    func testGateAllowsOnlyExactCurrentSessionRenameIntent() {
+        let intent = PermissionIntent(
+            action: "session.rename",
+            resources: [PermissionResource(kind: .tool, value: "current_session")],
+            dataEffects: [.none],
+            controlEffects: [],
+            risks: [.controlPlaneMutation],
+            replayPolicy: .requiresManualReconciliation)
+        guard case .allow(_, let risk) = gate.evaluate(
+            call("rename_session", .write, intent: intent),
+            ctx(profile: .reviewed)) else {
+            return XCTFail("the host-bound current-session rename should be deterministic low risk")
+        }
+        XCTAssertEqual(risk, .low)
+    }
+
+    func testGateDoesNotAutoAllowNearMissSessionRenameIntent() {
+        let intent = PermissionIntent(
+            action: "session.rename",
+            resources: [PermissionResource(kind: .tool, value: "another_session")],
+            dataEffects: [.none],
+            controlEffects: [],
+            risks: [.controlPlaneMutation],
+            replayPolicy: .requiresManualReconciliation)
+        guard case .pass = gate.evaluate(
+            call("rename_session", .write, intent: intent),
+            ctx(profile: .reviewed)) else {
+            return XCTFail("a non-current target must not use the deterministic rename exception")
+        }
+    }
+
+    func testGateLockedDeniesExactCurrentSessionRenameIntent() {
+        let intent = PermissionIntent(
+            action: "session.rename",
+            resources: [PermissionResource(kind: .tool, value: "current_session")],
+            dataEffects: [.none],
+            controlEffects: [],
+            risks: [.controlPlaneMutation],
+            replayPolicy: .requiresManualReconciliation)
+        guard case .deny = gate.evaluate(
+            call("rename_session", .write, intent: intent),
+            ctx(profile: .locked)) else {
+            return XCTFail("locked remains a hard deny")
+        }
+    }
+
     // MARK: Engine
 
     func testEngineWriteWithoutAutomaticResponderAsks() async {
@@ -162,7 +210,7 @@ final class IntatisPermissionTests: XCTestCase {
         XCTAssertEqual(outcome.decision, .allow)
     }
 
-    func testEngineReviewerDoesNotBypassWriteApproval() async {
+    func testEngineReviewerIsTheSingleInEngineApprovalRoute() async {
         struct AllowReviewer: PermissionReviewer {
             func review(_ c: ToolCallContext, _ x: PermissionContext,
                         gateReason: String, risk: RiskLevel) async -> PermissionOutcome {
@@ -171,7 +219,66 @@ final class IntatisPermissionTests: XCTestCase {
         }
         let engine = PermissionEngine(reviewer: AllowReviewer())
         let outcome = await engine.decide(call("write_file", .write, paths: ["a.swift"]), ctx(profile: .reviewed))
-        XCTAssertEqual(outcome.decision, .askUser)
-        XCTAssertEqual(outcome.reason, "write to workspace")
+        XCTAssertEqual(outcome.decision, .allow)
+        XCTAssertEqual(outcome.reason, "reviewer ok")
+    }
+
+    func testReadOnlyLeaseCanSpawnReadOnlyChildButCannotGrantReadWrite() {
+        func spawnIntent(_ access: WorkspaceAccess) -> PermissionIntent {
+            PermissionIntent(
+                action: "agent.spawn",
+                resources: [PermissionResource(kind: .workspace, value: "/ws", access: access)],
+                metadata: [
+                    "requestedAccess": .string(access.rawValue),
+                    "canCoordinate": .bool(false),
+                ],
+                dataEffects: [.none],
+                controlEffects: [.createAgent, .grantCapability],
+                risks: [.controlPlaneMutation, .capabilityGrant],
+                replayPolicy: .requiresManualReconciliation)
+        }
+        guard case .pass(let reason, _) = gate.evaluate(
+            call("spawn_agent", .write, intent: spawnIntent(.readOnly)),
+            ctx(profile: .readOnly)) else {
+            return XCTFail("read-only parent should be able to request a read-only child")
+        }
+        XCTAssertFalse(reason.contains("write to workspace"))
+        guard case .deny = gate.evaluate(
+            call("spawn_agent", .write, intent: spawnIntent(.readWrite)),
+            ctx(profile: .readOnly)) else {
+            return XCTFail("read-only parent must not grant read-write access")
+        }
+    }
+
+    func testWorkTaskAndGoalControlEffectsAreNotWorkspaceWrites() {
+        let cases: [(String, PermissionControlEffect, PermissionResource)] = [
+            ("task.create", .createTask, PermissionResource(kind: .task, value: "current-run")),
+            ("task.update", .updateTask, PermissionResource(kind: .task, value: "wt_test")),
+            ("task.cancel", .cancelTask, PermissionResource(kind: .task, value: "wt_test")),
+            ("task.delegate", .delegateTask, PermissionResource(kind: .task, value: "wt_test")),
+            ("goal.create", .createGoal, PermissionResource(kind: .goal, value: "current")),
+            ("goal.edit", .editGoal, PermissionResource(kind: .goal, value: "goal_test")),
+            ("goal.pause", .pauseGoal, PermissionResource(kind: .goal, value: "goal_test")),
+            ("goal.resume", .resumeGoal, PermissionResource(kind: .goal, value: "goal_test")),
+            ("goal.clear", .clearGoal, PermissionResource(kind: .goal, value: "goal_test")),
+            ("goal.submit_verdict", .submitGoalVerdict, PermissionResource(kind: .goal, value: "goal_test")),
+        ]
+
+        for (action, controlEffect, resource) in cases {
+            let intent = PermissionIntent(
+                action: action,
+                resources: [resource],
+                dataEffects: [.none],
+                controlEffects: [controlEffect],
+                risks: [.controlPlaneMutation],
+                replayPolicy: .requiresManualReconciliation)
+            guard case .pass(let reason, _) = gate.evaluate(
+                call(action, .write, intent: intent),
+                ctx(profile: .readOnly)) else {
+                XCTFail("\(action) should enter control-plane review for a read-only workspace lease")
+                continue
+            }
+            XCTAssertFalse(reason.contains("workspace"), "\(action) was misclassified: \(reason)")
+        }
     }
 }

@@ -51,6 +51,17 @@ public struct MessageID: TypedID {
     public static func new() -> MessageID { MessageID(rawValue: IDGen.random(prefix: "msg")) }
 }
 
+/// Stable identity of one user-submitted intent across queueing and retries.
+///
+/// This is deliberately distinct from ``MessageID``: a submission can produce
+/// multiple streamed assistant messages and multiple execution attempts while
+/// retaining one immutable user payload.
+public struct SubmissionID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func new() -> SubmissionID { SubmissionID(rawValue: IDGen.random(prefix: "sub")) }
+}
+
 public struct AgentID: TypedID {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
@@ -60,6 +71,30 @@ public struct TaskID: TypedID {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
     public static func new() -> TaskID { TaskID(rawValue: IDGen.random(prefix: "task")) }
+}
+
+/// Identifies a durable user-visible unit of planned work.
+///
+/// This is intentionally distinct from ``TaskID``, which identifies an
+/// execution-layer agent invocation.
+public struct WorkTaskID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func new() -> WorkTaskID { WorkTaskID(rawValue: IDGen.random(prefix: "wt")) }
+}
+
+/// Identifies a durable objective that can span multiple continuation runs.
+public struct GoalID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func new() -> GoalID { GoalID(rawValue: IDGen.random(prefix: "goal")) }
+}
+
+/// Identifies one ordinary turn or one continuation of a durable goal.
+public struct ContinuationRunID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static func new() -> ContinuationRunID { ContinuationRunID(rawValue: IDGen.random(prefix: "run")) }
 }
 
 public struct TaskGroupID: TypedID {
@@ -95,6 +130,51 @@ public struct ArtifactID: TypedID {
 public struct ModelID: TypedID {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
+}
+
+/// Identifies one configured inference connection independently from a model
+/// vendor name. A connection is the host-controlled request/egress boundary;
+/// credentials remain referenced and resolved outside durable protocol data.
+public struct InferenceConnectionID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+}
+
+/// Opaque immutable revision of an inference connection definition. Pairing
+/// it with `InferenceConnectionID` prevents endpoint, wire, credential-ref, or
+/// trust-policy changes from silently retaining the same durable route identity.
+public struct InferenceConnectionRevision: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+}
+
+/// Stable logical identity for an inference profile. Runtime and durable agent
+/// bindings always pair this ID with an exact immutable revision.
+public struct InferenceProfileID: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+}
+
+/// Opaque immutable revision identity for an inference profile. It may be a
+/// version, content-derived digest, or another catalog-owned stable value; core
+/// deliberately does not interpret it.
+public struct InferenceProfileRevision: TypedID {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+}
+
+/// Exact reference used by durable session state. A profile ID without its
+/// revision is only a mutable catalog selection and is not sufficient for
+/// replay or authorization.
+public struct InferenceProfileRef: Codable, Hashable, Sendable {
+    public let inferenceProfileID: InferenceProfileID
+    public let inferenceProfileRevision: InferenceProfileRevision
+
+    public init(inferenceProfileID: InferenceProfileID,
+                inferenceProfileRevision: InferenceProfileRevision) {
+        self.inferenceProfileID = inferenceProfileID
+        self.inferenceProfileRevision = inferenceProfileRevision
+    }
 }
 
 /// Correlates a request (e.g. a permission ask) with its later response.

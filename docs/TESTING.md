@@ -1,205 +1,219 @@
 # TESTING
 
-最近自查日期：2026-07-26
+文档状态：当前验证矩阵
+最近核对：2026-08-03
+产品基线：v0.5（build 33）
 
-本文列出当前实现的验证入口，不把“测试存在”写成“本轮已经运行”。最终交付报告必须记录实际命令、退出状态和未覆盖边界。
+历史测试数量、性能数字和事故复验保留在 Git 历史及 dated reports；它们不能替代当前
+working tree 的验证。这里只记录现行命令、release gate 和最近一次真实结果。
 
-## 环境
+## 环境与产品边界
 
-- Swift tools version 5.9；macOS deployment target 13，iOS target 16。
-- SwiftPM 负责库、CLI、CouncisMac executable 和 11 个无头 XCTest targets。
-- XcodeGen 从 `project.yml` 生成 `Councis.xcodeproj`，负责 CouncisMac、IntatisMac、IntatisiOS app bundles。
-- 当前无第三方 package dependency。
-- 真实模型验证需要 endpoint 和 key；离线 `selftest`、unit tests、legacy run reader 不需要网络。
+- 当前 Apple 构建环境：Xcode 27 / Swift 6.x / XcodeGen。
+- macOS 默认只验证 Developer ID/direct-distribution `IntatisMac`；其 App 对外显示名应为
+  `Councis`，内部 target/bundle ID 不因品牌文字替换而变化。
+- `IntatisMacAppStore` 是 legacy target，除非用户明确点名，否则不构建、不修复，也不作为
+  release gate。
+- iOS 验证只覆盖 Chat 子集，不得链接 Tools、Permission、AgentKernel、Cowork 或 MCP。
+- SwiftPM 测试中的 sandbox、managed terminal Seatbelt、Linux bwrap/guard、权限与路径
+  围栏仍是产品安全边界，不能因为不做 App Store 而跳过。
 
-## 标准代码验证
+## 版本一致性
 
 ```sh
-swift test
+xcodegen generate
+scripts/check-version-consistency.sh
+# 或仅运行同一门槛：make version
+```
+
+必须同时满足：
+
+- `project.yml`：`MARKETING_VERSION=0.5`，`CURRENT_PROJECT_VERSION=33`；
+- macOS/iOS 参考 Info.plist：`0.5 (33)`；
+- 生成的 `Intatis.xcodeproj`：相同版本；
+- README、文档索引、CURRENT_STATE 和 PROJECT_MAP：相同当前基线；
+- 最终 App bundle：`CFBundleShortVersionString=0.5`、`CFBundleVersion=33`。
+
+旧设计文档、依赖版本、协议 schema 和 dated reports 中的其他 v0.x 不属于该一致性检查。
+
+## SwiftPM 基线
+
+```sh
 swift build
-swift build -c release
+swift test
 ```
 
-Makefile 等价入口：
+外层 managed sandbox 若阻止 nested Seatbelt、process spawn 或 loopback bind，应在允许的真实
+host 环境重跑，不能把 sandbox 环境失败直接改写成产品失败，也不能把跳过冒充通过。
+
+高风险改动至少补充对应 focused suite：
 
 ```sh
-make test
-make build
-make release
+swift test --filter IntatisProvidersTests
+swift test --filter IntatisConversationTests
+swift test --filter IntatisToolsTests
+swift test --filter IntatisPermissionTests
+swift test --filter IntatisAgentKernelTests
+swift test --filter IntatisCoworkTests
+swift test --filter IntatisSharedUITests
 ```
 
-`swift test` 当前覆盖 11 个 targets：Core、Protocol、Providers、Artifacts、Conversation、Tools、Permission、AgentKernel、Cowork、Multimodal、MacTeamSupport。`IntatisSharedUI` 无独立 test target；app UI 由 Xcode build 和手动矩阵覆盖。
+MCP、browser、managed terminal、OAuth、real provider 和设备测试中明确标为 opt-in 的项目，
+必须在具备相应 runtime/credential/网络的环境单独执行。
 
-## Councis 定向验证
-
-```sh
-swift build --product councis
-swift run councis selftest
-
-swift test --filter ModelAssignmentPolicyTests
-swift test --filter StrictModelAssignmentIntegrationTests
-swift test --filter SpawnAgentToolModelBindingTests
-swift test --filter CoworkSurfaceProfileTests
-swift test --filter TaskReviewGateTests
-swift test --filter JudgeLifecycleTests
-swift test --filter ReviewedTaskPresentationTests
-swift test --filter EventCompatibilityTests
-swift test --filter CoworkTeamConfigurationTests
-```
-
-重点断言：
-
-- full `(providerID, modelID)` 参与 hash、persist 和 provider route；同 model 不同 provider 可并存。
-- main/judge/worker 重复 binding 被拒；并发 pending attach 不能抢同一 binding；detach 后可复用。
-- omitted spawn 选择下一未占用 worker pool binding，不继承 parent；partial binding 和池耗尽 fail closed。
-- permission reviewer 不消耗数据平面唯一性槽；Judge 必须消耗并使用固定不同 binding。
-- Chat lease 不含 filesystem/shell/Git/browser/document/media；Work lease 仍经过 permission/ticket。
-- root `task_review_settled` 在 root completion 前；invalid/blocked/timeout/persistence failure/exhaustion 不会被当成 approve。
-- attach 固定 reserved Judge 后 health 为 `healthy`；缺失、配置错误、recovery failure、quarantine 和 shutdown 分别阻断新的 Councis root admission。
-- restore 遇到 requested-without-settled orphan 时只写一份 interrupted settlement，并取消旧 review task；重复 restore 不重复 settlement，也不调用旧 Judge provider。
-- review timeout 从 admission 起包含 scheduler start-gate/queue 等待；pre-dispatch expiry 不调用 provider、不触发 quarantine，并留下 durable timeout/deadline 诊断。
-- 已 dispatch Judge provider timeout 或 cancellation 且 termination 不可证明时进入 sticky quarantine；下一 root fail closed，provider request count 不增加。
-- `cancelAll` 先建立 shutdown barrier；不配合取消的 provider 晚到严格 approve 后，root 仍无 `task_completed`，展示投影仍无答案；即使 approve settlement 已在竞态前 durable，也不能在 quiesce 后成为 root completion 授权。
-- strict presentation 在 approve 前隐藏 Main/Judge assistant-message text 及内部协作 tool args/results；unknown tool、orphan result 和 duplicate in-flight call ID fail closed，operational allowlist 与当前 descriptors 一致；invalid/exhausted/fail-closed 后不释放答案草稿或 Judge summary；匹配 approve 后只交付最终 root result 一次；历史 replay 与 live 使用相同 gate，standard Intatis projection 保持原行为。非协作型 tool/permission/patch/artifact 审计仍可见。
-- 旧 model-only lifecycle 可在显式 provider migration 下恢复；strict restore 缺 provider、重复或越池时拒绝。
-
-## CLI 离线检查
+## Apple App 构建
 
 ```sh
-swift run councis help
-swift run councis config
-swift run councis selftest
-swift run councis runs
-swift run councis runs .councis/runs/RUN_FILE.json
-swift run councis runs .councis/runs/RUN_FILE.json --show-answer
-```
-
-预期：
-
-- help 只描述 Cowork-backed Chat/Work；`cowork`/`code` 为 Work alias。
-- `--mock` 返回明确退役错误，不启动旧 Council engine。
-- selftest 用 fake providers 覆盖 chat、workspace tool、preset/legacy decode、launch parser 和 durable root + Judge，不读取真实 key。
-- `runs` 默认只打印 bounded prompt/metadata/answer length；仅 `--show-answer` 打印完整 stored answer；源 JSON 的内容、mtime 和 hash 不变化。
-
-## CLI 真实 endpoint 矩阵
-
-先配置 endpoint，使 preset 的 main 与 judge model ID 都真实可用且 binding 不同：
-
-```sh
-COUNCIS_API_KEY='…' swift run councis chat --preset elite-chat "Reply with a concise reviewed answer"
-COUNCIS_API_KEY='…' swift run councis work --preset elite-work --workspace . "Read README.md and summarize the architecture"
-```
-
-检查：
-
-1. root task 分配给 `@main`，终端输出标识实际 provider/model。
-2. `@judge` 使用 preset 中不同 binding，并在 root terminal 前产生 verdict。
-3. Chat 不能读取启动目录或调用 workspace/shell/Git/browser/document/media tools。
-4. Work 的读取保持 workspace confinement；写入、shell、network 等风险操作出现预期 terminal approval，拒绝后不执行。
-5. `/agent add <name>` 依次使用未占用 worker pool；无可用 binding 时拒绝而非复用 parent/main/judge。
-6. 多 provider 场景中，provider endpoint 与 model 始终来自该 agent 的完整 binding。
-
-真实 endpoint 的模型名、tool-calling 方言、usage 字段和限流属于外部兼容边界；unit tests 不能替代该矩阵。
-
-## macOS build
-
-```sh
-swift build --product CouncisMac
 xcodegen generate
 
-xcodebuild \
-  -project Councis.xcodeproj \
-  -scheme CouncisMac \
-  -configuration Debug \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+xcodebuild -quiet -project Intatis.xcodeproj -scheme IntatisMac \
+  -configuration Debug -destination 'platform=macOS' \
+  COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO build
 
-xcodebuild \
-  -project Councis.xcodeproj \
-  -scheme IntatisMac \
-  -configuration Debug \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+xcodebuild -quiet -project Intatis.xcodeproj -scheme IntatisMac \
+  -configuration Release -destination 'platform=macOS' \
+  ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+  COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO build
+
+xcodebuild -quiet -project Intatis.xcodeproj -scheme IntatisiOS \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO build
 ```
 
-Entitlement 静态检查：
+构建后读取最终 bundle，而不是静态源码 plist：
 
 ```sh
-plutil -lint Apps/CouncisMac/CouncisMac.DeveloperID.entitlements
-plutil -lint Apps/IntatisMac/IntatisMac.DeveloperID.entitlements
-plutil -lint Apps/IntatisMac/IntatisMac.AppStore.entitlements
+plutil -extract CFBundleShortVersionString raw -o - <App>/Contents/Info.plist
+plutil -extract CFBundleVersion raw -o - <App>/Contents/Info.plist
+lipo -archs <App>/Contents/MacOS/IntatisMac
 ```
 
-`make app` 等于生成后打开 Xcode，适合手动运行，不适合作为无 UI CI 命令。
+macOS Release 必须同时包含 `arm64` 和 `x86_64`；iOS 仍须通过 target dependency/link
+inventory 证明没有本地 workspace stack。
 
-## macOS 手动矩阵
+## Developer ID 直接分发
 
-| 场景 | 操作 | 预期 |
-|---|---|---|
-| Councis surface | 启动 CouncisMac | 只显示 Cowork；不显示单 agent Chat/Code |
-| team 前置条件 | provider catalog 仅一个唯一 binding | 新建/恢复项目明确失败，要求至少 main + judge 两个 binding |
-| fixed roles | catalog 有两个以上 binding | main 固定为所选 binding；judge 固定为不同 binding；其余进入 worker pool |
-| mandatory review | 提交 root prompt | Judge settle 后才完成；Judge 错误/无效输出不交付为成功 |
-| Judge health | 启动、restore、运行 review、触发失败 | CLI `/team` 显示五态 health，CouncisMac view model 同步同一状态；非 `healthy` 时二者都不能提交新 root |
-| queue deadline | 暂停 review scheduler start 超过 deadline | provider 不启动；root fail closed；Judge 不因 pre-dispatch expiry 被 quarantine |
-| uncertain provider stop | 让已 dispatch review timeout/cancel 且 provider 忽略取消 | Judge 进入本进程 quarantine；后续 root 不再调用 Judge provider |
-| restart reconciliation | 用 requested-without-settled event log 恢复 | 旧 review 原子 cancel+settle interrupted，不重放；重复恢复保持幂等 |
-| shutdown barrier | Judge 调用中停止 session，再释放晚到 approve | health 进入 `shuttingDown`/非 healthy；晚到 approve 不完成 root、不释放答案 |
-| worker assignment | 连续添加 worker | 依 catalog/pool 次序使用未占用 binding；耗尽时拒绝 |
-| permission review | 触发需评审 tool | `@permission-reviewer` 状态与 `@judge` 独立；失败时回退用户审批，不 silent allow |
-| persistence | 退出并恢复 session | main/judge/worker binding 和 team 配置稳定；重复/缺失 binding fail closed |
-| product isolation | 分别运行 CouncisMac/IntatisMac | history、defaults、config/auth 和 Application Support 不串用 |
-| Intatis regression | 启动 IntatisMac | 仍有 Chat/Code/Cowork；legacy Cowork 不被强制改成 Councis strict team |
-
-## iOS 子集
-
-静态检查 `project.yml`：IntatisiOS 只链接 Core、Protocol、Providers、Conversation、Artifacts、Multimodal、SharedUI。
-
-SDK 可用时：
+预检：
 
 ```sh
-xcodebuild \
-  -project Councis.xcodeproj \
-  -scheme IntatisiOS \
-  -configuration Debug \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+zsh -n scripts/package-macos-release.sh
+security find-identity -v -p codesigning
+xcrun notarytool --version
 ```
 
-真机验证包括流式 chat、Keychain/provider config、附件/语音/多模态权限和 session 恢复。真机未运行时必须明确标记，不得以 simulator build 代替。
-
-## 来源快照检查
-
-- 阅读 `Upstream/Intatis/SNAPSHOT.md`，核对来源 HEAD、时间、included/excluded 和 manifest SHA-256。
-- 确认 `Upstream/Intatis/.git`、`.build`、`.swiftpm`、生成工程和 runtime state 不存在。
-- 确认 `Upstream/AGENTS.md` 仍声明只读边界，且本轮 diff 没有 snapshot 内文件。
-- 不在快照中运行 build/test/codegen；验证 Councis 时只使用正常源码树。
-
-## 文档和静态审计
+正式执行：
 
 ```sh
-rg -n 'CouncilRunner|WorkCommand|CouncilMockState|--mock.*work' \
-  AGENTS.md README.md NOTICE.md docs Apps Packages
-rg -n 'agentProvider\(for: agent\.modelBinding\)|modelAssignmentPolicy|taskReviewPolicy' \
-  Apps Packages
-git diff --check
-git status --short
+INTATIS_NOTARY_PROFILE=<profile> scripts/package-macos-release.sh
 ```
 
-第一条允许在明确说明“已删除/已退役”的文档、CLI rejection 文案和 legacy compatibility test 中命中；不得命中 shipping executor 或 mock UI 实现。
+如果访问 GitHub 必须开启代理/VPN，而 Apple notarization 必须关闭它，则运行：
 
-## Lint / format 与报告边界
+```sh
+INTATIS_PAUSE_BEFORE_NOTARIZATION=1 \
+INTATIS_NOTARY_PROFILE=<profile> \
+  scripts/package-macos-release.sh
+```
 
-仓内没有 SwiftLint/SwiftFormat 配置。不要声称运行了不存在的 lint；以编译、tests、`git diff --check` 和 Xcode build 为准。
+保持代理/VPN 开启直到脚本完成依赖解析、构建和 App 签名并显示切换网络提示；随后保持
+终端和脚本运行，关闭代理/VPN，再按 Return。脚本在原地循环验证 `notarytool history`，
+成功后才提交 App；失败不会丢弃已签名的 staged App，也不要求重新下载依赖。该模式要求
+交互式终端，非交互 release job 不得设置 `INTATIS_PAUSE_BEFORE_NOTARIZATION=1`。
 
-- 纯文档任务至少运行 `git diff --check` 与 `git status --short`，并明确“未运行构建/测试”。
-- 代码任务按风险运行上述标准、定向和 app 验证。
-- 只有当前命令输出可作为本轮通过证据；历史日志、测试文件存在、或其他任务曾经运行过都不能替代最终验证。
+上传后终端必须显示 Apple submission ID 和实时状态。默认 wait deadline 是 30 分钟；仍为
+`In Progress` 时脚本必须保留 owner-only recovery 目录并打印 exact resume 命令，不能再次
+提交同一 App。可用 `INTATIS_NOTARY_TIMEOUT=<正整数>[s|m|h]` 修改单次等待时长。恢复命令为：
 
-## 2026-07-26 验证时间边界
+```sh
+INTATIS_NOTARY_PROFILE=<profile> \
+INTATIS_RESUME_RELEASE_DIR=<脚本打印的绝对路径> \
+  scripts/package-macos-release.sh
+```
 
-- 本轮最终全量 SwiftPM suite：554 tests executed、14 skipped、0 failures。
-- `JudgeLifecycleTests`：7/7 通过，覆盖 health、orphan restore、queue-inclusive deadline、timeout/cancel quarantine，以及 provider-late 和 post-settlement 两类 shutdown race。
-- 本轮 `swift build --product councis`、`swift build --product CouncisMac` 与 IntatisMac Xcode scheme 无签名构建通过。
-- 真实 endpoint、浏览器 opt-in smoke、签名与真机验证仍不在上述离线结果内；14 个 skip 是显式 opt-in 的真实浏览器 smoke。
+恢复测试必须确认：App/DMG submission ID 复用、无第二次 `submit`；repository version 和
+recovery App metadata/architecture/signature/entitlements 重新验证；超时、Control-C、TERM、
+网络失败和 Invalid 保留 recovery；最终 ZIP/DMG/manifest 全部落盘后才清理 recovery。当前
+真实旧运行发生在这套持久恢复机制加入前，不能用它冒充已完成 recovery E2E。
+
+发行脚本必须在输出 `dist/` 前完成：
+
+1. v0.5/build 33 一致性检查；
+2. `IntatisMac` universal Release；
+3. Developer ID Application + secure timestamp + Hardened Runtime；
+4. signed entitlements 不含 App Sandbox；
+5. App notarization Accepted、staple/validate、strict codesign、Gatekeeper assessment；
+6. 带 `/Applications` 拖放入口的 Developer ID signed DMG；
+7. DMG notarization、staple/validate、codesign、Gatekeeper assessment；
+8. ZIP/DMG SHA-256 清单。
+
+任一门槛失败都不得发布 ad-hoc、unsigned、未公证或未通过 Gatekeeper 的包。
+
+## 数据、权限与恢复回归
+
+涉及 EventLog、session projection、权限、Cowork、terminal 或生命周期时，必须覆盖：
+
+- 旧 JSONL 仍可解码，`seq` 单调，append/batch first-write/first-terminal 语义不变；
+- permission RequestID/FIFO/correlation、manual decline 与 cancel-turn 语义不混淆；
+- tool authorization、durable ticket、executor result 和 turn outcome 关联完整；
+- path escape、symlink/hardlink、secret、credential path、workspace lease fail closed；
+- runtime stop 先 drain provider/tool/process，再释放 waiter/subscription/scope；
+- Cowork worker 默认无 coordinator tools，reviewer/verifier 不进入普通 scheduler；
+- iOS target closure 不出现 Tools/Permission/AgentKernel/Cowork/MCP。
+
+精确不变量见 `docs/DO_NOT_BREAK.md`。
+
+## UI 与可访问性回归
+
+当前至少检查：
+
+- macOS/iOS Light 与 Dark；
+- Chat/Code/Cowork session 切换、16-row paging、Earlier/Newer/Latest；
+- long rich response、Markdown/table/code/math 和 plain-safe fallback；
+- composer 单行/多行、model menu、usage、Send/Stop；
+- Cowork wide rail、narrow permission fallback、Goal/Tasks/Agents；
+- Settings disclosure、provider test、本地诊断 ZIP；
+- Dynamic Type、Reduce Transparency、Increase Contrast、VoiceOver 和 clipboard/selection。
+
+截图或 Computer Use 只能证明对应 viewport/appearance 的视觉行为，不能替代 EventLog、
+权限、bundle、签名或长时性能验证。
+
+## 最近一次真实结果
+
+2026-08-03 版本校准后的直接证据：
+
+- `xcodegen generate`：通过；
+- `scripts/check-version-consistency.sh`：通过，输出 `0.5 (build 33)`；
+- `IntatisMac` unsigned macOS Debug：通过；最终 bundle 为 `0.5 (33)`。这是代码与元数据
+  验收，不是 universal Release 或签名发行产物；
+- `IntatisiOS` generic Simulator Debug：通过；最终 bundle 为 `0.5 (33)`；
+- 品牌文字恢复后再次执行上述两个 Debug 构建：均通过；macOS/iOS 最终 bundle 的
+  `CFBundleDisplayName` 均为 `Councis`，共享 string catalog 编译通过；
+- 两端构建有既有的 unused-result 与 deprecated `onChange` 警告，无构建错误；
+- `swift build`：在允许 Swift/Clang 写入用户缓存的宿主环境通过；受限沙箱内首次尝试因
+  module cache 无写权限而未进入源码编译，不计为产品失败；
+- release script `zsh -n`：通过；无证书 preflight 按预期在任何正式输出前失败；
+- 临时非发行探针：App runtime signing command、XML entitlements、UDZO DMG、DMG signing
+  command 和 strict codesign 通过，临时目录已删除；
+- `IntatisToolsTests`（外层 sandbox 外）：141 tests / 15 skipped / 0 failures；
+- `testSharedSoftTokenBudgetReservesBeforeDispatchAndReportsProviderOverrun` 原始 fixture 已先
+  稳定复现为 `requestTooLarge(limit: 800, estimatedInput: 889)`，证明生产 pre-dispatch
+  保护正常；测试随后改为使用有充足 prompt 余量的命名预算常量，继续精确验证 provider
+  忽略 output ceiling 后超支 1 token 的 soft-budget 语义；
+- 修正后的 focused 用例：1 test / 0 failures；`IntatisAgentKernelTests`：169 tests /
+  0 failures；
+- 完整 `swift test`：通过。真实 browser/Git/provider/credential/network 等显式 opt-in
+  用例仍按设计 skipped，不计为已执行的真实环境验证；
+- 用户普通终端的 `security find-identity -v -p codesigning` 已报告两个有效 identity，发行
+  脚本也已进入真实 Developer ID 签名和 App 上传；Codex 托管沙箱无法读取登录 Keychain，
+  因而在沙箱内仍返回 `0 valid identities found`，不能覆盖宿主证据。两次 App submission
+  已被 Apple 接收但查询时均为 `In Progress`；尚无 Accepted、staple 或 Gatekeeper 证据。
+
+## Release GO 条件
+
+只有以下条件同时满足才能写 release GO：
+
+- 当前 working tree 相关 tests/builds 通过，已知失败有明确处置；
+- 最终 App/ZIP/DMG 元数据为 `0.5 (33)`；
+- Developer ID、notarization、staple、codesign、Gatekeeper 全部通过；
+- NOTICE/ThirdPartyNotices 和最终 bundle resource/link inventory 一致；
+- 关键真实环境矩阵完成，未完成项以明确的风险接受记录处理。

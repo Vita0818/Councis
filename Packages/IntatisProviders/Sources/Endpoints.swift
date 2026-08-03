@@ -1,5 +1,6 @@
 import Foundation
 import IntatisCore
+import IntatisProtocol
 
 /// The wire dialect an endpoint speaks. v0.1 ships only `.openai`; adding a
 /// dialect later is a new case + a new adapter, with no change to the registry,
@@ -77,19 +78,132 @@ public struct ProviderEndpoint: Codable, Equatable, Sendable {
     public var id: String
     public var baseURL: URL
     public var chatEndpoint: URL?
+    public var responsesEndpoint: URL?
     public var apiKeyRef: KeychainRef
     public var wire: WireFormat
+    /// Provider SDK option semantics selected by OpenCode-compatible `npm`
+    /// configuration. This is separate from the HTTP wire dialect.
+    public var requestAdapter: ProviderRequestAdapter
+    /// Optional model-level `provider.npm` overrides. OpenCode resolves these
+    /// before the provider-level package.
+    public var modelRequestAdapters: [String: ProviderRequestAdapter]
+    /// Arbitrary model-scoped request body options from the user's provider
+    /// configuration. Wire adapters merge the selected model's object into the
+    /// outgoing request without enumerating provider-specific keys.
+    public var modelRequestOptions: [String: [String: JSONValue]]
+    /// Explicit route-scoped model capabilities. Absence is intentionally
+    /// conservative: an OpenAI-compatible URL alone never proves Responses
+    /// `tool_search` support.
+    public var modelCapabilities: [String: [Capability]]
+
     public init(id: String, baseURL: URL, chatEndpoint: URL? = nil,
-                apiKeyRef: KeychainRef, wire: WireFormat) {
+                responsesEndpoint: URL? = nil,
+                apiKeyRef: KeychainRef, wire: WireFormat,
+                requestAdapter: ProviderRequestAdapter = .legacyOpenAIWire,
+                modelRequestAdapters: [String: ProviderRequestAdapter] = [:],
+                modelRequestOptions: [String: [String: JSONValue]] = [:],
+                modelCapabilities: [String: [Capability]] = [:]) {
         self.id = id
         self.baseURL = baseURL
         self.chatEndpoint = chatEndpoint
+        self.responsesEndpoint = responsesEndpoint
         self.apiKeyRef = apiKeyRef
         self.wire = wire
+        self.requestAdapter = requestAdapter
+        self.modelRequestAdapters = modelRequestAdapters
+        self.modelRequestOptions = modelRequestOptions
+        self.modelCapabilities = modelCapabilities
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case baseURL
+        case chatEndpoint
+        case responsesEndpoint
+        case apiKeyRef
+        case wire
+        case requestAdapter
+        case modelRequestAdapters
+        case modelRequestOptions
+        case modelCapabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.baseURL = try container.decode(URL.self, forKey: .baseURL)
+        self.chatEndpoint = try container.decodeIfPresent(URL.self, forKey: .chatEndpoint)
+        self.responsesEndpoint = try container.decodeIfPresent(
+            URL.self,
+            forKey: .responsesEndpoint)
+        self.apiKeyRef = try container.decode(KeychainRef.self, forKey: .apiKeyRef)
+        self.wire = try container.decode(WireFormat.self, forKey: .wire)
+        self.requestAdapter = try container.decodeIfPresent(
+            ProviderRequestAdapter.self,
+            forKey: .requestAdapter) ?? .legacyOpenAIWire
+        self.modelRequestAdapters = try container.decodeIfPresent(
+            [String: ProviderRequestAdapter].self,
+            forKey: .modelRequestAdapters) ?? [:]
+        self.modelRequestOptions = try container.decodeIfPresent(
+            [String: [String: JSONValue]].self,
+            forKey: .modelRequestOptions) ?? [:]
+        self.modelCapabilities = try container.decodeIfPresent(
+            [String: [Capability]].self,
+            forKey: .modelCapabilities) ?? [:]
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encodeIfPresent(chatEndpoint, forKey: .chatEndpoint)
+        try container.encodeIfPresent(
+            responsesEndpoint,
+            forKey: .responsesEndpoint)
+        try container.encode(apiKeyRef, forKey: .apiKeyRef)
+        try container.encode(wire, forKey: .wire)
+        if requestAdapter != .legacyOpenAIWire {
+            try container.encode(
+                requestAdapter,
+                forKey: .requestAdapter)
+        }
+        if !modelRequestAdapters.isEmpty {
+            try container.encode(
+                modelRequestAdapters,
+                forKey: .modelRequestAdapters)
+        }
+        if !modelRequestOptions.isEmpty {
+            try container.encode(modelRequestOptions, forKey: .modelRequestOptions)
+        }
+        if !modelCapabilities.isEmpty {
+            try container.encode(
+                modelCapabilities,
+                forKey: .modelCapabilities)
+        }
     }
 
     public var chatCompletionsURL: URL {
         chatEndpoint ?? baseURL.appendingPathComponent("chat/completions")
+    }
+
+    public var responsesURL: URL {
+        responsesEndpoint ?? baseURL.appendingPathComponent("responses")
+    }
+
+    public func requestOptions(for model: ModelID) -> [String: JSONValue] {
+        modelRequestOptions[model.rawValue] ?? [:]
+    }
+
+    public func requestAdapter(
+        for model: ModelID
+    ) -> ProviderRequestAdapter {
+        modelRequestAdapters[model.rawValue] ?? requestAdapter
+    }
+
+    public func capabilities(
+        for model: ModelID
+    ) -> [Capability] {
+        modelCapabilities[model.rawValue] ?? []
     }
 }
 
@@ -100,6 +214,17 @@ extension ProviderEndpoint {
                                          endpointID: id,
                                          field: field,
                                          operation: operation)
+    }
+
+    func validatedResponsesURL(operation: String) throws -> URL {
+        let field = responsesEndpoint == nil
+            ? "Base URL"
+            : "Responses endpoint"
+        return try Self.validatedHTTPURL(
+            responsesURL,
+            endpointID: id,
+            field: field,
+            operation: operation)
     }
 
     func validatedBaseURLAppendingPathComponent(_ pathComponent: String,
@@ -138,19 +263,14 @@ public struct ModelRef: Codable, Equatable, Sendable {
         self.endpoint = endpoint
         self.model = model
     }
-
-    public init(binding: AgentModelBinding) {
-        self.init(endpoint: binding.providerID, model: binding.modelID)
-    }
-
-    public func validatedAgentModelBinding() throws -> AgentModelBinding {
-        try AgentModelBinding(validatingProviderID: endpoint, modelID: model)
-    }
 }
 
 /// Default model per role. v0.1 only requires `chat`; the rest are forward slots.
 public struct ResolvedModels: Codable, Equatable, Sendable {
     public var chat: ModelRef
+    /// Optional provider-hosted search route for Chat. When absent, searched
+    /// turns use the ordinary `chat` route.
+    public var webSearch: ModelRef?
     public var agent: ModelRef?
     public var reviewer: ModelRef?
     public var vision: ModelRef?
@@ -158,6 +278,7 @@ public struct ResolvedModels: Codable, Equatable, Sendable {
     public var imageGen: ModelRef?
     public var videoGen: ModelRef?
     public init(chat: ModelRef,
+                webSearch: ModelRef? = nil,
                 agent: ModelRef? = nil,
                 reviewer: ModelRef? = nil,
                 vision: ModelRef? = nil,
@@ -165,6 +286,7 @@ public struct ResolvedModels: Codable, Equatable, Sendable {
                 imageGen: ModelRef? = nil,
                 videoGen: ModelRef? = nil) {
         self.chat = chat
+        self.webSearch = webSearch
         self.agent = agent
         self.reviewer = reviewer
         self.vision = vision

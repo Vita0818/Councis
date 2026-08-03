@@ -2,12 +2,19 @@
 import SwiftUI
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 import IntatisCore
 import IntatisProviders
 import IntatisConversation
 import IntatisArtifacts
 import IntatisMultimodal
 import IntatisSharedUI
+
+struct IOSConfigurationImportSummary: Equatable, Sendable {
+    var providerCount: Int
+    var modelCount: Int
+    var warnings: [ImportedChatConfiguration.Warning]
+}
 
 /// iOS app environment — the chat-only subset. It links Core / Providers /
 /// Conversation / Artifacts / Multimodal / SharedUI and *cannot* reach Tools,
@@ -57,7 +64,9 @@ final class IOSAppEnvironment: ObservableObject {
         do {
             try switchChatSession(to: SessionID.new())
         } catch {
-            chatSessionError = "Could not start chat session: \(error.localizedDescription)"
+            chatSessionError = IntatisLocalization.format(
+                "Could not start chat session: %@",
+                error.localizedDescription)
         }
     }
 
@@ -65,7 +74,9 @@ final class IOSAppEnvironment: ObservableObject {
         do {
             try switchChatSession(to: session.id)
         } catch {
-            chatSessionError = "Could not resume chat session: \(error.localizedDescription)"
+            chatSessionError = IntatisLocalization.format(
+                "Could not resume chat session: %@",
+                error.localizedDescription)
         }
     }
 
@@ -101,12 +112,42 @@ final class IOSAppEnvironment: ObservableObject {
             catalog.providers[index].apiKeySource = IOSProviderAPIKeySource(type: "authFile", value: "")
             secrets.cache(key, for: IOSConfig.apiKeyRef(for: catalog.providers[index]))
         }
-        IOSConfig.providerCatalog = catalog
+        try IOSConfig.saveProviderCatalog(catalog)
         providerCatalog = IOSConfig.providerCatalog
         needsAPIKey = !Self.hasAPIKey(ref: catalog.selectedProvider.map(IOSConfig.apiKeyRef(for:))
                                       ?? .authFile(providerID: "default"))
 
         refreshProviderRegistry()
+    }
+
+    func importProviderConfiguration(
+        data: Data,
+        sourceURL: URL
+    ) throws -> IOSConfigurationImportSummary {
+        let imported = try ChatConfigurationImporter.parse(
+            data: data,
+            sourceURL: sourceURL)
+        var literalSecrets: [String: String] = [:]
+        imported.forEachLiteralSecret { providerID, secret in
+            literalSecrets[providerID] = secret
+        }
+        try ConfigSecretResolver.writeSecrets(literalSecrets)
+        for (providerID, secret) in literalSecrets {
+            secrets.cache(secret, for: .authFile(providerID: providerID))
+        }
+
+        let catalog = try IOSConfig.installImportedConfiguration(
+            imported,
+            sourceFilename: sourceURL.lastPathComponent)
+        providerCatalog = catalog
+        needsAPIKey = !Self.hasAPIKey(
+            ref: catalog.selectedProvider.map(IOSConfig.apiKeyRef(for:))
+                ?? .authFile(providerID: "default"))
+        refreshProviderRegistry()
+        return IOSConfigurationImportSummary(
+            providerCount: imported.providerCount,
+            modelCount: imported.modelCount,
+            warnings: imported.warnings)
     }
 
     func selectProviderModel(providerID: String, modelID: String) {
@@ -165,83 +206,217 @@ final class IOSAppEnvironment: ObservableObject {
 
 struct IOSRootView: View {
     @EnvironmentObject var env: IOSAppEnvironment
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    @ScaledMetric(relativeTo: .title) private var brandTitleSize: CGFloat = 28
+    @ScaledMetric(relativeTo: .title2) private var sessionTitleSize: CGFloat = 22
+    @ScaledMetric(relativeTo: .largeTitle) private var settingsTitleSize: CGFloat = 30
     @State private var showSettings = false
+    @State private var showSidebar = false
+    @State private var showConfigImporter = false
     @State private var catalog = IOSConfig.providerCatalog
     @State private var apiKeysByProviderID: [String: String] = [:]
     @State private var settingsError: String?
+    @State private var configImportMessage: String?
+    @State private var configImportWarnings: [String] = []
     @State private var isTestingProvider = false
     @State private var providerHealthReport: ProviderHealthReport?
     @State private var recentSessions: [IOSSessionSummary] = []
+    @AppStorage(IntatisMessageRendererMode.defaultsKey)
+    private var rendererModeRawValue = IntatisMessageRendererMode.microsoft.rawValue
 
     var body: some View {
         // iOS uses the shared chat thread in single-column mode; Code/Cowork are
         // not linked, so no local workspace execution is reachable.
-        ThreeColumnShell(model: env.viewModel, layout: .iOSChat)
-            .id(env.chatSessionID.rawValue)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    sessionHistoryMenu
+        NavigationStack {
+            GeometryReader { proxy in
+                let sidebarWidth = min(max(proxy.size.width * 0.82, 280), 420)
+
+                ZStack(alignment: .leading) {
+                    sidebar(width: sidebarWidth)
+
+                    chatSurface
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: showSidebar ? 30 : 0,
+                            style: .continuous))
+                        .overlay {
+                            if showSidebar {
+                                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                                    .stroke(.secondary.opacity(0.18), lineWidth: 1)
+                            }
+                        }
+                        .overlay {
+                            if showSidebar {
+                                Rectangle()
+                                    .fill(.clear)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { setSidebarVisible(false) }
+                                    .accessibilityLabel(
+                                        IntatisLocalization.string("Close sidebar"))
+                                    .accessibilityAddTraits(.isButton)
+                                    .accessibilityIdentifier("ios.sidebar.close")
+                            }
+                        }
+                        .offset(x: showSidebar ? sidebarWidth : 0)
                 }
-                ToolbarItem(placement: .principal) {
+                .background(.background)
+                .animation(
+                    reduceMotion ? nil : .snappy(duration: 0.34, extraBounce: 0),
+                    value: showSidebar)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .sheet(isPresented: $showSettings) { settingsSheet }
+        .task(id: env.chatSessionID.rawValue) {
+            refreshSessions()
+        }
+        .onReceive(
+            Publishers.CombineLatest(
+                env.viewModel.$isStreaming,
+                env.viewModel.$imageGenerationState)
+                .map { isStreaming, generationState in
+                    isStreaming || generationState.isRunning
+                }
+                .removeDuplicates()
+        ) { isBusy in
+            if !isBusy {
+                refreshSessions()
+            }
+        }
+    }
+
+    private var chatSurface: some View {
+        VStack(spacing: 0) {
+            chatHeader
+            sessionErrorBanner
+            ThreeColumnShell(
+                model: env.viewModel,
+                layout: .iOSChat,
+                composerLeadingAccessory: AnyView(
                     IOSChatModelMenu(
                         catalog: env.providerCatalog,
                         isBusy: env.viewModel.isBusy,
-                        onSelect: env.selectProviderModel(providerID:modelID:))
-                }
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button {
-                        env.startNewChatSession()
-                        refreshSessions()
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .disabled(env.viewModel.isBusy)
-
-                    Button { showSettings = true } label: { Image(systemName: "key") }
-                }
-            }
-            .overlay(alignment: .top) {
-                sessionErrorBanner
-            }
-            .sheet(isPresented: $showSettings) { settingsSheet }
-            .task(id: env.chatSessionID.rawValue) {
-                refreshSessions()
-                if env.needsAPIKey { showSettings = true }
-            }
+                        onSelect: env.selectProviderModel(providerID:modelID:))),
+                placesTurnStatsInComposer: true)
+                .id(env.chatSessionID.rawValue)
+        }
+        .background(.background)
     }
 
-    private var sessionHistoryMenu: some View {
-        Menu {
+    private var chatHeader: some View {
+        HStack(spacing: 12) {
             Button {
-                env.startNewChatSession()
                 refreshSessions()
+                setSidebarVisible(true)
             } label: {
-                Label("New Chat", systemImage: "plus")
+                Label(
+                    IntatisLocalization.string("Open sidebar"),
+                    systemImage: "line.3.horizontal")
+                    .intatisComposerIconLabel()
             }
-            .disabled(env.viewModel.isBusy)
+            .intatisCompactIconButton()
+            .accessibilityIdentifier("ios.sidebar.open")
+            .frame(width: 48)
 
-            Section("Recent") {
-                if recentSessions.isEmpty {
-                    Text("No chat sessions")
-                } else {
-                    ForEach(Array(recentSessions.prefix(12))) { session in
-                        Button {
-                            env.resumeChatSession(session)
-                            refreshSessions()
-                        } label: {
-                            Label(sessionMenuTitle(session),
-                                  systemImage: session.id == env.chatSessionID
-                                  ? "checkmark.circle.fill"
-                                  : "clock")
-                        }
-                        .disabled(env.viewModel.isBusy || session.id == env.chatSessionID)
-                    }
-                }
+            Text(activeSessionTitle)
+                .font(.system(
+                    size: sessionTitleSize,
+                    weight: .semibold,
+                    design: .serif))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("ios.chat.session-title")
+
+            Button {
+                startNewChat()
+            } label: {
+                Label(
+                    IntatisLocalization.string("New chat"),
+                    systemImage: "square.and.pencil")
+                    .intatisComposerIconLabel()
             }
-        } label: {
-            Image(systemName: "clock.arrow.circlepath")
+            .intatisCompactIconButton()
+            .disabled(env.viewModel.isBusy)
+            .accessibilityIdentifier("ios.chat.new")
+            .frame(width: 48)
         }
-        .disabled(env.viewModel.isBusy && recentSessions.isEmpty)
+        .padding(.horizontal, 12)
+        .frame(height: 64)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func sidebar(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Councis")
+                .font(.system(
+                    size: brandTitleSize,
+                    weight: .semibold,
+                    design: .serif))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 6)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+
+            IOSSidebarModeRow()
+                .padding(.bottom, 14)
+                .accessibilityIdentifier("ios.sidebar.mode.chat")
+
+            Divider()
+                .opacity(0.45)
+                .padding(.bottom, 12)
+
+            IntatisSessionHistoryList(
+                title: IntatisLocalization.string("Recent"),
+                newTitle: IntatisLocalization.string("New chat"),
+                emptyTitle: IntatisLocalization.string("No chat sessions yet."),
+                items: sidebarHistoryItems,
+                style: .standard(colorScheme),
+                isNewDisabled: env.viewModel.isBusy,
+                onNew: { startNewChat(closingSidebar: true) },
+                onSelect: selectSession(id:))
+                .frame(maxHeight: .infinity, alignment: .top)
+
+            Button {
+                presentSettings()
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+                    Text(IntatisLocalization.string("Settings"))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .contentShape(RoundedRectangle(
+                    cornerRadius: 8,
+                    style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 12)
+            .accessibilityIdentifier("chat.settings")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .frame(width: width)
+        .frame(maxHeight: .infinity, alignment: .leading)
+        .background(.background)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .onEnded { value in
+                    if value.translation.width < -44 {
+                        setSidebarVisible(false)
+                    }
+                })
+        .allowsHitTesting(showSidebar)
+        .accessibilityHidden(!showSidebar)
     }
 
     @ViewBuilder private var sessionErrorBanner: some View {
@@ -251,7 +426,9 @@ struct IOSRootView: View {
                 .foregroundStyle(.red)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(.thinMaterial, in: Capsule())
+                .overlay {
+                    Capsule().stroke(Color.red.opacity(0.45), lineWidth: 1)
+                }
                 .padding(.top, 8)
         }
     }
@@ -261,16 +438,120 @@ struct IOSRootView: View {
     }
 
     private func sessionMenuTitle(_ session: IOSSessionSummary) -> String {
+        if let displayName = session.displayName?.trimmingCharacters(
+            in: .whitespacesAndNewlines),
+           !displayName.isEmpty {
+            return displayName
+        }
+        if session.eventCount == 0 || session.updatedAt == .distantPast {
+            return IntatisLocalization.string("New chat")
+        }
         let formatter = DateFormatter()
-        formatter.dateStyle = .short
+        formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        let count = session.eventCount == 1 ? "1 event" : "\(session.eventCount) events"
-        return "\(formatter.string(from: session.updatedAt)) · \(count)"
+        return formatter.string(from: session.updatedAt)
+    }
+
+    private func selectSession(_ session: IOSSessionSummary) {
+        if session.id != env.chatSessionID {
+            env.resumeChatSession(session)
+            refreshSessions()
+        }
+        setSidebarVisible(false)
+    }
+
+    private func selectSession(id: SessionID) {
+        guard let session = recentSessions.first(where: { $0.id == id }) else {
+            return
+        }
+        selectSession(session)
+    }
+
+    private var activeSessionTitle: String {
+        guard let session = recentSessions.first(where: {
+            $0.id == env.chatSessionID
+        }) else {
+            return IntatisLocalization.string("New chat")
+        }
+        return sessionMenuTitle(session)
+    }
+
+    private var sidebarHistoryItems: [IntatisSessionHistoryItem] {
+        recentSessions.prefix(24).map { session in
+            IntatisSessionHistoryItem(
+                id: session.id,
+                title: sessionMenuTitle(session),
+                detail: "",
+                systemImage: "bubble.left.and.bubble.right",
+                isSelected: session.id == env.chatSessionID)
+        }
+    }
+
+    private func startNewChat(closingSidebar: Bool = false) {
+        env.startNewChatSession()
+        refreshSessions()
+        if closingSidebar {
+            setSidebarVisible(false)
+        }
+    }
+
+    private func presentSettings() {
+        catalog = IOSConfig.providerCatalog
+        setSidebarVisible(false)
+        showSettings = true
+    }
+
+    private func setSidebarVisible(_ isVisible: Bool) {
+        showSidebar = isVisible
     }
 
     private var settingsSheet: some View {
         NavigationStack {
-            Form {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(IntatisLocalization.string("Settings"))
+                    .font(.system(
+                        size: settingsTitleSize,
+                        weight: .semibold,
+                        design: .serif))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+
+                Form {
+                Section("Configuration") {
+                    Button {
+                        showConfigImporter = true
+                    } label: {
+                        Label("Import Councis Config", systemImage: "square.and.arrow.down")
+                    }
+                    .accessibilityIdentifier("settings.import-config")
+
+                    if let filename = IOSConfig.importedConfigDescription {
+                        LabeledContent("Imported file", value: filename)
+                    }
+
+                    Text("Import a Councis JSON or JSONC file from Files. Provider and model settings are stored in this app; literal credentials are migrated to the protected auth file.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let configImportMessage {
+                        Label(
+                            configImportMessage,
+                            systemImage: configImportWarnings.isEmpty
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(configImportWarnings.isEmpty ? .green : .orange)
+                    }
+
+                    ForEach(Array(configImportWarnings.enumerated()), id: \.offset) { _, warning in
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
                 if let providerIndex = selectedProviderIndex {
                     Section("Provider") {
                         Picker("Active provider", selection: $catalog.selectedProviderID) {
@@ -278,7 +559,7 @@ struct IOSRootView: View {
                                 Text(provider.title).tag(provider.id)
                             }
                         }
-                        .onChange(of: catalog.selectedProviderID) { _ in
+                        .onChange(of: catalog.selectedProviderID) { _, _ in
                             ensureSelectedModel()
                         }
 
@@ -327,7 +608,9 @@ struct IOSRootView: View {
                         Button {
                             testProvider()
                         } label: {
-                            Label(isTestingProvider ? "Testing Provider" : "Test Provider",
+                            Label(isTestingProvider
+                                    ? IntatisLocalization.string("Testing Provider")
+                                    : IntatisLocalization.string("Test Provider"),
                                   systemImage: isTestingProvider ? "hourglass" : "checkmark.seal")
                         }
                         .disabled(isTestingProvider)
@@ -336,17 +619,35 @@ struct IOSRootView: View {
                             ProgressView("Testing provider...")
                         } else if let report = providerHealthReport {
                             VStack(alignment: .leading, spacing: 4) {
-                                Label(report.displayTitle,
+                                Label(IntatisLocalization.string(report.displayTitle),
                                       systemImage: report.isOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                                     .foregroundStyle(report.isOK ? .green : .red)
-                                Text(report.displaySummary)
+                                Text(IntatisLocalization.providerHealthSummary(report))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text(report.displayDetail)
+                                Text(IntatisLocalization.providerHealthDetail(report))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                         }
+                    }
+                }
+
+                Section("Message Rendering") {
+                    Picker("Message rendering", selection: rendererModeSelection) {
+                        Text("Rich Markdown").tag(IntatisMessageRendererMode.microsoft.rawValue)
+                        Text("Plain text safe mode").tag(IntatisMessageRendererMode.plainSafe.rawValue)
+                    }
+                    Text(messageRendererHelpText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Open Source") {
+                    NavigationLink("Third-party notices") {
+                        IntatisThirdPartyNoticesView()
+                            .navigationTitle("Open-source notices")
+                            .navigationBarTitleDisplayMode(.inline)
                     }
                 }
 
@@ -355,8 +656,9 @@ struct IOSRootView: View {
                         Text(settingsError).font(.caption).foregroundStyle(.red)
                     }
                 }
+                }
             }
-            .navigationTitle("Settings")
+            .navigationTitle("")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showSettings = false } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -369,12 +671,121 @@ struct IOSRootView: View {
                             providerHealthReport = nil
                             showSettings = false
                         } catch {
-                            settingsError = "Could not save settings: \(error.localizedDescription)"
+                            settingsError = IntatisLocalization.format(
+                                "Could not save settings: %@",
+                                error.localizedDescription)
                         }
                     }
                 }
             }
         }
+        .fileImporter(
+            isPresented: $showConfigImporter,
+            allowedContentTypes: [.json, Self.jsoncType],
+            allowsMultipleSelection: false,
+            onCompletion: importConfiguration)
+    }
+
+    private static var jsoncType: UTType {
+        UTType(filenameExtension: "jsonc") ?? .plainText
+    }
+
+    private func importConfiguration(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else {
+                throw IntatisError.config("no configuration file was selected")
+            }
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if didAccess { url.stopAccessingSecurityScopedResource() }
+            }
+            let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey])
+            if let fileSize = resourceValues.fileSize,
+               fileSize > ChatConfigurationImporter.maximumByteCount {
+                throw ChatConfigurationImportError.fileTooLarge
+            }
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let summary = try env.importProviderConfiguration(
+                data: data,
+                sourceURL: url)
+            catalog = IOSConfig.providerCatalog
+            apiKeysByProviderID = [:]
+            providerHealthReport = nil
+            settingsError = nil
+
+            let imported = IntatisLocalization.format(
+                "Imported providers: %lld · models: %lld.",
+                Int64(summary.providerCount),
+                Int64(summary.modelCount))
+            configImportWarnings = summary.warnings.map(importWarningText)
+            if !summary.warnings.isEmpty {
+                configImportMessage = imported + " " + IntatisLocalization.format(
+                    "%lld compatibility warnings require review.",
+                    Int64(summary.warnings.count))
+            } else {
+                configImportMessage = imported
+            }
+        } catch {
+            configImportMessage = nil
+            configImportWarnings = []
+            settingsError = IntatisLocalization.format(
+                "Could not import configuration: %@",
+                error.localizedDescription)
+        }
+    }
+
+    private func importWarningText(
+        _ warning: ImportedChatConfiguration.Warning
+    ) -> String {
+        switch warning {
+        case .ignoredModelVariants(let providerID, let modelID):
+            return IntatisLocalization.format(
+                "Variants for %@/%@ are not imported on iOS.",
+                boundedImportLabel(providerID),
+                boundedImportLabel(modelID))
+        case .externalCredentialReference(let providerID, let kind):
+            return IntatisLocalization.format(
+                "%@ uses an external %@ credential reference; verify or enter the credential on iOS.",
+                boundedImportLabel(providerID),
+                boundedImportLabel(kind))
+        case .unsupportedRequestAdapter(let providerID, let package):
+            return IntatisLocalization.format(
+                "%@ uses unsupported provider adapter %@; requests remain blocked until a supported OpenAI-compatible adapter is selected.",
+                boundedImportLabel(providerID),
+                boundedImportLabel(package))
+        case .skippedProviderWithoutBaseURL(let providerID):
+            return IntatisLocalization.format(
+                "%@ was skipped because it has no OpenAI-compatible Base URL for iOS Chat.",
+                boundedImportLabel(providerID))
+        }
+    }
+
+    private func boundedImportLabel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.prefix(120))
+    }
+
+    private var messageRendererHelpText: String {
+        if let launchOverride = IntatisMessageRendererMode.launchOverride() {
+            let label = launchOverride == .plainSafe
+                ? IntatisLocalization.string("Plain text safe mode")
+                : IntatisLocalization.string("Rich Markdown")
+            return IntatisLocalization.format(
+                "Current launch is forced to %@. This picker is saved immediately for the next launch without an override; Cancel only discards provider edits.",
+                label)
+        }
+        return IntatisLocalization.string(
+            "This choice is saved and applied immediately; Cancel only discards provider edits. Rich Markdown uses the audited upstream renderer with images, math typesetting, and syntax highlighting disabled for the first release. Plain text safe mode bypasses Markdown entirely without changing session data.")
+    }
+
+    private var rendererModeSelection: Binding<String> {
+        Binding(
+            get: {
+                IntatisMessageRendererMode.resolve(
+                    persistedRawValue: rendererModeRawValue,
+                    arguments: []).rawValue
+            },
+            set: { rendererModeRawValue = $0 })
     }
 
     private var selectedProviderIndex: Int? {
@@ -475,7 +886,9 @@ struct IOSRootView: View {
     }
 
     private func apiKeyPlaceholder(for provider: IOSProviderSettings) -> String {
-        env.hasAPIKey(for: provider) ? "••••••••••••••••" : "Enter API key"
+        env.hasAPIKey(for: provider)
+            ? "••••••••••••••••"
+            : IntatisLocalization.string("Enter API key")
     }
 
     private func testProvider() {
@@ -491,9 +904,32 @@ struct IOSRootView: View {
                 apiKeysByProviderID = [:]
                 providerHealthReport = await env.healthCheckSelectedProvider()
             } catch {
-                settingsError = "Could not test provider: \(error.localizedDescription)"
+                settingsError = IntatisLocalization.format(
+                    "Could not test provider: %@",
+                    error.localizedDescription)
             }
         }
+    }
+}
+
+private struct IOSSidebarModeRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+            Text(IntatisLocalization.string("Chat"))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .intatisLiquidGlass(cornerRadius: 10, interactive: true)
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isSelected)
     }
 }
 
@@ -520,24 +956,23 @@ private struct IOSChatModelMenu: View {
             selectedModelID: catalog.selectedModelID,
             isBusy: isBusy,
             onSelect: onSelect) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "cpu")
-                        Text(selectedModel?.title ?? IOSConfig.defaultModel)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(selectedProvider?.title ?? "OpenAI")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    HStack(spacing: 6) {
-                        Image(systemName: "cpu")
-                        Text(selectedModel?.title ?? IOSConfig.defaultModel)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+                HStack(spacing: 8) {
+                    Text(selectedModel?.title ?? IOSConfig.defaultModel)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
                 }
+                .intatisComposerSelectionLabel()
         }
+        .intatisComposerSelectionMenu()
+        .tint(.primary)
+        .accessibilityLabel(
+            "\(selectedModel?.title ?? IOSConfig.defaultModel), \(selectedProvider?.title ?? "OpenAI")")
+        .accessibilityIdentifier("ios.model.menu")
     }
 }
 
@@ -547,7 +982,8 @@ struct IntatisiOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            IOSRootView().environmentObject(env)
+            IOSRootView()
+                .environmentObject(env)
         }
     }
 }

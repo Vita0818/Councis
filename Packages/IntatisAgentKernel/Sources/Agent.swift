@@ -1,6 +1,7 @@
 import Foundation
 import IntatisCore
 import IntatisPermission
+import IntatisProtocol
 
 /// A single agent: a workspace-bound, tool-using loop with its own permission
 /// profile. It has no awareness of whether it is alone (Code) or one of many
@@ -8,10 +9,10 @@ import IntatisPermission
 public struct Agent: Sendable {
     public var name: AgentID
     public var workspaceRoot: URL
-    public var modelBinding: AgentModelBinding
-    /// Compatibility view used by the provider request and existing projections.
-    /// Provider selection must use `modelBinding`, not this model-only value.
-    public var model: ModelID { modelBinding.modelID }
+    public var model: ModelID
+    /// Exact, durable inference identity for Cowork. Nil is retained for Code
+    /// and legacy sessions until their host explicitly binds a profile.
+    public var agentInferenceBinding: AgentInferenceBinding?
     public var profile: PermissionProfile
     /// Temporary compatibility fuse for Cowork coordination tools. Explicit
     /// coordinators get the coordination tools while this is > 0; tool-spawned
@@ -22,27 +23,17 @@ public struct Agent: Sendable {
     /// Phase 0 still uses this as a tool-exposure fuse, not as a task role model.
     public static let defaultCoordinationDepth = 2
 
-    public init(name: AgentID, workspaceRoot: URL, modelBinding: AgentModelBinding,
+    public init(name: AgentID, workspaceRoot: URL, model: ModelID,
+                agentInferenceBinding: AgentInferenceBinding? = nil,
                 profile: PermissionProfile = .reviewed, coordinationDepth: Int = 0) {
         self.name = name
         self.workspaceRoot = workspaceRoot
-        self.modelBinding = modelBinding
+        // The exact binding is authoritative when present. Normalizing here
+        // prevents a caller from constructing an Agent whose compatibility
+        // model field disagrees with the durable inference identity.
+        self.model = agentInferenceBinding?.modelID ?? model
+        self.agentInferenceBinding = agentInferenceBinding
         self.profile = profile
         self.coordinationDepth = coordinationDepth
-    }
-
-    /// Source-compatible bridge for pre-binding call sites. The sentinel cannot
-    /// resolve through `ProviderRegistry`; production attach/restore code must
-    /// replace it with a real provider binding before provider dispatch.
-    public init(name: AgentID, workspaceRoot: URL, model: ModelID,
-                profile: PermissionProfile = .reviewed, coordinationDepth: Int = 0) {
-        self.init(
-            name: name,
-            workspaceRoot: workspaceRoot,
-            modelBinding: AgentModelBinding(
-                trustedProviderID: AgentModelBinding.unresolvedLegacyProviderID,
-                modelID: model),
-            profile: profile,
-            coordinationDepth: coordinationDepth)
     }
 }

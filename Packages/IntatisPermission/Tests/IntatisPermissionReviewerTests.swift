@@ -11,6 +11,28 @@ private struct CannedChat: ChatProvider {
     }
 }
 
+private final class CapturingCannedChat: ChatProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured: [ChatRequest] = []
+
+    var requests: [ChatRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+
+    func stream(_ request: ChatRequest) -> AsyncThrowingStream<ChatChunk, Error> {
+        lock.lock()
+        captured.append(request)
+        lock.unlock()
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.delta(#"{"decision":"allow","risk":"low","reason":"ok"}"#))
+            continuation.yield(.done)
+            continuation.finish()
+        }
+    }
+}
+
 private func reviewCtx(profile: PermissionProfile = .reviewed) -> PermissionContext {
     PermissionContext(workspaceRoot: URL(fileURLWithPath: "/ws"), profile: profile,
                       allowsShell: true, userGoal: "edit a file", agent: AgentID(rawValue: "Coder"))
@@ -22,6 +44,22 @@ private func writeCall() -> ToolCallContext {
 }
 
 final class IntatisPermissionReviewerTests: XCTestCase {
+
+    func testReviewerDoesNotInventSamplingParameters() async throws {
+        let provider = CapturingCannedChat()
+        let reviewer = ModelPermissionReviewer(
+            provider: provider,
+            model: ModelID(rawValue: "rev"))
+
+        _ = await reviewer.review(
+            writeCall(),
+            reviewCtx(),
+            gateReason: "write",
+            risk: .low)
+
+        let request = try XCTUnwrap(provider.requests.first)
+        XCTAssertNil(request.temperature)
+    }
 
     func testReviewerParsesAllow() async {
         let r = ModelPermissionReviewer(
@@ -47,14 +85,17 @@ final class IntatisPermissionReviewerTests: XCTestCase {
         XCTAssertEqual(out.decision, .askUser)
     }
 
-    func testEngineWriteAsksBeforeModelReviewer() async {
+    func testEngineWriteUsesConfiguredModelReviewer() async {
         let reviewer = ModelPermissionReviewer(
             provider: CannedChat(text: #"{"decision":"allow","risk":"low","reason":"fine"}"#),
             model: ModelID(rawValue: "rev"))
         let engine = PermissionEngine(reviewer: reviewer)
-        let out = await engine.decide(writeCall(), reviewCtx(profile: .reviewed))
-        XCTAssertEqual(out.decision, .askUser)
-        XCTAssertEqual(out.reason, "write to workspace")
+        let decision = await engine.decideDetailed(
+            writeCall(),
+            reviewCtx(profile: .reviewed))
+        XCTAssertEqual(decision.outcome.decision, .allow)
+        XCTAssertEqual(decision.outcome.reason, "fine")
+        XCTAssertTrue(decision.reviewerConsulted)
     }
 
     func testHardDenyNeverReachesReviewer() async {
@@ -65,7 +106,10 @@ final class IntatisPermissionReviewerTests: XCTestCase {
         let engine = PermissionEngine(reviewer: reviewer)
         let sensitive = ToolCallContext(toolName: "read_file", sideEffect: .readOnly,
                                         touchedPaths: [".env"], risksNetwork: false, rawArgs: "{}")
-        let out = await engine.decide(sensitive, reviewCtx())
-        XCTAssertEqual(out.decision, .deny)
+        let decision = await engine.decideDetailed(
+            sensitive,
+            reviewCtx())
+        XCTAssertEqual(decision.outcome.decision, .deny)
+        XCTAssertFalse(decision.reviewerConsulted)
     }
 }

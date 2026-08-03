@@ -28,12 +28,37 @@ public struct AskAgentTool: Tool {
 
     struct Args: Decodable { let to: String; let question: String }
 
+    public func permissionIntent(_ args: ToolArgs, workspaceRoot: URL) -> PermissionIntent {
+        let value = try? args.decode(Args.self)
+        return PermissionIntent(
+            action: "task.ask",
+            resources: [
+                PermissionResource(kind: .agent, value: value?.to ?? "unknown"),
+                PermissionResource(kind: .task, value: "new"),
+            ],
+            metadata: ["questionLength": .number(Double(value?.question.count ?? 0))],
+            dataEffects: [.none],
+            controlEffects: [.createTask, .message],
+            risks: [.controlPlaneMutation, .modelCost],
+            replayPolicy: .requiresManualReconciliation)
+    }
+
     public func execute(_ args: ToolArgs, in context: ToolContext) async throws -> ToolObservation {
         let a = try args.decode(Args.self)
         guard let messenger = context.messenger else {
-            return ToolObservation(text: "agent messaging is not available in this session")
+            throw IntatisError.io("agent messaging is not available in this session")
         }
-        let answer = await messenger.ask(to: a.to, question: a.question)
-        return ToolObservation(text: answer)
+        switch await messenger.ask(to: a.to, question: a.question) {
+        case .success(let answer):
+            return ToolObservation(text: answer)
+        case .failure(let failure):
+            let normalized = failure.lowercased().hasPrefix("error:")
+                ? String(failure.dropFirst("error:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                : failure.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw IntatisError.io(normalized.isEmpty
+                ? "agent request did not complete"
+                : normalized)
+        }
     }
 }

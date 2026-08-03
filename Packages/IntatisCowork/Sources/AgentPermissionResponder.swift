@@ -10,9 +10,28 @@ import IntatisProviders
 public struct AgentPermissionResponder: PermissionResponder {
     private let controlPlane: PermissionReviewControlPlane
 
+    public var approvalMode: PermissionApprovalMode { .automaticReviewer }
+
     public init(log: EventLog,
                 reviewerAgent: Agent,
                 provider: ToolCallingProvider,
+                fallback: PermissionResponder,
+                maxRecentEvents: Int = 36,
+                policy: PermissionReviewControlPlanePolicy? = nil,
+                eventAppender: PermissionReviewEventAppender? = nil) {
+        self.init(
+            log: log,
+            reviewerAgent: reviewerAgent,
+            providerFactory: { provider },
+            fallback: fallback,
+            maxRecentEvents: maxRecentEvents,
+            policy: policy,
+            eventAppender: eventAppender)
+    }
+
+    public init(log: EventLog,
+                reviewerAgent: Agent,
+                providerFactory: @escaping PermissionReviewProviderFactory,
                 fallback: PermissionResponder,
                 maxRecentEvents: Int = 36,
                 policy: PermissionReviewControlPlanePolicy? = nil,
@@ -24,7 +43,7 @@ public struct AgentPermissionResponder: PermissionResponder {
         controlPlane = PermissionReviewControlPlane(
             log: log,
             reviewerAgent: reviewerAgent,
-            provider: provider,
+            providerFactory: providerFactory,
             fallback: fallback,
             policy: effectivePolicy,
             eventAppender: eventAppender)
@@ -32,6 +51,10 @@ public struct AgentPermissionResponder: PermissionResponder {
 
     public func requestApproval(_ request: PermissionRequestPayload) async -> PermissionDecision {
         await controlPlane.submit(request)
+    }
+
+    public func requestResolution(_ request: PermissionRequestPayload) async -> PermissionApprovalResolution {
+        await controlPlane.submitResolution(request)
     }
 
     public func health() async -> PermissionReviewControlPlaneHealth {
