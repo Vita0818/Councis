@@ -748,7 +748,7 @@ private func trustedNodeExecutable() throws -> URL {
             .standardizedFileURL
     }
     throw IntatisError.config(
-        "node is not installed in a trusted system location; install Node.js to use Intatis browser tools")
+        "node is not installed in a trusted system location; install Node.js to use Councis browser tools")
 }
 #endif
 

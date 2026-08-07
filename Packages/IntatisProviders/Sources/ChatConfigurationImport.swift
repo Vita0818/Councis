@@ -45,6 +45,7 @@ public struct ImportedChatConfiguration: Sendable, CustomStringConvertible,
 
     public var selectedProviderID: String
     public var selectedModelID: String
+    public var transcriptionModel: ModelRef?
     public var webSearchModel: ModelRef?
     public var providers: [Provider]
     public var warnings: [Warning]
@@ -52,12 +53,14 @@ public struct ImportedChatConfiguration: Sendable, CustomStringConvertible,
 
     public init(selectedProviderID: String,
                 selectedModelID: String,
+                transcriptionModel: ModelRef? = nil,
                 webSearchModel: ModelRef? = nil,
                 providers: [Provider],
                 warnings: [Warning] = [],
                 literalSecretsByProviderID: [String: String] = [:]) {
         self.selectedProviderID = selectedProviderID
         self.selectedModelID = selectedModelID
+        self.transcriptionModel = transcriptionModel
         self.webSearchModel = webSearchModel
         self.providers = providers
         self.warnings = warnings
@@ -73,7 +76,8 @@ public struct ImportedChatConfiguration: Sendable, CustomStringConvertible,
             models: ResolvedModels(
                 chat: chat,
                 webSearch: webSearchModel,
-                agent: chat))
+                agent: chat,
+                transcription: transcriptionModel))
     }
 
     public var providerCount: Int { providers.count }
@@ -125,7 +129,7 @@ public enum ChatConfigurationImportError: Error, Equatable, Sendable,
         case .malformedDocument:
             return "The selected file is not valid JSON or JSONC."
         case .missingProviderConfiguration:
-            return "The selected file does not contain an Intatis provider configuration."
+            return "The selected file does not contain a Councis provider configuration."
         case .noUsableProviders:
             return "The selected configuration has no usable Chat providers and models."
         case .duplicateProviderID:
@@ -209,6 +213,9 @@ public enum ChatConfigurationImporter {
             root.string("web_search_model")
                 ?? root.string("webSearchModel"),
             environment: environment)
+        let transcriptionRaw = resolvedSelection(
+            root.string("transcription_model"),
+            environment: environment)
 
         var providers: [ImportedChatConfiguration.Provider] = []
         var warnings: [ImportedChatConfiguration.Warning] = []
@@ -244,7 +251,10 @@ public enum ChatConfigurationImporter {
                     requestAdapter: nil,
                     capabilities: [])]
             }
-            if models.isEmpty {
+            if models.isEmpty,
+               !explicitRoleModel(
+                   transcriptionRaw,
+                   targetsProviderID: id) {
                 models = [ParsedModel(
                     display: .init(id: "gpt-4o-mini", displayName: "GPT-4o mini"),
                     requestOptions: [:],
@@ -322,7 +332,7 @@ public enum ChatConfigurationImporter {
                 models: models.map(\.display)))
         }
 
-        guard !providers.isEmpty else {
+        guard providers.contains(where: { !$0.models.isEmpty }) else {
             throw ChatConfigurationImportError.noUsableProviders
         }
         let selection = select(
@@ -330,13 +340,18 @@ public enum ChatConfigurationImporter {
             selectedModelID: root.string("selectedModelID"),
             selectedRaw: selectedRaw,
             providers: providers)
-        let webSearchModel = try backgroundModelRef(
+        let webSearchModel = try? backgroundModelRef(
             webSearchRaw,
             preferredProviderID: selection.providerID,
-            providers: &providers)
+            providers: providers)
+        let transcriptionModel = try? backgroundModelRef(
+            transcriptionRaw,
+            preferredProviderID: selection.providerID,
+            providers: providers)
         return ImportedChatConfiguration(
             selectedProviderID: selection.providerID,
             selectedModelID: selection.modelID,
+            transcriptionModel: transcriptionModel,
             webSearchModel: webSearchModel,
             providers: providers,
             warnings: warnings,
@@ -354,6 +369,9 @@ public enum ChatConfigurationImporter {
             throw ChatConfigurationImportError.noUsableProviders
         }
 
+        let transcriptionRaw = resolvedSelection(
+            root.string("transcription_model"),
+            environment: environment)
         var providers: [ImportedChatConfiguration.Provider] = []
         var warnings: [ImportedChatConfiguration.Warning] = []
         var literalSecrets: [String: String] = [:]
@@ -395,7 +413,10 @@ public enum ChatConfigurationImporter {
                     id: modelID,
                     displayName: boundedDisplayName(displayName ?? modelID)))
             }
-            if models.isEmpty {
+            if models.isEmpty,
+               !explicitRoleModel(
+                   transcriptionRaw,
+                   targetsProviderID: id) {
                 models = [.init(id: "gpt-4o-mini", displayName: "GPT-4o mini")]
             }
 
@@ -450,7 +471,7 @@ public enum ChatConfigurationImporter {
                 models: models))
         }
 
-        guard !providers.isEmpty else {
+        guard providers.contains(where: { !$0.models.isEmpty }) else {
             throw ChatConfigurationImportError.noUsableProviders
         }
         let selectedRaw = resolvedSelection(
@@ -461,16 +482,21 @@ public enum ChatConfigurationImporter {
             selectedModelID: root.string("selectedModelID"),
             selectedRaw: selectedRaw,
             providers: providers)
-        let webSearchModel = try backgroundModelRef(
+        let webSearchModel = try? backgroundModelRef(
             resolvedSelection(
                 root.string("web_search_model")
                     ?? root.string("webSearchModel"),
                 environment: environment),
             preferredProviderID: selection.providerID,
-            providers: &providers)
+            providers: providers)
+        let transcriptionModel = try? backgroundModelRef(
+            transcriptionRaw,
+            preferredProviderID: selection.providerID,
+            providers: providers)
         return ImportedChatConfiguration(
             selectedProviderID: selection.providerID,
             selectedModelID: selection.modelID,
+            transcriptionModel: transcriptionModel,
             webSearchModel: webSearchModel,
             providers: providers,
             warnings: warnings,
@@ -671,7 +697,7 @@ public enum ChatConfigurationImporter {
     private static func backgroundModelRef(
         _ raw: String?,
         preferredProviderID: String,
-        providers: inout [ImportedChatConfiguration.Provider]
+        providers: [ImportedChatConfiguration.Provider]
     ) throws -> ModelRef? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
@@ -707,21 +733,37 @@ public enum ChatConfigurationImporter {
                   }) {
             providerIndex = preferred
             modelID = raw
+        } else if let separator = raw.firstIndex(of: "/") {
+            let endpoint = String(raw[..<separator])
+            let modelStart = raw.index(after: separator)
+            let unknownModel = String(raw[modelStart...])
+            return ModelRef(
+                endpoint: try boundedIdentifier(endpoint),
+                model: ModelID(rawValue:
+                    try boundedIdentifier(unknownModel)))
         } else {
             throw ChatConfigurationImportError.invalidModelSelection
         }
 
         let boundedModelID = try boundedIdentifier(modelID)
-        if !providers[providerIndex].models.contains(where: {
-            $0.id == boundedModelID
-        }) {
-            providers[providerIndex].models.append(.init(
-                id: boundedModelID,
-                displayName: boundedModelID))
-        }
         return ModelRef(
             endpoint: providers[providerIndex].id,
             model: ModelID(rawValue: boundedModelID))
+    }
+
+    /// Role routes use the canonical `<provider>/<model-id>` shape. Only an
+    /// explicit provider prefix authorizes an otherwise model-less provider to
+    /// remain out of the visible Chat model catalog.
+    private static func explicitRoleModel(
+        _ raw: String?,
+        targetsProviderID providerID: String
+    ) -> Bool {
+        guard let raw = raw?.trimmingCharacters(
+            in: .whitespacesAndNewlines),
+              let separator = raw.firstIndex(of: "/"),
+              separator != raw.startIndex else { return false }
+        return normalizedID(String(raw[..<separator]))
+            == normalizedID(providerID)
     }
 
     private static func select(
@@ -765,7 +807,7 @@ public enum ChatConfigurationImporter {
            let model = provider.models.first {
             return (provider.id, model.id)
         }
-        let provider = providers[0]
+        let provider = providers.first { !$0.models.isEmpty }!
         return (provider.id, provider.models[0].id)
     }
 

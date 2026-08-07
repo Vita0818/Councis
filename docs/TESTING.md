@@ -1,8 +1,8 @@
 # TESTING
 
 文档状态：当前验证矩阵
-最近核对：2026-08-03
-产品基线：v0.5（build 33）
+最近核对：2026-08-07
+产品基线：v0.36（build 36）
 
 历史测试数量、性能数字和事故复验保留在 Git 历史及 dated reports；它们不能替代当前
 working tree 的验证。这里只记录现行命令、release gate 和最近一次真实结果。
@@ -10,8 +10,7 @@ working tree 的验证。这里只记录现行命令、release gate 和最近一
 ## 环境与产品边界
 
 - 当前 Apple 构建环境：Xcode 27 / Swift 6.x / XcodeGen。
-- macOS 默认只验证 Developer ID/direct-distribution `IntatisMac`；其 App 对外显示名应为
-  `Councis`，内部 target/bundle ID 不因品牌文字替换而变化。
+- macOS 默认只验证 Developer ID/direct-distribution `IntatisMac`。
 - `IntatisMacAppStore` 是 legacy target，除非用户明确点名，否则不构建、不修复，也不作为
   release gate。
 - iOS 验证只覆盖 Chat 子集，不得链接 Tools、Permission、AgentKernel、Cowork 或 MCP。
@@ -28,11 +27,11 @@ scripts/check-version-consistency.sh
 
 必须同时满足：
 
-- `project.yml`：`MARKETING_VERSION=0.5`，`CURRENT_PROJECT_VERSION=33`；
-- macOS/iOS 参考 Info.plist：`0.5 (33)`；
+- `project.yml`：`MARKETING_VERSION=0.36`，`CURRENT_PROJECT_VERSION=36`；
+- macOS/iOS 参考 Info.plist：`0.36 (36)`；
 - 生成的 `Intatis.xcodeproj`：相同版本；
 - README、文档索引、CURRENT_STATE 和 PROJECT_MAP：相同当前基线；
-- 最终 App bundle：`CFBundleShortVersionString=0.5`、`CFBundleVersion=33`。
+- 最终 App bundle：`CFBundleShortVersionString=0.36`、`CFBundleVersion=36`。
 
 旧设计文档、依赖版本、协议 schema 和 dated reports 中的其他 v0.x 不属于该一致性检查。
 
@@ -137,7 +136,7 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
 
 发行脚本必须在输出 `dist/` 前完成：
 
-1. v0.5/build 33 一致性检查；
+1. v0.32/build 32 一致性检查；
 2. `IntatisMac` universal Release；
 3. Developer ID Application + secure timestamp + Hardened Runtime；
 4. signed entitlements 不含 App Sandbox；
@@ -155,7 +154,22 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
 - 旧 JSONL 仍可解码，`seq` 单调，append/batch first-write/first-terminal 语义不变；
 - permission RequestID/FIFO/correlation、manual decline 与 cancel-turn 语义不混淆；
 - tool authorization、durable ticket、executor result 和 turn outcome 关联完整；
+- Cowork final message/model-history、idle 与 completed outcome 只有在 side-effect evidence
+  校验通过后才同批落盘；failed/interrupted turn 会使旧日志中的先行完成气泡和 final assistant
+  history 失效，同时保留真实 user/tool history；
+- mailbox new delivery 冻结 1–8 个 exact MessageID，只呈现和消费该集合；ordinary delivery
+  使用 read-only/reply-only 窄 lease，成功 terminal 与 consumed events 原子提交后才 runtime ack；
+  失败只重试同一 TaskID，poison ID 耗尽不阻塞后来新 ID，legacy 歧义 fail closed；
+- WorkTask 工具区分 `wt_…` 与 AgentInvocation `task_…`，update 使用 latest authoritative
+  revision，terminal task 不冗余 settle；create/update reviewer preview 只含 bounded、脱敏语义字段；
 - path escape、symlink/hardlink、secret、credential path、workspace lease fail closed；
+- 只有持有 coordinator lease 的 Cowork prompt 才主动建立 execution objective、检查并激活明确相关的
+  exact Skills、为非简单工作维护最小 WorkTask DAG、在收益成立时尽早委派并继续自己的关键路径，
+  最终验证 child report 与结果；普通请求不自动创建 durable Goal，一步两步工作不仪式化 spawn，
+  worker、authoritative tool list、lease 与 PermissionEngine 边界不变；
+- Cowork coordinator prompt 在 `spawn_agent` 可用时把预知的根外目录或 out-of-workspace denial
+  路由为 exact-directory child + `delegate_task`，默认只读、写入显式；Code/worker prompt 不宣称
+  coordinator 能力，工具缺失/扩展拒绝只报告 blocker，直接越界仍 fail closed；
 - runtime stop 先 drain provider/tool/process，再释放 waiter/subscription/scope；
 - Cowork worker 默认无 coordinator tools，reviewer/verifier 不进入普通 scheduler；
 - iOS target closure 不出现 Tools/Permission/AgentKernel/Cowork/MCP。
@@ -168,26 +182,289 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
 
 - macOS/iOS Light 与 Dark；
 - Chat/Code/Cowork session 切换、16-row paging、Earlier/Newer/Latest；
+- Cowork 默认查看 `@main`；右侧 ordinary agent 点击后只出现该 agent 内容；
+  detach 当前 agent 后它仍留在同一列表、状态图标变为 detached、选择和历史页不跳回 main，
+  且所有运行时操作禁用；`@permission-reviewer` 为 status-only；两个窗口选择互不覆盖；切走再
+  返回仍恢复各 agent 自己的 Earlier/Newer/Latest boundary；查看 worker 时 composer 仍路由 `@main`；
 - long rich response、Markdown/table/code/math 和 plain-safe fallback；
 - composer 单行/多行、model menu、usage、Send/Stop；
 - Cowork wide rail、narrow permission fallback、Goal/Tasks/Agents；
+- wide rail 连续切换 agent、应用失焦/回焦、窗口移动与进入/退出全屏；系统日志中不得出现
+  `IntatisThreadViewportFramesPreferenceKey tried to update multiple times per frame`，源码不得恢复
+  viewport GeometryReader/PreferenceKey 坐标回写；
 - Settings disclosure、provider test、本地诊断 ZIP；
 - Dynamic Type、Reduce Transparency、Increase Contrast、VoiceOver 和 clipboard/selection。
 
 截图或 Computer Use 只能证明对应 viewport/appearance 的视觉行为，不能替代 EventLog、
 权限、bundle、签名或长时性能验证。
 
+### Cowork agent-thread 性能门禁
+
+Debug-only `CoworkAgentConversationFixtureView` 通过启动参数
+`-IntatisCoworkAgentConversationFixture` 使用真实 `CoworkShell`，但不打开 EventLog、provider、
+workspace、permission runtime 或 credential。Computer Use 无法传入启动参数时，DEBUG 构建也可用
+以 `.CoworkAgentConversationFixture` 结尾的独立 bundle identifier 启动同一 fixture；该入口不进入
+Release。固定负载为 8 个 selectable agent × 每个 1,000 rows、4-agent 合计 500 canonical
+delta/s（50 ms projection coalescing）、最多 16 visible rows。
+
+专项验收至少执行：
+
+1. `Run 1,000 switches`，确认最终 selection/内容一致且 warning/incident 均为 0；
+2. `Run 180s soak`，nominal 10 selected-agent changes/s；记录实际 timed switches；
+3. 结束后保持窗口打开并静置到 rich document 恢复，再记录 RSS、`vmmap -summary` 与
+   `heap` 中 `NSTextViewSharedData` / `Gestures.GestureNode<()>` 数量；
+4. 再手动验证一个 streaming agent、一个静态 agent、Earlier 页，以及切走再返回的 per-agent
+   boundary；确认 reviewer 没有 conversation button。
+
+通过条件：全过程 UI 可访问，main-thread warning/incident 为 0；可见 page 始终 ≤16；RSS/physical
+footprint 和 native text/gesture objects 不随切换次数线性增长；停止后 rich view 数量回到一个
+bounded visible page 的量级。`heap`/`vmmap` 会短暂停顿目标进程，只在自动 soak 完成后采样，
+避免把外部采样暂停误计为产品 heartbeat incident。该 offline fixture 只证明 presentation
+pipeline，不替代真实 EventLog I/O、provider、VoiceOver、最低支持设备或多小时运行。
+
+## Chat 托管搜索验收矩阵
+
+`docs/CHAT_HOSTED_SEARCH.md` 是当前产品合同。相关业务源码修改至少必须用离线 request fixture
+和 Chat integration tests 证明：
+
+- OpenAI Responses request fixture 只生成该 dialect 的 `web_search` + `tool_choice: auto`；
+  OpenRouter exact route 明确声明 `hosted_web_search` 时只生成
+  `openrouter:web_search` + `tool_choice: auto`，两者不得共用硬编码 tool type。
+- `@ai-sdk/openai` 普通 Chat adapter 尚未实现期间，registry 必须在网络前维持既有 config error，
+  不能仅凭已有 OpenAI search encoder 跳过普通 adapter gate。
+- 当前 Chat route 不支持、未知、adapter 尚未实现，或只有 `responsesEndpoint`/URL/名称 heuristic
+  时，发送同一 Chat route 的普通 request，body 不含 hosted-search 字段，且不会先发送失败请求。
+- 配置包含任意有效、无效或未知 `web_search_model` / `webSearchModel` 时，runtime 都不得解析或
+  调用该 route，不得覆盖当前模型，也不得新增 UI 警告；新生成配置 fixture 不再写入该字段。
+- 用户切换 provider/model/variant 后，下一次 Send 只按新的 exact selection 重新规划；不得沿用
+  上一 route 的 capability，也不得产生不同 provider/model 的请求。
+- 普通与搜索分支都保留 exact model/variant options；`provider.only`、`allow_fallbacks`、
+  `require_parameters` 不得被删除或放宽。搜索不支持时只移除搜索字段。
+- 模型拥有搜索能力但未调用时正常完成且 citations 为空；实际返回结构化 annotation 时才写
+  additive citations，非法 URL、正文猜测来源和空 Sources UI 继续被拒绝。
+- typed provider-specific “hosted search unsupported” 在任何有效 payload 前只允许在同一
+  provider/model/variant 上一次普通 Chat 重发。任意 404、自由文本匹配、不同 provider/model
+  fallback、partial payload 后重放必须被测试拒绝。
+- unsupported/unknown 分支不产生 toast、banner、错误卡、状态、提示词或 Settings 项，也不注册/
+  调用通用 Intatis search tool、`web_fetch`、`browser_search`、MCP、shell 或本地浏览器。
+- macOS/iOS 共用相同 planner 语义；iOS target closure 仍没有 Tools、Permission、AgentKernel、
+  Cowork 或 MCP。Chat cancellation、TurnID、EventLog 与旧 citation decode 不因分支改变。
+
+真实 provider smoke 只能作为 adapter fixture 之外的补充，不能用单一厂商成功替代上述 exact
+adapter/capability 矩阵。2026-08-05 已新增并通过 provider focused tests，覆盖独立 capability、
+当前 route/legacy route ignore、compatible 静默普通 Chat、OpenAI/OpenRouter tool shape、strict
+routing options、结构化 unsupported 同路由一次降级、裸 404 拒绝降级、partial payload 后禁止重放
+及 citation 安全解析。macOS/iOS app build 与完整回归结果以本文件“最近一次真实结果”为准。
+
+## 图片工具与 `image_model` 配置验收矩阵
+
+涉及 macOS/modern CLI 图片路由时，至少验证：
+
+- 顶层 canonical `image_model` 的 `<provider>/<model-id>` 精确解析到
+  `ResolvedModels.imageGen`，不改变当前 Chat/Code/Cowork inference selection；
+- 专用图片 provider 可使用空 `models`，连接仍保留，但不生成 inference profile 或进入模型菜单；
+- 图片 model ID 不需要作为推理 model 重复登记；model-facing `generate_image` 与
+  `edit_image` schema 都不包含 provider/model 字段；
+- 缺少 `image_model` 时 `models.imageGen == nil`，两个工具执行都明确报未配置，不能出现
+  `dall-e-3` 或其他 hidden fallback；
+- provider wire 继续只接受合法 HTTP(S) Base URL；生成调用 OpenAI-compatible
+  `/images/generations`，编辑调用 multipart `/images/edits`，两者都验证
+  `data[].b64_json`；
+- `edit_image` 必须在任何网络请求前验证输入/输出均位于 workspace、输入是受支持且魔数匹配的
+  PNG/JPEG/WebP 普通文件、输入不超过 50 MiB、输入输出不相同且输出扩展名是 `.png`；
+- 两个工具的文件写入都经过 permission、workspace lease 与 `PathConfinement`；Cowork
+  read-only worker 与 reviewer 不得看到 `edit_image`。当前首版只支持单张输入图，不支持 mask、
+  多参考图或原地覆盖。
+
+## 输入栏语音与 `transcription_model` 配置验收矩阵
+
+涉及 macOS Chat/Code/Cowork 或 iOS Chat 语音输入时，至少验证：
+
+- 顶层 canonical `transcription_model` 的 `<provider>/<model-id>` 精确解析到
+  `ResolvedModels.transcription`，不改变 Chat/Code/Cowork inference selection；缺字段时为 `nil`，
+  不得使用当前 Chat model、`whisper-1` 或其他 hidden fallback；
+- 显式 transcription-only provider 可使用空 `models`，连接和 credential reference 仍保留，但不
+  进入模型菜单；macOS 高级 JSON/JSONC 和 iOS Files import 均保留同一个 exact route，不新增设置页；
+- Chat/Code/Cowork/iOS Chat 的 mic 位于唯一 Send/Stop 左侧：第一次点击开始录音，第二次点击停止
+  并转写；结果追加而不是覆盖完成时的当前草稿，空结果不改变草稿且永不自动 Send；
+- 录音开始前验证 recorded-file runtime 并冻结 registry/route，credential 只在转写边界懒加载；
+  compatible/legacy/OpenAI adapter 使用 disk-backed multipart `/audio/transcriptions`，exact OpenRouter
+  adapter 使用 JSON-base64 `input_audio` 同 endpoint；不得按 provider 名称或 URL 猜测方言；
+- 默认录音必须是 WAV/16 kHz/mono；WAV 为 16-bit little-endian PCM，M4A 兼容设置也不得包含
+  `AVEncoderBitRateKey`。临时音频与 upload body 均为 owner-only 随机文件，最多录制 120 秒，读取/
+  上传前限制为 25 MiB；空文件、symlink、非普通文件、非法扩展与超限内容在请求前拒绝；
+- 成功、失败、取消、VM/runtime shutdown 后均停止 recorder、释放 process-wide microphone lease 并
+  删除音频/body；取消或迟到的 TCC callback 不得复活旧 generation；
+- 用户 Send 前不得产生 EventLog、ArtifactStore 或 projection 写入；macOS/iOS bundle 均包含
+  `NSMicrophoneUsageDescription`，English/简体中文说明可用；
+- 不迁入多模型对比、第二设置页、全局快捷键、review/clipboard 或输入法 target；至少运行 draft
+  merge、recorder settings、multipart/OpenRouter JSON/config route focused tests、完整 SwiftPM tests、
+  `IntatisMac` macOS Debug 与 `IntatisiOS` generic Simulator Debug unsigned build。真实麦克风权限与
+  线上 provider smoke 必须单独记录，不能从离线测试或编译外推。
+
+## Fixed `@judge` 与 `judge_model` 验收矩阵
+
+涉及 fresh Cowork Judge 时，至少验证：
+
+- GUI/CLI 顶层 canonical `judge_model` 使用与 `model` 相同的 `<provider>/<model-id>` 解析规则，
+  但生成独立 exact Judge binding；字段缺失时继承 Main 的配置 model，显式无法解析时在任何 session
+  durable state 写入前 fail closed，不静默回退；
+- fresh bootstrap 单个 batch 精确写入 10 个有序事件：settings、Main 三联、reviewer 三联、Judge
+  三联；三者 identity/workspace/capability lease 独立，注册过程 provider invocation count 为 0；
+- Judge 位于 primary workspace，profile/read lease 为 read-only、depth 0，工具/communication/delegation
+  只等同普通只读 worker，不获得 coordinator 或 reviewer 权限；
+- Main/model 无法 attach、spawn、replace 或 remove `@judge`，`delegate_task(to:auto)` 不选 Judge；
+  显式 delegation/task/message 仍走原 scheduler/mailbox/Mediator 并返回普通文本；
+- Main/Judge prompt 与 `cowork-agent-orchestration` Skill 只建议按需比较候选，不固定候选数量、模型、
+  策略或 Judge 调用时机；Judge 不替代 `@permission-reviewer`、Goal Verifier 或 Main 的最终责任；
+- non-empty 历史 session 只恢复 durable roster，不根据当前 `judge_model` 回填或重绑定 Judge。
+
+至少运行 `AutomaticPermissionReviewTests`、`ContextProjectionTests`、
+`SessionProjectionStoreTests`、`CLIProviderAdapterTests`、`IntatisSkillsTests`，并构建受影响的
+`IntatisMac` target；无需因 macOS/CLI-only Judge 路由默认构建未受影响的 iOS target。
+
 ## 最近一次真实结果
+
+2026-08-07 Councis Cowork terminal/mailbox reconciliation 同底层移植的直接证据：
+
+- 报告对应的 TaskContract、AgentLoop policy、model history、context projection、
+  CodeProjection、MessageBus/delegation、orchestration reliability、WorkTask runtime
+  与 permission reviewer 九类 focused tests 退出 0；其中包含 Councis 固有 Judge prompt 回归；
+- 完整 `swift test --skip-build` 退出 0；另按 target 复核为
+  `IntatisCoworkTests` 329 tests / 0 failures、`IntatisSharedUITests` 139 tests /
+  0 failures，完整输出中的 `IntatisAgentKernelTests` 为 176 tests / 0 failures。真实
+  Git/browser/provider/credential 等 opt-in smoke 继续按各自声明 skipped；
+- `xcodegen generate` 与 `scripts/check-version-consistency.sh` 通过，版本一致为
+  `0.36 (build 36)`；`IntatisMac` macOS Debug、`IntatisiOS` generic Simulator
+  Debug unsigned build 与 `IntatisMac` unsigned universal Release 均退出 0；
+- Release bundle 为 `0.36 (36)`、bundle identifier `com.Vita0818.IntatisMac`，
+  可执行文件包含 `x86_64 arm64`。构建只有既有 unused-result / deprecated
+  `onChange` warning；
+- 首次受限沙箱内的 focused test 在 manifest 编译前因 Swift/Clang 用户 module cache
+  不可写而退出；转到获准宿主环境后的 focused、完整 suite 和构建均通过。未启动真实 GUI
+  session，未调用线上 provider/credential，未安装 App，也未执行签名、公证、staple、
+  Gatekeeper 或 DMG/ZIP 打包；现有历史 session/EventLog 未被本轮验证改写。
+
+2026-08-06 fixed `@judge` / `judge_model` 的直接证据：
+
+- `IntatisCoworkTests`：322 tests / 0 failures；其中 `AutomaticPermissionReviewTests` 32/32，
+  覆盖十事件原子 bootstrap、三角色独立 leases/bindings、无 provider invocation、无法解析 Judge
+  时无 durable state、显式普通 delegation，以及 Judge attach/spawn/remove/auto-selection 边界；
+- `ContextProjectionTests`：23/23；Main/Judge prompt 保留 Main 动态决策权，Judge 只比较所给候选
+  并返回普通文本，不获得 coordinator、permission reviewer 或 Goal Verifier 权限；
+- `SessionProjectionStoreTests`：17/17；十事件 roster/lease/binding 可从 EventLog 重建到
+  `session.json`；`SessionStateProtocolTests`：4/4；`IntatisCoreTests`：52/52；
+- `CLIProviderAdapterTests`：7/7；显式 `judge_model` 得到独立 exact binding，字段缺失继承完整
+  default binding，未知 provider 前缀 fail closed；`IntatisSkillsTests`：29/29，内置 Cowork Skill 可发现且 Judge 建议不会破坏
+  skill catalog 合同；
+- `xcodegen generate`：通过；`IntatisMac` macOS Debug unsigned build：通过，只有既有 unused-result /
+  deprecated `onChange` warning。首次构建暴露并修正 AppConfig 局部 optional-binding shadowing 后重建通过；
+- 未运行完整无 filter 的 `swift test`、iOS build、真实 GUI session 或线上 provider/credential smoke。
+  iOS 未受这次 macOS/CLI Cowork Judge 路由影响；离线测试和编译不证明具体线上 Judge 模型可用性。
+
+2026-08-05 `v0.36 (36)` 版本、shipping target 构建与本机安装的直接证据：
+
+- `xcodegen generate`：通过；`scripts/check-version-consistency.sh`：通过并输出
+  `Intatis version is consistent: 0.36 (build 36)`；
+- `IntatisMac` unsigned universal Release：通过；最终 bundle 为 `0.36 (36)`，可执行文件包含
+  `x86_64 arm64`。安装前以仓库 Developer ID entitlements 完成 ad-hoc Hardened Runtime 签名，
+  `codesign --verify --deep --strict` 通过；
+- `/Applications/Intatis.app` 已替换为上述 `0.36 (36)` 开发构建，bundle identifier 为
+  `com.Vita0818.IntatisMac` 且无 quarantine xattr；旧 `0.35 (35)` 已移入废纸篓作为可恢复备份；
+- `IntatisiOS` generic Simulator Debug unsigned build：通过；最终 bundle 为 `0.36 (36)`；
+- 本轮没有运行 Developer ID 签名、公证、staple、Gatekeeper 或 DMG/ZIP 打包，因此这只是本机
+  开发安装证据，不是正式 release 证据。完整离线图片工具测试仍见紧随其后的专项结果。
+
+2026-08-05 `image_model` / `generate_image` / `edit_image` 配置路由的直接证据：
+
+- `CLIProviderAdapterTests`：4 tests / 0 failures；新增用例验证 image-only provider 的空
+  `models` 不影响 Chat selection、`image_model` 精确映射到独立 opaque endpoint/model，以及字段
+  缺失时无隐藏 fallback；
+- `IntatisProvidersMultimodalTests`：17 tests / 0 failures；覆盖 image provider registry、
+  `images/generations` JSON、`images/edits` multipart reference、DALL-E 2 的显式 base64 response、
+  `b64_json` decode、非法 URL、provider payload error、timeout/retry 与 no-image-model nil route；
+- `IntatisToolsTests`：144 tests / 15 skipped / 0 failures；覆盖 `edit_image` schema/registry、单图
+  preflight、输入/输出权限资源分离、无副作用拒绝与宿主 service 注入；
+- `IntatisAgentKernelTests`：171 tests / 0 failures；其中 provider image service 用例验证编辑调用使用
+  configured image model 而非 Chat model，并把结果写回 workspace；
+- `CoworkEndToEndTests`、`MessageDelegationSplitTests`、`ToolRegistryLeaseTests`：合计 28 tests /
+  0 failures；覆盖 coordinator/read-write worker 的 `generateMedia` 暴露以及 read-only worker 的
+  `edit_image` 抑制；
+- `IntatisMac` macOS Debug unsigned build：通过；构建和上述离线测试均不需要 API Key；
+- 当前尚未执行真实 provider/credential/network 图片生成或编辑 smoke，因此不声称任何具体线上
+  模型、provider 方言、size/count/quality 组合或计费路径已通过。首版编辑只支持单张输入图；mask、
+  多参考图和原地覆盖仍未实现。
+
+2026-08-05 Flotis 单模型 recorded-file runtime 迁移后的 composer voice /
+`transcription_model` 直接证据：
+
+- `ComposerVoiceInputTests`：6 tests / 0 failures；除空草稿、已有草稿、尾部空白和空转写 no-op
+  外，精确验证默认 WAV 为 16-bit little-endian PCM，且 WAV/M4A 设置都不注入
+  `AVEncoderBitRateKey`；
+- `IntatisProvidersMultimodalTests`：22 tests / 0 failures；覆盖 owner-only disk-backed multipart
+  WAV、exact OpenRouter JSON-base64 `input_audio`、25 MiB recorded-file runtime、严格 JSON
+  `Content-Type`、timeout/retry 与安全错误 payload；原有 modern/iOS importer focused tests 继续验证
+  `transcription_model` 精确保留、transcription-only provider 空 `models`、exact route 与无 hidden
+  fallback；
+- 完整 `swift test`：退出码 0；真实 provider、credential、browser、Keychain 等显式 opt-in 用例仍
+  按各自声明跳过，不将其记为真实环境通过；
+- `xcodegen generate` 与 `scripts/check-version-consistency.sh` 通过，后者输出
+  `Intatis version is consistent: 0.36 (build 36)`；`IntatisMac` macOS Debug unsigned build 与
+  `IntatisiOS` generic Simulator Debug unsigned build 均通过，两端只有既有 deprecated `onChange` /
+  unused-result 等 warning；
+- 最终 macOS/iOS App bundle 都含 `NSMicrophoneUsageDescription` 与 English/简体中文
+  `InfoPlist.strings`。macOS Developer ID target 的说明为“turn voice into editable message drafts”；
+  shipping entitlements 另含最小 `com.apple.security.device.audio-input=true`，App Sandbox 仍关闭；
+  本地 ad-hoc Debug 签名包的 embedded entitlements 已读回该值且
+  `codesign --verify --deep --strict` 通过。ad-hoc 不证明正式 Developer ID/Hardened Runtime 或公证；
+  遗留 `IntatisMacAppStore` target 未修改、未构建；
+- 当前未启动 App、未授予真实麦克风权限，也未以真实 credential/network 调用线上
+  `audio/transcriptions`，因此录音设备、具体 provider 方言、模型可用性、计费与运行态像素仍为
+  `UNKNOWN`，需要下一步手动 smoke；本轮未执行签名、公证、staple、Gatekeeper 或发行打包。
+
+2026-08-05 Cowork coordinator 主动推进与外部目录恢复提示词的直接证据：
+
+- `ContextProjectionTests`：22 tests / 0 failures；验证 coordinator 会先建立 execution objective、
+  检查 bounded Skill catalog、只在用户明确要求持续/跨 run 目标时创建 durable Goal、为非简单工作
+  建立最小 WorkTask 图、尽早委派有收益的分支并继续自己的关键路径，同时保留最小 team/lease；也验证
+  coordinator 在工具真实可用时
+  停止根外直接重试，使用 exact-directory `spawn_agent`、默认 `read_only`、按需
+  `read_write`、随后 `delegate_task`，工具/扩展失败则报告 blocker；同一用例验证 worker 与
+  Code 默认提示词不宣称 `spawn_agent`；
+- `ToolRegistryLeaseTests`：16 tests / 0 failures；验证 Orchestrator 按 coordinator task lease
+  生成的真实 provider request 同时含主动推进规则、`spawn_agent` 工具与上述恢复规则，worker lease
+  边界不变；
+- `IntatisSkillsTests`：29 tests / 0 failures；验证产品内置 `cowork-agent-orchestration` Skill 包含主动
+  执行循环，同时继续保留 capability hard gate、最小团队与 exact profile 路由约束；
+- `intatis-skill-creator/scripts/quick_validate.py`：`Skill is valid`；目录名/frontmatter、结构、文本安全
+  与资源引用校验通过；
+- `IntatisAgentKernelTests`：170 tests / 0 failures；`IntatisCoworkTests`：320 tests / 0 failures；
+- SwiftPM 测试过程完成受影响源码/CLI package 的 Debug 编译。本次未改 App/UI、协议、权限实现或
+  Xcode 工程，未另跑 macOS/iOS app build；也未执行真实模型的外部目录行为 smoke，因此这里只
+  证明稳定提示词、工具表面与 lease 集成，不把任一模型一定遵循提示词写成确定性保证。
+
+2026-08-05 Chat 托管搜索路由修订的直接证据：
+
+- `IntatisProvidersTests`：171 tests / 0 failures；覆盖 exact route capability、OpenAI/OpenRouter
+  request shape、strict routing options、legacy search route ignore、静默普通 Chat、窄化的同路由
+  fallback、partial-response replay guard、两类 citation annotation，以及无效 legacy 搜索字段不
+  阻止 Chat/有效 legacy 搜索字段不污染可见模型列表；
+- `IntatisConversationTests`：173 tests / 0 failures；
+- `IntatisCLITests`：28 tests / 2 opt-in real-provider tests skipped / 0 failures；
+- `IntatisSharedUITests`：133 tests / 0 failures；
+- `IntatisMac` macOS Debug unsigned build：通过；`IntatisiOS` generic Simulator Debug unsigned
+  build：通过。iOS 首次独立依赖解析遇到 GitHub proxy 503，复用已成功解析并缓存的同一
+  working-tree dependencies 后构建通过，该网络失败不计为源码失败；
+- 未执行真实 provider/credential/network smoke，因此这里只证明离线 wire fixture、planner、
+  integration 与两端编译，不声称任何具体厂商当前线上 endpoint 已通过。
 
 2026-08-03 版本校准后的直接证据：
 
 - `xcodegen generate`：通过；
-- `scripts/check-version-consistency.sh`：通过，输出 `0.5 (build 33)`；
-- `IntatisMac` unsigned macOS Debug：通过；最终 bundle 为 `0.5 (33)`。这是代码与元数据
-  验收，不是 universal Release 或签名发行产物；
-- `IntatisiOS` generic Simulator Debug：通过；最终 bundle 为 `0.5 (33)`；
-- 品牌文字恢复后再次执行上述两个 Debug 构建：均通过；macOS/iOS 最终 bundle 的
-  `CFBundleDisplayName` 均为 `Councis`，共享 string catalog 编译通过；
+- `scripts/check-version-consistency.sh`：通过，输出 `0.32 (build 32)`；
+- `IntatisMac` unsigned universal Release：通过；最终 bundle 为 `0.32 (32)`，可执行文件为
+  `x86_64 arm64`。这是代码与元数据验收，不是签名发行产物；
+- `IntatisiOS` generic Simulator Debug：通过；最终 bundle 为 `0.32 (32)`；
 - 两端构建有既有的 unused-result 与 deprecated `onChange` 警告，无构建错误；
 - `swift build`：在允许 Swift/Clang 写入用户缓存的宿主环境通过；受限沙箱内首次尝试因
   module cache 无写权限而未进入源码编译，不计为产品失败；
@@ -203,6 +480,38 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
   0 failures；
 - 完整 `swift test`：通过。真实 browser/Git/provider/credential/network 等显式 opt-in
   用例仍按设计 skipped，不计为已执行的真实环境验证；
+- Cowork agent-thread Computer Use：8 × 1,000 rows + 500 delta/s 下，1,000 rapid switches 与
+  180 秒 soak（1,486 timed switches）均通过，0 warning / 0 incident；结束后 14 个
+  `NSTextViewSharedData`、173 个 `GestureNode`，`vmmap` 62.1 MiB physical / 74.8 MiB peak，
+  `ps` RSS 约 156.6 MiB；
+- 2026-08-04 historical-roster 增量：`CoworkProjectionRegressionTests` 8/8、
+  `CoworkAgentThreadPresentationModelTests` 10/10、`CoworkInferencePresentationTests` 6/6、
+  `IntatisConversationTests` 172/172；Computer Use 实测 detach 当前 agent 后保持选择、离开再返回
+  仍可读，并在 500 delta/s 下追加完成 1,000 rapid switches，0 warning / 0 incident、16 rows。
+  当前 Codex managed sandbox 的完整 suite 只因 `IntatisToolsTests` process/Seatbelt/loopback 限制
+  失败；一次完整 `IntatisSharedUITests` target 在 build 后无测试输出并被中止，相关定向用例已独立
+  通过；
+- 2026-08-04 rail lighting/fixed-geometry 增量：
+  `ThreadLayoutTests|CoworkInferencePresentationTests|CoworkAgentThreadPresentationModelTests`
+  30/30；IntatisMac macOS Debug 与 IntatisiOS generic Simulator Debug unsigned build 通过。
+  原生 Light fixture 在同一 1372×768 viewport 中切换 `@main` / `@research`，composer 水平像素
+  run 完全一致，rail 两态均为 x=1076…1365；旧 `.regular` glass card 的一次性 QA sample
+  为 240/255，新系统 `Glass.clear` sample 为 244/255。该数值只用于同机同窗对照，不是颜色 token。
+  8×1,000 rows + 500 delta/s 下再次完成 1,000 rapid switches，0 warning / 0 incident、≤16 rows。
+  本次未重跑 180 秒 soak、Dark、Reduce Transparency、Increase Contrast、VoiceOver 或完整
+  SwiftPM suite；不得从该 Light fixture 外推这些矩阵。
+- 2026-08-04 rail window-stability 第一版的 31/31 与截图数据只保留为历史记录；用户随后仍稳定
+  复现跳动，真实 Test session 也记录到 viewport preference 同帧重复更新，因此该结论已作废。
+- 第二版 corrective pass（删除 GeometryReader/PreferenceKey 坐标链、改用
+  `onScrollVisibilityChange`、拆除 shared glass container）的 85/85、360-cycle host 与当时的 AX/
+  视觉结论已经被用户在新构建中的稳定复现推翻，不得继续当作 rail 不跳动的通过证据。当前第三版
+  必须额外验证：outer-detail canvas 而非 `threadColumn` 直接拥有 trailing rail；selection 不在 rail
+  render snapshot；蓝色 selection child 可独立更新；`Glass.clear` backdrop 是 content-independent
+  Equatable view；transaction 同时关闭 animation 与 disablesAnimations。当前
+  `ThreadLayoutTests|CoworkInferencePresentationTests|CoworkAgentThreadPresentationModelTests`
+  31/31 通过，production-shaped host 包含 360 次交错 selection/mode/inspector/window-size 循环；
+  IntatisMac macOS Debug 与 IntatisiOS generic Simulator Debug unsigned build 通过。按用户要求不使用
+  Computer Use 或截图差分，因此最终几像素光学稳定性保留为用户新构建手动验收项，不能由自动化外推。
 - 用户普通终端的 `security find-identity -v -p codesigning` 已报告两个有效 identity，发行
   脚本也已进入真实 Developer ID 签名和 App 上传；Codex 托管沙箱无法读取登录 Keychain，
   因而在沙箱内仍返回 `0 valid identities found`，不能覆盖宿主证据。两次 App submission
@@ -213,7 +522,7 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
 只有以下条件同时满足才能写 release GO：
 
 - 当前 working tree 相关 tests/builds 通过，已知失败有明确处置；
-- 最终 App/ZIP/DMG 元数据为 `0.5 (33)`；
+- 最终 App/ZIP/DMG 元数据为 `0.36 (36)`；
 - Developer ID、notarization、staple、codesign、Gatekeeper 全部通过；
 - NOTICE/ThirdPartyNotices 和最终 bundle resource/link inventory 一致；
 - 关键真实环境矩阵完成，未完成项以明确的风险接受记录处理。

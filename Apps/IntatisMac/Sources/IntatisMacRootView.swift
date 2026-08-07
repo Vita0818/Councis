@@ -2,8 +2,8 @@
 //  IntatisMacRootView.swift
 //  IntatisMac
 //
-//  macOS workbench shell: mode + session history live in the sidebar, the center
-//  stays focused on the thread, and Code/Cowork reserve the right side for status.
+//  macOS workbench shell: Cowork session history lives in the sidebar, the center
+//  stays focused on the thread, and Cowork reserves the right side for status.
 //
 
 #if canImport(SwiftUI)
@@ -70,7 +70,7 @@ struct IntatisMacRootView: View {
     @EnvironmentObject var env: AppEnvironment
     @ObservedObject private var runtimeManager: AppSessionRuntimeManager
     @Environment(\.colorScheme) private var scheme
-    @State private var selection: IntatisNavItem = .chat
+    @State private var selection: IntatisNavItem = .cowork
     @State private var isSettings = false
     @State private var didInit = false
     @State private var recentChatSessions: [AppSessionSummary] = []
@@ -95,21 +95,9 @@ struct IntatisMacRootView: View {
         _runtimeStatuses = State(initialValue: runtimeManager.runtimeStatusSnapshot())
     }
 
-    private var items: [IntatisNavItem] {
-        IntatisNavItem.allCases.filter { item in
-            switch item {
-            case .chat: return true
-            case .code: return PlatformProfile.current.supports(.code)
-            case .cowork: return PlatformProfile.current.supports(.cowork)
-            }
-        }
-    }
-
     var body: some View {
         NavigationSplitView {
             IntatisSidebar(
-                items: items,
-                selection: $selection,
                 isSettings: $isSettings,
                 historyItems: historyItems,
                 historyTitle: IntatisLocalization.string("Recent"),
@@ -743,8 +731,6 @@ private struct SessionRenameSheet: View {
 // MARK: - Sidebar
 
 struct IntatisSidebar: View {
-    let items: [IntatisNavItem]
-    @Binding var selection: IntatisNavItem
     @Binding var isSettings: Bool
     let historyItems: [IntatisSessionHistoryItem]
     let historyTitle: String
@@ -763,11 +749,6 @@ struct IntatisSidebar: View {
                 .padding(.horizontal, 18)
                 .padding(.top, 22)
                 .padding(.bottom, 12)
-
-            modeNavigation
-            .padding(.horizontal, 12)
-            .padding(.bottom, 14)
-            .accessibilityIdentifier("sidebar.mode.selector")
 
             Divider().opacity(0.45)
                 .padding(.horizontal, 12)
@@ -803,65 +784,6 @@ struct IntatisSidebar: View {
             .font(IntatisType.brand(28))
             .foregroundStyle(IntatisTheme.deepText(scheme))
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var modeNavigation: some View {
-        VStack(spacing: 4) {
-            ForEach(items) { item in
-                let isSelected = selection == item && !isSettings
-                Button {
-                    selection = item
-                    isSettings = false
-                } label: {
-                    IntatisSidebarModeRow(
-                        title: item.title,
-                        systemImage: item.icon,
-                        selected: isSelected)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.title)
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                .accessibilityIdentifier("sidebar.mode.\(item.rawValue)")
-            }
-        }
-    }
-}
-
-private struct IntatisSidebarModeRow: View {
-    let title: String
-    let systemImage: String
-    let selected: Bool
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        Group {
-            if selected {
-                content
-                    .intatisLiquidGlass(cornerRadius: 10, interactive: true)
-            } else {
-                content
-            }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private var content: some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(selected
-                    ? IntatisTheme.accent(scheme)
-                    : IntatisTheme.softText(scheme))
-                .frame(width: 22)
-            Text(title)
-                .font(IntatisType.body(14, selected ? .semibold : .medium))
-                .foregroundStyle(selected
-                    ? IntatisTheme.deepText(scheme)
-                    : IntatisTheme.softText(scheme))
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
     }
 }
 

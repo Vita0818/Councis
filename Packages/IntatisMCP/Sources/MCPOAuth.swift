@@ -1955,7 +1955,7 @@ public actor MCPOAuthCoordinator {
             throw MCPOAuthError.unsupportedClientAuthentication
         }
         let payload: [String: Any] = [
-            "client_name": "Intatis",
+            "client_name": "Councis",
             "redirect_uris": [redirectURI.absoluteString],
             "grant_types": [
                 "authorization_code",

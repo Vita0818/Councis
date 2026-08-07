@@ -1,19 +1,7 @@
-# Councis
+# Intatis
 
-Councis 当前直接以 Intatis v0.32 工作树快照作为代码基线。快照已经放在本仓库根目录；
-后续开发直接修改这里的 `Apps/`、`Packages/`、`Vendor/`、配置与测试，不再维护或参照一份
-只读 `Upstream/Intatis` 副本。
-
-当前仍保留 Intatis 的工程名、target、模块和内部配置/存储标识，但 Apple App 的系统显示名、
-界面标题和用户可见品牌文案已经恢复为 Councis。这一步只替换品牌文字，不改变 Chat、Code、
-Cowork 或运行时行为。Councis 的异构模型团队、强制 Judge 与受审答案展示门仍作为后续方向记录在
-[`docs/COUNcis_IDENTITY.md`](docs/COUNcis_IDENTITY.md)，不能在重新实现并验证前宣称已经存在。
-快照来源与边界见 [`docs/INTATIS_BASELINE.md`](docs/INTATIS_BASELINE.md)。
-
-## 当前 Intatis v0.32 基线
-
-当前版本：**v0.5**（build 33）
-状态：pre-1.0；源码与构建可验证，v0.5 Developer ID 发行候选尚待完成最终公证验收。
+当前版本：**v0.36**（build 36）
+状态：pre-1.0；源码与构建可验证，v0.36 Developer ID 发行候选尚待完成最终公证验收。
 
 Intatis 是 Apple-first、Swift-native 优先的本地 AI 工作区。macOS 提供 Chat、Code、
 Cowork 三个产品面；iOS 是严格的 Chat 子集；CLI 提供 headless Code/Cowork 和外部 MCP
@@ -36,9 +24,8 @@ client。所有运行时能力围绕结构化 EventLog、共享 AgentKernel、�
 - 设置：provider catalog、Intatis JSON/JSONC 配置、MCP、renderer fallback、第三方声明，
   以及只在本机生成且不上传的脱敏诊断 ZIP。
 
-macOS 唯一发行 target 仍是内部名为 `IntatisMac` 的 target，App 对外显示名为 `Councis`，
-通过 Developer ID、Apple notarization 和直接下载分发。`IntatisMacAppStore` 是未删除的
-legacy target，不属于产品或 release gate。
+macOS 唯一发行 target 是 `IntatisMac`，通过 Developer ID、Apple notarization 和直接下载
+分发。`IntatisMacAppStore` 是未删除的 legacy target，不属于产品或 release gate。
 
 ### iOS
 
@@ -130,10 +117,75 @@ SHA-256 清单。不要把证书私钥、Apple 密码或 app-specific password �
 
 - macOS/CLI 高级配置读取 `INTATIS_CONFIG`、Intatis-owned JSON/JSONC 路径及兼容 fallback；
   不默认读取 OpenCode app 配置。
+- Code/Cowork 的 `generate_image` 与 `edit_image` 共用顶层 `image_model` 宿主路由；主 agent
+  只提交任务参数，不选择 provider/model。`edit_image` 接收工作区内的 `imagePath`、编辑 prompt
+  和新的 `.png` `outputPath`。未配置时明确失败，不再暗中回退到固定模型。
+- macOS Chat/Code/Cowork 与 iOS Chat 的输入栏语音按钮共用顶层 `transcription_model` 宿主路由；
+  再次点击会停止录音并转写，结果只追加到当前可编辑草稿，不会自动发送。未配置时在本地明确
+  提示，不会回退到当前 Chat 模型，也不会为此增加另一套设置页面。
 - session 数据默认位于用户 App Support 下，每个 session 使用 append-only EventLog。
 - browser profile、workspace artifact、credential 和 bookmark 不应提交到 Git，也不会进入
   本地诊断 ZIP。
 - 日志导出当前不做远程上传；Apple notarization 仅在用户显式运行发行脚本时发生。
+
+最小配置示例（图片、语音 provider 也可与 Chat provider 相同）：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "chat/chat-model",
+  "judge_model": "chat/judge-model",
+  "image_model": "images/gpt-image-1",
+  "transcription_model": "speech/whisper-1",
+  "provider": {
+    "chat": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://chat.example.com/v1",
+        "apiKey": "{env:CHAT_API_KEY}"
+      },
+      "models": {
+        "chat-model": { "name": "Chat Model" },
+        "judge-model": { "name": "Judge Model" }
+      }
+    },
+    "images": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://images.example.com/v1",
+        "apiKey": "{env:IMAGE_API_KEY}"
+      },
+      "models": {}
+    },
+    "speech": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://speech.example.com/v1",
+        "apiKey": "{env:SPEECH_API_KEY}"
+      },
+      "models": {}
+    }
+  }
+}
+```
+
+`judge_model` 是 Councis fresh Cowork `@judge` 的顶层 exact route，格式同样为
+`<provider>/<model-id>`。省略时继承顶层 `model`；显式配置但无法解析时，新 Cowork session
+在写入 durable session state 前明确失败，不静默回退。它只决定未来 fresh session 的 Judge
+binding，不改变 `@main`、`@permission-reviewer` 或已有 session。
+
+`image_model` 是 Intatis 的顶层扩展字段，格式为 `<provider>/<model-id>`。专用图片 provider
+可保持空 `models`，因此不会混入 Chat/Code/Cowork 的推理模型菜单；当前 backend 要求该 route
+兼容 `POST <baseURL>/images/generations` 与 multipart `POST <baseURL>/images/edits`，并返回
+`data[].b64_json`。`edit_image` 当前支持单张 PNG/JPEG/WebP 输入（最多 50 MiB）并写出新的 PNG；
+尚不支持 mask、多参考图或原地覆盖输入图。
+
+`transcription_model` 同样是 Intatis 的顶层扩展字段，格式为 `<provider>/<model-id>`。专用语音
+provider 可保持空 `models`，不会混入推理模型菜单；输入栏按 Flotis 的单模型 recorded-file runtime
+录制 WAV/16 kHz/mono。compatible provider 使用 multipart，exact OpenRouter adapter 使用 JSON-base64
+`input_audio`，两者都调用 `POST <baseURL>/audio/transcriptions`。录音和 upload body 使用有界、
+owner-only 的临时文件，转写完成、失败或取消后即清理；用户按下 Send 前，音频和转写草稿都不会写入
+EventLog 或 ArtifactStore。该接入不包含多模型对比，也没有新增设置页。
 
 ## 许可证
 

@@ -173,6 +173,21 @@ enum AppInferenceCatalogCompiler {
             snapshot: snapshot)
     }
 
+    /// Resolves the fixed fresh-session Judge independently from the mutable
+    /// Chat selection. An explicit `judge_model` must resolve exactly; only an
+    /// absent field inherits the same exact binding selected for `@main`.
+    static func judgeBinding(catalog: AppProviderCatalog,
+                             snapshot: InferenceCatalogSnapshot) -> AgentInferenceBinding? {
+        guard let judgeModel = catalog.judgeModel else {
+            return selectedBinding(catalog: catalog, snapshot: snapshot)
+        }
+        return binding(
+            providerID: judgeModel.endpoint,
+            modelID: judgeModel.model.rawValue,
+            variantID: nil,
+            snapshot: snapshot)
+    }
+
     static func binding(providerID: String,
                         modelID: String,
                         variantID: String?,

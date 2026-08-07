@@ -17,7 +17,7 @@ private enum S {
 }
 
 private func banner(mode: Mode, model: String, host: String) {
-    out("\n\(S.bold)Intatis\(S.reset) \(S.dim)·\(S.reset) \(S.cyan)\(mode.rawValue)\(S.reset) \(S.dim)· \(model) · \(host)\(S.reset)\n")
+    out("\n\(S.bold)Councis\(S.reset) \(S.dim)·\(S.reset) \(S.cyan)\(mode.rawValue)\(S.reset) \(S.dim)· \(model) · \(host)\(S.reset)\n")
     out("\(S.dim)/help for commands · /mode to switch · /exit to quit\(S.reset)\n")
 }
 
@@ -278,9 +278,15 @@ private func chatCodeREPL(_ config: CLIConfig, mode: Mode, workspace: URL) async
         do {
             switch mode {
             case .chat:
-                let provider = try await registry.defaultChatProvider()
-                try await ChatLoop(log: log, provider: provider, model: ModelID(rawValue: model),
-                                   reasoningEffort: reasoning, includeUsage: config.includeUsage)
+                let route = try await registry.chatRuntimeRoute(
+                    model: ModelID(rawValue: model))
+                try await ChatLoop(
+                    log: log,
+                    provider: route.provider,
+                    model: route.model,
+                    reasoningEffort: reasoning,
+                    includeUsage: config.includeUsage,
+                    webSearch: route.webSearch)
                     .send(sendText, images: sendImages)
             case .code:
                 let mcpActivation:
@@ -614,7 +620,7 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
         }
     } else if restoredEvents.isEmpty {
         // The workspace passed to `intatis cowork` is the user's explicit
-        // initial-session authorization. Settings and both local identities
+        // initial-session authorization. Settings and all three local identities
         // are committed as one durable batch; no model request occurs here.
         let freshSettings = CoworkSessionSettings(
             sessionID: await log.sessionID,
@@ -628,21 +634,36 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
                     agentName: Orchestrator.mainAgentID.rawValue,
                     isPrimary: true),
             ])
-        switch await orchestrator.bootstrapFreshSession(main: Agent(
-            name: Orchestrator.mainAgentID,
-            workspaceRoot: workspace,
-            model: defaultProfile.modelID,
-            agentInferenceBinding: defaultProfile,
-            profile: .reviewed,
-            coordinationDepth: Agent.defaultCoordinationDepth),
-            settings: freshSettings) {
-        case .attached, .alreadyAttached:
-            mainAttached = true
-            sessionSettings = freshSettings
-            defaultPermissionProfile = .reviewed
-        case .failed(let message):
+        if let judgeBinding = inferenceProfiles.judgeBinding(
+            selection: config.judgeModel) {
+            switch await orchestrator.bootstrapFreshSession(
+                main: Agent(
+                    name: Orchestrator.mainAgentID,
+                    workspaceRoot: workspace,
+                    model: defaultProfile.modelID,
+                    agentInferenceBinding: defaultProfile,
+                    profile: .reviewed,
+                    coordinationDepth: Agent.defaultCoordinationDepth),
+                judge: Agent(
+                    name: Orchestrator.judgeAgentID,
+                    workspaceRoot: workspace,
+                    model: judgeBinding.modelID,
+                    agentInferenceBinding: judgeBinding,
+                    profile: .readOnly,
+                    coordinationDepth: 0),
+                settings: freshSettings) {
+            case .attached, .alreadyAttached:
+                mainAttached = true
+                sessionSettings = freshSettings
+                defaultPermissionProfile = .reviewed
+            case .failed(let message):
+                mainAttached = false
+                mainBootstrapError = message
+            }
+        } else {
             mainAttached = false
-            mainBootstrapError = message
+            mainBootstrapError =
+                "configured judge_model does not resolve to an exact inference profile"
         }
         autoReviewResult = mainAttached
             ? await enableAutomaticReview()
@@ -864,7 +885,7 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
         case "clear":
             guard await ensureGoalRuntimeStarted() else { return }
             do {
-                try await goalRuntime.clearCurrentGoal(reason: "Cleared from Intatis CLI")
+                try await goalRuntime.clearCurrentGoal(reason: "Cleared from Councis CLI")
                 out("current Goal cleared\n")
             } catch {
                 errOut("Goal not cleared: \(error.localizedDescription)\n")

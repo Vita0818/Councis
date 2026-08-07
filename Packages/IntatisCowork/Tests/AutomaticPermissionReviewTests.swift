@@ -262,6 +262,7 @@ private func autoReviewWriteArgs(path: String, content: String) -> String {
 final class AutomaticPermissionReviewTests: XCTestCase {
     private let main = AgentID(rawValue: "main")
     private let reviewer = Orchestrator.automaticPermissionReviewerID
+    private let judge = Orchestrator.judgeAgentID
 
     private func phaseSBinding() -> AgentInferenceBinding {
         AgentInferenceBinding(
@@ -272,6 +273,28 @@ final class AutomaticPermissionReviewTests: XCTestCase {
             inferenceConnectionRevision: InferenceConnectionRevision(rawValue: "connection-revision-1"),
             modelID: ModelID(rawValue: "phase-s-model"),
             immutableDefinitionFingerprint: "sha256:phase-s-safe-fingerprint")
+    }
+
+    private func phaseSJudgeBinding() -> AgentInferenceBinding {
+        AgentInferenceBinding(
+            inferenceProfileRef: InferenceProfileRef(
+                inferenceProfileID: InferenceProfileID(rawValue: "phase-s-judge-profile"),
+                inferenceProfileRevision: InferenceProfileRevision(rawValue: "revision-1")),
+            inferenceConnectionID: InferenceConnectionID(rawValue: "phase-s-judge-connection"),
+            inferenceConnectionRevision: InferenceConnectionRevision(rawValue: "connection-revision-1"),
+            modelID: ModelID(rawValue: "phase-s-judge-model"),
+            immutableDefinitionFingerprint: "sha256:phase-s-judge-safe-fingerprint")
+    }
+
+    private func phaseSJudge(workspace: URL) -> Agent {
+        let binding = phaseSJudgeBinding()
+        return Agent(
+            name: judge,
+            workspaceRoot: workspace,
+            model: binding.modelID,
+            agentInferenceBinding: binding,
+            profile: .readOnly,
+            coordinationDepth: 0)
     }
 
     func testAutoCreatesReadonlyReviewerAndDefaultRemovesIt() async throws {
@@ -368,7 +391,7 @@ final class AutomaticPermissionReviewTests: XCTestCase {
             .readOnly)
     }
 
-    func testPhaseSFreshBootstrapPersistsSettingsAndBothRegistrationsInOneBatch() async throws {
+    func testFreshBootstrapPersistsSettingsAndAllThreeRegistrationsInOneBatch() async throws {
         let log = try autoReviewTempLog()
         let ws = try autoReviewWorkspace()
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -398,12 +421,13 @@ final class AutomaticPermissionReviewTests: XCTestCase {
                 agentInferenceBinding: binding,
                 profile: .reviewed,
                 coordinationDepth: Agent.defaultCoordinationDepth),
+            judge: phaseSJudge(workspace: ws),
             settings: settings)
 
         XCTAssertEqual(result, .attached(main))
         XCTAssertTrue(provider.requests.isEmpty, "local registration must not issue a model request")
         let events = try await log.replayChecked()
-        XCTAssertEqual(events.count, 7)
+        XCTAssertEqual(events.count, 10)
         XCTAssertTrue({ if case .sessionSettingsUpdated = events[0].event { return true }; return false }())
         XCTAssertTrue({ if case .workspaceLeaseGranted = events[1].event { return true }; return false }())
         XCTAssertTrue({ if case .capabilityLeaseCreated = events[2].event { return true }; return false }())
@@ -411,12 +435,19 @@ final class AutomaticPermissionReviewTests: XCTestCase {
         XCTAssertTrue({ if case .workspaceLeaseGranted = events[4].event { return true }; return false }())
         XCTAssertTrue({ if case .capabilityLeaseCreated = events[5].event { return true }; return false }())
         XCTAssertTrue({ if case .agentAttached = events[6].event { return true }; return false }())
+        XCTAssertTrue({ if case .workspaceLeaseGranted = events[7].event { return true }; return false }())
+        XCTAssertTrue({ if case .capabilityLeaseCreated = events[8].event { return true }; return false }())
+        XCTAssertTrue({ if case .agentAttached = events[9].event { return true }; return false }())
 
         let projection = CoworkProjection.build(from: events)
-        XCTAssertEqual(Set(projection.agentRoster.keys), Set([main, reviewer]))
+        XCTAssertEqual(Set(projection.agentRoster.keys), Set([main, reviewer, judge]))
         XCTAssertEqual(projection.agentRoster[main]?.agentInferenceBinding, binding)
         XCTAssertEqual(projection.agentRoster[reviewer]?.agentInferenceBinding, binding)
+        XCTAssertEqual(
+            projection.agentRoster[judge]?.agentInferenceBinding,
+            phaseSJudgeBinding())
         XCTAssertEqual(projection.agentRoster[reviewer]?.profile, PermissionProfile.readOnly.rawValue)
+        XCTAssertEqual(projection.agentRoster[judge]?.profile, PermissionProfile.readOnly.rawValue)
         let mainCapabilities = projection.capabilityLeaseAgents.compactMap { leaseID, agent in
             agent == main ? projection.capabilityLeases[leaseID] : nil
         }
@@ -427,23 +458,143 @@ final class AutomaticPermissionReviewTests: XCTestCase {
         }
         XCTAssertEqual(reviewerCapabilities.count, 1)
         XCTAssertEqual(reviewerCapabilities[0].tools, [])
+        let judgeCapabilities = projection.capabilityLeaseAgents.compactMap { leaseID, agent in
+            agent == judge ? projection.capabilityLeases[leaseID] : nil
+        }
+        XCTAssertEqual(judgeCapabilities.count, 1)
+        XCTAssertTrue(judgeCapabilities[0].tools.contains(.readWorkspace))
+        XCTAssertTrue(judgeCapabilities[0].tools.contains(.replyMessage))
+        XCTAssertFalse(judgeCapabilities[0].tools.contains(.delegateTask))
         let mainWorkspaceID = try XCTUnwrap(projection.workspaceLeaseAgents.first {
             $0.value == main
         }?.key)
         let reviewerWorkspaceID = try XCTUnwrap(projection.workspaceLeaseAgents.first {
             $0.value == reviewer
         }?.key)
+        let judgeWorkspaceID = try XCTUnwrap(projection.workspaceLeaseAgents.first {
+            $0.value == judge
+        }?.key)
         XCTAssertNotEqual(mainWorkspaceID, reviewerWorkspaceID)
+        XCTAssertNotEqual(mainWorkspaceID, judgeWorkspaceID)
+        XCTAssertNotEqual(reviewerWorkspaceID, judgeWorkspaceID)
         XCTAssertEqual(projection.workspaceLeases[mainWorkspaceID]?.access, .readWrite)
         XCTAssertEqual(projection.workspaceLeases[reviewerWorkspaceID]?.access, .readOnly)
+        XCTAssertEqual(projection.workspaceLeases[judgeWorkspaceID]?.access, .readOnly)
         let automaticReviewEnabled = await orch.automaticPermissionReviewEnabled()
         XCTAssertTrue(automaticReviewEnabled)
 
         let document = try SessionProjectionStore.load(
             from: SessionProjectionStore.fileURL(for: log),
             expectedSession: await log.sessionID)
-        XCTAssertEqual(document.projectedThroughSeq, 6)
+        XCTAssertEqual(document.projectedThroughSeq, 9)
         XCTAssertEqual(document.coworkSettings, settings)
+    }
+
+    func testFreshJudgeUsesOrdinaryDelegationAndRemainsAReservedIdentity() async throws {
+        let log = try autoReviewTempLog()
+        let ws = try autoReviewWorkspace()
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let mainBinding = phaseSBinding()
+        let judgeProvider = AutoReviewCapturingProvider([
+            .textDelta("candidate B"),
+            .done(finishReason: "stop"),
+        ])
+        let unusedProvider = AutoReviewCapturingProvider([.done(finishReason: "stop")])
+        let judgeID = judge
+        let orch = Orchestrator(
+            log: log,
+            allowsShell: true,
+            responder: DenyAllResponder()) { agent in
+                agent.name == judgeID ? judgeProvider : unusedProvider
+            }
+        let settings = CoworkSessionSettings(
+            sessionID: await log.sessionID,
+            defaultModelID: mainBinding.modelID.rawValue,
+            defaultInferenceProfileBinding: mainBinding,
+            workspaces: [CoworkSessionWorkspace(
+                path: ws.path,
+                agentName: main.rawValue,
+                isPrimary: true)])
+
+        let bootstrap = await orch.bootstrapFreshSession(
+            main: Agent(
+                name: main,
+                workspaceRoot: ws,
+                model: mainBinding.modelID,
+                agentInferenceBinding: mainBinding,
+                profile: .reviewed,
+                coordinationDepth: Agent.defaultCoordinationDepth),
+            judge: phaseSJudge(workspace: ws),
+            settings: settings)
+        XCTAssertEqual(bootstrap, .attached(main))
+
+        let report = await orch.delegateTask(
+            from: main,
+            to: judge.rawValue,
+            objective: "Compare two supplied candidate answers and return the stronger one.")
+
+        XCTAssertTrue(report.contains("agent_id=@judge"), report)
+        XCTAssertTrue(report.contains("candidate B"), report)
+        XCTAssertEqual(judgeProvider.requests.count, 1)
+        let detached = await orch.detach(judge)
+        let listed = await orch.listForTool()
+        XCTAssertFalse(detached)
+        XCTAssertTrue(listed.contains("@judge"))
+        XCTAssertTrue(listed.contains(" judge "))
+    }
+
+    func testFreshBootstrapRejectsUnresolvableJudgeWithoutDurableStateOrModelUse() async throws {
+        let log = try autoReviewTempLog()
+        let ws = try autoReviewWorkspace()
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let mainBinding = phaseSBinding()
+        let judgeBinding = phaseSJudgeBinding()
+        let provider = AutoReviewCapturingProvider([.done(finishReason: "stop")])
+        let orch = try Orchestrator.runtime(
+            log: log,
+            allowsShell: true,
+            responder: DenyAllResponder(),
+            availableInferenceProfiles: [mainBinding, judgeBinding],
+            requiresInferenceBindings: true,
+            resolvedInferenceFor: { agent in
+                guard agent.name != Orchestrator.judgeAgentID,
+                      let binding = agent.agentInferenceBinding else {
+                    throw InferenceCatalogError.unresolvedProfile
+                }
+                return ResolvedInferenceProfile(
+                    binding: binding,
+                    model: binding.modelID,
+                    provider: provider)
+            })
+        let settings = CoworkSessionSettings(
+            sessionID: await log.sessionID,
+            defaultModelID: mainBinding.modelID.rawValue,
+            defaultInferenceProfileBinding: mainBinding,
+            workspaces: [CoworkSessionWorkspace(
+                path: ws.path,
+                agentName: main.rawValue,
+                isPrimary: true)])
+
+        let result = await orch.bootstrapFreshSession(
+            main: Agent(
+                name: main,
+                workspaceRoot: ws,
+                model: mainBinding.modelID,
+                agentInferenceBinding: mainBinding,
+                profile: .reviewed,
+                coordinationDepth: Agent.defaultCoordinationDepth),
+            judge: phaseSJudge(workspace: ws),
+            settings: settings)
+
+        guard case .failed(let message) = result else {
+            return XCTFail("an unresolved explicit Judge binding must fail fresh bootstrap")
+        }
+        let events = await log.replay()
+        let agents = await orch.agentList()
+        XCTAssertTrue(message.contains("@judge"), message)
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(agents.isEmpty)
+        XCTAssertTrue(provider.requests.isEmpty)
     }
 
     func testPhaseSFreshBootstrapRejectsPermissionProfileDriftBeforePersistenceOrModelUse() async throws {
@@ -474,6 +625,7 @@ final class AutomaticPermissionReviewTests: XCTestCase {
                 agentInferenceBinding: binding,
                 profile: .reviewed,
                 coordinationDepth: Agent.defaultCoordinationDepth),
+            judge: phaseSJudge(workspace: ws),
             settings: settings)
 
         guard case .failed = result else {
@@ -498,7 +650,7 @@ final class AutomaticPermissionReviewTests: XCTestCase {
                 AutoReviewCapturingProvider([.done(finishReason: "stop")])
             }
         await orch.setAdmissionEventsAppender { events in
-            XCTAssertEqual(events.count, 7)
+            XCTAssertEqual(events.count, 10)
             throw AutoReviewPersistenceError.forcedBatchFailure
         }
         let settings = CoworkSessionSettings(
@@ -518,6 +670,7 @@ final class AutomaticPermissionReviewTests: XCTestCase {
                 agentInferenceBinding: binding,
                 profile: .reviewed,
                 coordinationDepth: Agent.defaultCoordinationDepth),
+            judge: phaseSJudge(workspace: ws),
             settings: settings)
 
         guard case .failed = result else { return XCTFail("forced batch failure must fail") }
@@ -569,9 +722,11 @@ final class AutomaticPermissionReviewTests: XCTestCase {
 
         async let firstResult = first.bootstrapFreshSession(
             main: mainAgent,
+            judge: phaseSJudge(workspace: ws),
             settings: settings)
         async let secondResult = second.bootstrapFreshSession(
             main: mainAgent,
+            judge: phaseSJudge(workspace: ws),
             settings: settings)
         let (resolvedFirst, resolvedSecond) = await (firstResult, secondResult)
         let results = [resolvedFirst, resolvedSecond]
@@ -585,13 +740,16 @@ final class AutomaticPermissionReviewTests: XCTestCase {
             return false
         }.count, 1)
         let durableEvents = try await firstLog.replayChecked()
-        XCTAssertEqual(durableEvents.count, 7)
+        XCTAssertEqual(durableEvents.count, 10)
         XCTAssertTrue(firstProvider.requests.isEmpty)
         XCTAssertTrue(secondProvider.requests.isEmpty)
         let firstAgents = await first.agentList()
         let secondAgents = await second.agentList()
         let totalRuntimeAgents = firstAgents.count + secondAgents.count
-        XCTAssertEqual(totalRuntimeAgents, 2, "only the winning runtime may register @main and reviewer")
+        XCTAssertEqual(
+            totalRuntimeAgents,
+            3,
+            "only the winning runtime may register @main, reviewer, and @judge")
     }
 
     func testPhaseSHistoricalMainRecoveryUsesCanonicalSettingsWithoutModelReview() async throws {

@@ -80,6 +80,11 @@ enum ProviderChatCompletionsAdapter: Equatable {
     case openRouter
 }
 
+enum ProviderTranscriptionAdapter: Equatable {
+    case openAICompatibleMultipart
+    case openRouterJSONBase64
+}
+
 extension ProviderRequestAdapter {
     /// Resolves only adapters whose Chat Completions behavior is implemented by
     /// the native runtime. No package-name or endpoint-name fallback is used.
@@ -99,6 +104,40 @@ extension ProviderRequestAdapter {
         default:
             throw IntatisError.config(
                 "the selected provider npm adapter is not supported by the native runtime")
+        }
+    }
+
+    /// Returns a hosted-search dialect only for exact, reviewed provider
+    /// adapters. Callers must independently verify that the ordinary Chat
+    /// adapter is executable and that the exact model declares the capability.
+    func hostedWebSearchDialect() -> ChatHostedWebSearchDialect? {
+        switch self {
+        case .openAI:
+            return .openAIResponses
+        case .openRouter:
+            return .openRouterServerTool
+        case .legacyOpenAIWire,
+             .openAICompatible:
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Selects the reviewed batch-transcription lowering for the exact package
+    /// configured on the chosen model route. This deliberately does not infer
+    /// a provider from a display name or URL.
+    func transcriptionAdapter() throws -> ProviderTranscriptionAdapter {
+        switch self {
+        case .legacyOpenAIWire,
+             .openAICompatible,
+             .openAI:
+            return .openAICompatibleMultipart
+        case .openRouter:
+            return .openRouterJSONBase64
+        default:
+            throw IntatisError.config(
+                "the selected provider npm adapter is not supported by the transcription runtime")
         }
     }
 }

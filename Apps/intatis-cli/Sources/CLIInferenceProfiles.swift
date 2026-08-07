@@ -143,6 +143,19 @@ struct CLIInferenceProfiles: Sendable {
         }
     }
 
+    /// An absent `judge_model` inherits the complete exact @main binding,
+    /// including its configured variant. An explicit route resolves only to
+    /// its base profile and never falls back to another model or route.
+    func judgeBinding(
+        selection: CLIProviderModelSelection?
+    ) -> AgentInferenceBinding? {
+        guard let selection else { return defaultBinding }
+        return option(
+            routeID: selection.providerID,
+            model: selection.modelID,
+            variantID: nil)?.binding
+    }
+
     private var defaultBindingRouteID: String {
         options.first { $0.binding == defaultBinding }?.routeID ?? ""
     }

@@ -292,6 +292,10 @@ public actor Orchestrator {
         ) async throws -> AgentRequestToolSnapshot?
     public static let mainAgentID = AgentID(rawValue: "main")
     public static let automaticPermissionReviewerID = AgentID(rawValue: "permission-reviewer")
+    /// Fixed data-plane evaluator registered by the host for fresh Councis
+    /// sessions. Unlike the permission reviewer, it uses the ordinary
+    /// scheduler/task/message path and returns normal text.
+    public static let judgeAgentID = AgentID(rawValue: "judge")
     private static let carryForwardBlockerPrefix = "carry-forward blocked: "
 
     private struct GoalRunCancellationScope: Hashable, Sendable {
@@ -390,7 +394,11 @@ public actor Orchestrator {
     private let toolSnapshotProvider:
         ToolSnapshotProvider?
     private let sessionNaming: SessionNamingService?
-    private var messageConsumptionAppender: (@Sendable (AgentMessageConsumedPayload) async throws -> Void)?
+    /// Test-only failure injection that runs before the production atomic
+    /// task-completed/message-consumed EventLog batch. It never substitutes
+    /// for durable persistence.
+    private var messageConsumptionPreflightForTesting:
+        (@Sendable ([AgentMessageConsumedPayload]) async throws -> Void)?
     private var taskLifecycleEventAppender: (@Sendable (Event) async throws -> Void)?
     private var terminalPersistenceFailures: [TaskID: String]
     private var terminalCommitTaskIDs: Set<TaskID>
@@ -599,7 +607,7 @@ public actor Orchestrator {
         self.toolSnapshotProvider =
             toolSnapshotProvider
         self.sessionNaming = sessionNaming
-        self.messageConsumptionAppender = nil
+        self.messageConsumptionPreflightForTesting = nil
         self.taskLifecycleEventAppender = nil
         self.terminalPersistenceFailures = [:]
         self.terminalCommitTaskIDs = []
@@ -697,6 +705,12 @@ public actor Orchestrator {
             try? await log.append(.error(ErrorPayload(
                 code: "reserved_agent",
                 message: "@\(id.rawValue) is reserved for automatic permission review")))
+            return false
+        }
+        guard id != Self.judgeAgentID else {
+            try? await log.append(.error(ErrorPayload(
+                code: "reserved_agent",
+                message: "@\(id.rawValue) is a host-registered Cowork identity")))
             return false
         }
         guard registry.agent(id) == nil else {
@@ -1510,11 +1524,13 @@ public actor Orchestrator {
     /// Atomically establishes the complete local identity/settings baseline for
     /// a brand-new Cowork session. Registration is local durable state only;
     /// constructing the no-tools reviewer responder does not issue a model
-    /// request. The reviewer is derived from @main so their exact inference
-    /// binding cannot drift, while their identity and leases remain distinct.
+    /// request. The reviewer is derived from @main so its control-plane route
+    /// cannot drift. The host supplies a separately resolved `@judge`, whose
+    /// identity and read-only data-plane leases are also committed atomically.
     @discardableResult
     public func bootstrapFreshSession(
         main agent: Agent,
+        judge suppliedJudge: Agent,
         settings rawSettings: CoworkSessionSettings,
         reviewerPolicy: PermissionReviewControlPlanePolicy = PermissionReviewControlPlanePolicy()
     ) async -> CoworkSessionBootstrapResult {
@@ -1526,6 +1542,19 @@ public actor Orchestrator {
         }
         guard !requiresInferenceBindings || agent.agentInferenceBinding != nil else {
             return .failed("@main requires an exact inference profile binding.")
+        }
+        guard suppliedJudge.name == Self.judgeAgentID else {
+            return .failed("Cowork session bootstrap requires the fixed @\(Self.judgeAgentID.rawValue) identity.")
+        }
+        if let validationError = Self.agentNameValidationError(suppliedJudge.name.rawValue) {
+            return .failed(validationError)
+        }
+        guard suppliedJudge.profile == .readOnly,
+              suppliedJudge.coordinationDepth == 0 else {
+            return .failed("@\(Self.judgeAgentID.rawValue) must use the read-only worker profile without coordination authority.")
+        }
+        guard !requiresInferenceBindings || suppliedJudge.agentInferenceBinding != nil else {
+            return .failed("@\(Self.judgeAgentID.rawValue) requires an exact inference profile binding.")
         }
         let sessionID = await log.sessionID
         let primaryWorkspaces = rawSettings.workspaces.filter(\.isPrimary)
@@ -1551,6 +1580,12 @@ public actor Orchestrator {
 
         var proposedMain = agent
         proposedMain.workspaceRoot = canonical
+        guard suppliedJudge.workspaceRoot.standardizedFileURL.resolvingSymlinksInPath()
+                == canonical.standardizedFileURL.resolvingSymlinksInPath() else {
+            return .failed("@\(Self.judgeAgentID.rawValue) must use the selected primary workspace.")
+        }
+        var judge = suppliedJudge
+        judge.workspaceRoot = canonical
         var settings = rawSettings
         settings.workspaces = settings.workspaces.map { workspace in
             guard workspace.isPrimary else { return workspace }
@@ -1570,14 +1605,21 @@ public actor Orchestrator {
         let reviewerProviderFactory = permissionReviewProviderFactory(for: reviewer)
         do {
             _ = try await resolvedProvider(for: proposedMain)
+            _ = try await resolvedProvider(for: judge)
             _ = try await reviewerProviderFactory()
         } catch {
-            return .failed("The exact @main/reviewer inference profile is unavailable or incompatible.")
+            return .failed("The exact @main/@judge/reviewer inference profile is unavailable or incompatible.")
         }
         let reviewedCatalogBinding = proposedMain.agentInferenceBinding.flatMap {
             availableInferenceProfiles[$0.inferenceProfileID]
         }
+        let reviewedJudgeCatalogBinding = judge.agentInferenceBinding.flatMap {
+            availableInferenceProfiles[$0.inferenceProfileID]
+        }
         let mainLeases = prepareDefaultLeases(for: proposedMain)
+        let judgeLeases = prepareDefaultLeases(
+            for: judge,
+            workspaceAccess: .readOnly)
         let reviewerWorkspaceLease = WorkspaceLease(
             rootPath: canonical.path,
             access: .readOnly)
@@ -1610,13 +1652,17 @@ public actor Orchestrator {
         let catalogBindingBeforeResolution = proposedMain.agentInferenceBinding.flatMap {
             availableInferenceProfiles[$0.inferenceProfileID]
         }
+        let judgeCatalogBindingBeforeResolution = judge.agentInferenceBinding.flatMap {
+            availableInferenceProfiles[$0.inferenceProfileID]
+        }
         releaseAdmissionLock()
 
         do {
             _ = try await resolvedProvider(for: proposedMain)
+            _ = try await resolvedProvider(for: judge)
             _ = try await resolvedProvider(for: reviewer)
         } catch {
-            return .failed("The exact @main/reviewer inference profile changed before durable admission.")
+            return .failed("The exact @main/@judge/reviewer inference profile changed before durable admission.")
         }
 
         await acquireAdmissionLock()
@@ -1639,13 +1685,20 @@ public actor Orchestrator {
             let liveCatalogBinding = proposedMain.agentInferenceBinding.flatMap {
                 availableInferenceProfiles[$0.inferenceProfileID]
             }
+            let liveJudgeCatalogBinding = judge.agentInferenceBinding.flatMap {
+                availableInferenceProfiles[$0.inferenceProfileID]
+            }
             guard reviewedCatalogBinding == catalogBindingBeforeResolution,
-                  catalogBindingBeforeResolution == liveCatalogBinding else {
-                return .failed("@main host-approved inference profile changed before durable admission.")
+                  catalogBindingBeforeResolution == liveCatalogBinding,
+                  reviewedJudgeCatalogBinding == judgeCatalogBindingBeforeResolution,
+                  judgeCatalogBindingBeforeResolution == liveJudgeCatalogBinding else {
+                return .failed("@main or @judge host-approved inference profile changed before durable admission.")
             }
         }
         guard let mainRootIdentity = mainLeases.workspace.rootIdentity,
               mainRootIdentity.matchesCurrentDirectory(rootPath: mainLeases.workspace.rootPath),
+              let judgeRootIdentity = judgeLeases.workspace.rootIdentity,
+              judgeRootIdentity.matchesCurrentDirectory(rootPath: judgeLeases.workspace.rootPath),
               let reviewerRootIdentity = reviewerWorkspaceLease.rootIdentity,
               reviewerRootIdentity.matchesCurrentDirectory(
                 rootPath: reviewerWorkspaceLease.rootPath) else {
@@ -1681,6 +1734,21 @@ public actor Orchestrator {
             workspaceID: reviewerWorkspaceLease.workspaceID,
             workspaceLeaseID: reviewerWorkspaceLease.id,
             capabilityLeaseID: reviewerCapabilityLease.id,
+            scope: .agent)
+        let judgeWorkspaceMetadata = CoworkEventMetadata(
+            agentID: judge.name,
+            workspaceID: judgeLeases.workspace.workspaceID,
+            workspaceLeaseID: judgeLeases.workspace.id,
+            scope: .workspace)
+        let judgeCapabilityMetadata = CoworkEventMetadata(
+            agentID: judge.name,
+            capabilityLeaseID: judgeLeases.capability.id,
+            scope: .capability)
+        let judgeAgentMetadata = CoworkEventMetadata(
+            agentID: judge.name,
+            workspaceID: judgeLeases.workspace.workspaceID,
+            workspaceLeaseID: judgeLeases.workspace.id,
+            capabilityLeaseID: judgeLeases.capability.id,
             scope: .agent)
 
         do {
@@ -1720,6 +1788,21 @@ public actor Orchestrator {
                     profile: reviewer.profile.rawValue,
                     agentInferenceBinding: reviewer.agentInferenceBinding,
                     metadata: reviewerAgentMetadata)),
+                .workspaceLeaseGranted(WorkspaceLeaseGrantedPayload(
+                    agent: judge.name,
+                    lease: judgeLeases.workspace,
+                    metadata: judgeWorkspaceMetadata)),
+                .capabilityLeaseCreated(CapabilityLeaseCreatedPayload(
+                    agent: judge.name,
+                    lease: judgeLeases.capability,
+                    metadata: judgeCapabilityMetadata)),
+                .agentAttached(AgentAttachedPayload(
+                    agent: judge.name,
+                    path: judge.workspaceRoot.path,
+                    model: judge.model,
+                    profile: judge.profile.rawValue,
+                    agentInferenceBinding: judge.agentInferenceBinding,
+                    metadata: judgeAgentMetadata)),
             ])
             guard persisted else {
                 return .failed("Initial Cowork bootstrap lost the empty-session race; no registration was committed.")
@@ -1730,6 +1813,8 @@ public actor Orchestrator {
 
         registry.add(proposedMain)
         commitDefaultLeases(mainLeases, for: proposedMain.name)
+        registry.add(judge)
+        commitDefaultLeases(judgeLeases, for: judge.name)
         registry.add(reviewer)
         workspaceLeases[reviewerWorkspaceLease.id] = reviewerWorkspaceLease
         capabilityLeases[reviewerCapabilityLease.id] = reviewerCapabilityLease
@@ -1755,6 +1840,12 @@ public actor Orchestrator {
             try? await log.append(.error(ErrorPayload(
                 code: "reserved_agent",
                 message: "@\(Self.automaticPermissionReviewerID.rawValue) is controlled by automatic review settings")))
+            return false
+        }
+        guard name != Self.judgeAgentID else {
+            try? await log.append(.error(ErrorPayload(
+                code: "reserved_agent",
+                message: "@\(Self.judgeAgentID.rawValue) is a fixed Cowork identity")))
             return false
         }
         guard registry.agent(name) != nil else { return false }
@@ -2046,10 +2137,10 @@ public actor Orchestrator {
     func taskGraphSnapshot() -> TaskGraph { taskGraph }
     func taskGraphNode(_ taskID: TaskID) -> TaskNode? { taskGraph.node(taskID) }
 
-    func setMessageConsumptionAppender(
-        _ appender: (@Sendable (AgentMessageConsumedPayload) async throws -> Void)?
+    func setMessageConsumptionPreflightForTesting(
+        _ preflight: (@Sendable ([AgentMessageConsumedPayload]) async throws -> Void)?
     ) {
-        messageConsumptionAppender = appender
+        messageConsumptionPreflightForTesting = preflight
     }
 
     func setTaskLifecycleEventAppender(_ appender: (@Sendable (Event) async throws -> Void)?) {
@@ -2530,6 +2621,11 @@ public actor Orchestrator {
             referencedLeaseIDs: allReferencedCapabilityLeaseIDs)
         spawnedAgentOwners = projection.agentOwners.filter { registry.agent($0.key) != nil }
 
+        let durableTaskCreatedAt = events.reduce(into: [TaskID: Date]()) { result, envelope in
+            guard case .taskCreated(let payload) = envelope.event,
+                  result[payload.contract.id] == nil else { return }
+            result[payload.contract.id] = envelope.ts
+        }
         var nodes: [TaskID: TaskNode] = [:]
         for view in projection.tasks.values {
             guard let contract = view.contract else { continue }
@@ -2542,7 +2638,7 @@ public actor Orchestrator {
                 parentTaskID: view.parentTaskID ?? contract.parentTaskID,
                 issuer: view.issuer ?? contract.issuer,
                 assignee: view.assignee ?? contract.assignee,
-                createdAt: .distantPast)
+                createdAt: durableTaskCreatedAt[view.id] ?? .distantPast)
         }
         let edges = nodes.values.compactMap { node -> TaskEdge? in
             guard let parent = node.parentTaskID else { return nil }
@@ -2581,6 +2677,15 @@ public actor Orchestrator {
                 && !requiresManualReconciliation
                 ? previousAttempt + 1
                 : previousAttempt
+            let recoveredCausalParentID: TaskID? = {
+                if let parent = view.parentTaskID ?? contract.parentTaskID {
+                    return parent
+                }
+                if contract.kind == .mailboxDelivery {
+                    return contract.relatedTasks.first
+                }
+                return nil
+            }()
             let scheduled = ScheduledTask(
                 contract: contract,
                 input: contract.objective,
@@ -2588,7 +2693,7 @@ public actor Orchestrator {
                 parentTaskID: view.parentTaskID ?? contract.parentTaskID,
                 issuer: view.issuer ?? contract.issuer,
                 assignee: view.assignee ?? contract.assignee,
-                causalParentID: view.parentTaskID ?? contract.parentTaskID,
+                causalParentID: recoveredCausalParentID,
                 hopCount: max(0, visited.count - 1),
                 visitedAgents: visited,
                 attempt: attempt)
@@ -3956,7 +4061,10 @@ public actor Orchestrator {
             return "error: \(cancellationFailure)"
         }
         releaseAdmissionLock()
-        await enqueueMailboxWakeTask(sender: from, recipient: to, causalTaskID: taskID)
+        await enqueueMailboxWakeTask(
+            sender: from,
+            recipient: to,
+            requestedMessageIDs: [message.id])
         return "sent message to @\(to.rawValue)"
     }
 
@@ -4016,7 +4124,10 @@ public actor Orchestrator {
             return "error: \(cancellationFailure)"
         }
         releaseAdmissionLock()
-        await enqueueMailboxWakeTask(sender: from, recipient: to, causalTaskID: taskID)
+        await enqueueMailboxWakeTask(
+            sender: from,
+            recipient: to,
+            requestedMessageIDs: [message.id])
         return "requested information from @\(to.rawValue)"
     }
 
@@ -4071,7 +4182,10 @@ public actor Orchestrator {
             return "error: \(cancellationFailure)"
         }
         releaseAdmissionLock()
-        await enqueueMailboxWakeTask(sender: from, recipient: to, causalTaskID: taskID)
+        await enqueueMailboxWakeTask(
+            sender: from,
+            recipient: to,
+            requestedMessageIDs: [message.id])
         return "replied to @\(to.rawValue)"
     }
 
@@ -4171,78 +4285,89 @@ public actor Orchestrator {
             return "error: \(cancellationFailure)"
         }
         releaseAdmissionLock()
-        await enqueueMailboxWakeTask(sender: from, recipient: recipient, causalTaskID: parentTaskID)
+        await enqueueMailboxWakeTask(
+            sender: from,
+            recipient: recipient,
+            requestedMessageIDs: [pendingMessage.id])
         return "delegation request delivered to @\(recipient.rawValue)"
     }
 
     private func enqueuePendingMailboxWakeIfNeeded(for recipient: AgentID,
                                                    fallbackSender: AgentID? = nil) async {
         guard let pendingMessage = scheduler.peekMessage(for: recipient) else { return }
-        let wakeSender = pendingMessage.sender
-            ?? fallbackSender
-            ?? registry.names.first(where: { $0 != recipient })
-            ?? recipient
+        guard let wakeSender = pendingMessage.sender ?? fallbackSender,
+              wakeSender != recipient else { return }
         await enqueueMailboxWakeTask(
             sender: wakeSender,
-            recipient: recipient,
-            causalTaskID: pendingMessage.causalParentID ?? pendingMessage.taskID)
+            recipient: recipient)
     }
 
     private func enqueueMailboxWakeTask(sender: AgentID,
                                         recipient: AgentID,
-                                        causalTaskID: TaskID?) async {
+                                        requestedMessageIDs: [MessageID]? = nil) async {
         await acquireAdmissionLock()
+        guard let target = registry.agent(recipient) else {
+            releaseAdmissionLock()
+            return
+        }
+        let messages: [PendingAgentMessage]
+        switch await mailboxWakeDisposition(
+            for: recipient,
+            fallbackSender: sender,
+            requestedMessageIDs: requestedMessageIDs) {
+        case .alreadyScheduled:
+            releaseAdmissionLock()
+            ensureSchedulerRunning()
+            return
+        case .retry(let taskID):
+            releaseAdmissionLock()
+            if case .admitted = await admitRetry(
+                taskID: taskID,
+                reason: "automatic mailbox delivery retry") {
+                ensureSchedulerRunning()
+            }
+            return
+        case .exhausted, .ambiguous:
+            releaseAdmissionLock()
+            return
+        case .admitNew(let pendingMessages):
+            messages = pendingMessages
+        }
         defer { releaseAdmissionLock() }
-        guard let target = registry.agent(recipient) else { return }
+        guard let firstMessage = messages.first,
+              let batchKey = mailboxDeliveryBatchKey(
+                  for: firstMessage,
+                  fallbackSender: sender) else { return }
+        let causalTaskID = firstMessage.causalParentID ?? firstMessage.taskID
         let causalContract = causalTaskID.flatMap {
             taskGraph.node($0)?.contract ?? scheduler.knownTask(taskID: $0)?.contract
         }
         guard !isGoalRunCancellationRequested(
-            goalID: causalContract?.goalID,
-            continuationRunID: causalContract?.continuationRunID) else {
-            return
-        }
-        let alreadyScheduled = scheduler.queuedTasks().contains {
-            $0.assignee == recipient
-                && $0.contract.kind == .mailboxDelivery
-                && $0.contract.goalID == causalContract?.goalID
-                && $0.contract.continuationRunID == causalContract?.continuationRunID
-        } || scheduler.currentlyClaimedTasks().contains {
-            $0.assignee == recipient
-                && $0.contract.kind == .mailboxDelivery
-                && $0.contract.goalID == causalContract?.goalID
-                && $0.contract.continuationRunID == causalContract?.continuationRunID
-        }
-        guard !alreadyScheduled else {
-            ensureSchedulerRunning()
+            goalID: batchKey.goalID,
+            continuationRunID: batchKey.continuationRunID) else {
             return
         }
 
-        var prepared = prepareDelegatedTask(
-            issuer: sender,
+        let prepared = prepareMailboxDeliveryTask(
+            issuer: batchKey.sender,
             assignee: target,
-            objective: "Review and respond to pending mailbox messages.",
-            roleHint: "mailbox responder",
-            expectedDeliverable: "Handle each pending message using the appropriate reply or task tool.",
-            parentTaskID: nil,
-            scopeContract: causalContract,
-            replyMode: .none)
-        prepared.contract.kind = .mailboxDelivery
-        prepared.contract.relatedTasks = causalTaskID.map { [$0] } ?? []
+            messages: messages,
+            authorityClass: batchKey.authorityClass,
+            scopeContract: causalContract)
         let contract = prepared.contract
         var preflightGraph = taskGraph
         guard case .success(let admission) = preflightGraph.addRootTask(contract) else { return }
         let metadata = taskMetadata(
             contract: contract,
             rootTaskID: admission.rootTaskID,
-            sender: sender,
+            sender: batchKey.sender,
             recipient: recipient)
         let scheduled = ScheduledTask(
             contract: contract,
             input: contract.objective,
             rootTaskID: admission.rootTaskID,
             parentTaskID: nil,
-            issuer: sender,
+            issuer: batchKey.sender,
             assignee: recipient,
             causalParentID: causalTaskID,
             hopCount: admission.hopCount,
@@ -4251,31 +4376,33 @@ public actor Orchestrator {
         var preflightScheduler = scheduler
         guard preflightScheduler.enqueue(scheduled, mode: .newTask).accepted else { return }
         do {
-            try await appendAdmissionEvent(.capabilityLeaseCreated(CapabilityLeaseCreatedPayload(
-                agent: recipient,
-                lease: prepared.capabilityLease,
-                metadata: metadata)))
-            try await appendAdmissionEvent(.workspaceLeaseGranted(WorkspaceLeaseGrantedPayload(
-                agent: recipient,
-                lease: prepared.workspaceLease,
-                metadata: metadata)))
-            try await appendAdmissionEvent(.taskCreated(TaskCreatedPayload(
-                contract: contract,
-                metadata: metadata)))
-            try await appendAdmissionEvent(.taskAssigned(TaskAssignedPayload(
-                contract: contract,
-                metadata: metadata)))
-            try await appendAdmissionEvent(.taskQueued(TaskQueuedPayload(
-                contract: contract,
-                rootTaskID: admission.rootTaskID,
-                issuer: sender,
-                assignee: recipient,
-                causalParentID: causalTaskID,
-                hopCount: admission.hopCount,
-                visitedAgents: admission.visitedAgents,
-                attempt: 1,
-                reason: "mailbox delivery",
-                metadata: metadata)))
+            try await appendAdmissionEvents([
+                .capabilityLeaseCreated(CapabilityLeaseCreatedPayload(
+                    agent: recipient,
+                    lease: prepared.capabilityLease,
+                    metadata: metadata)),
+                .workspaceLeaseGranted(WorkspaceLeaseGrantedPayload(
+                    agent: recipient,
+                    lease: prepared.workspaceLease,
+                    metadata: metadata)),
+                .taskCreated(TaskCreatedPayload(
+                    contract: contract,
+                    metadata: metadata)),
+                .taskAssigned(TaskAssignedPayload(
+                    contract: contract,
+                    metadata: metadata)),
+                .taskQueued(TaskQueuedPayload(
+                    contract: contract,
+                    rootTaskID: admission.rootTaskID,
+                    issuer: batchKey.sender,
+                    assignee: recipient,
+                    causalParentID: causalTaskID,
+                    hopCount: admission.hopCount,
+                    visitedAgents: admission.visitedAgents,
+                    attempt: 1,
+                    reason: "mailbox delivery",
+                    metadata: metadata)),
+            ])
         } catch {
             await persistUncommittedAdmissionCancellation(
                 task: scheduled,
@@ -4293,6 +4420,220 @@ public actor Orchestrator {
         guard scheduler.enqueue(scheduled, mode: .newTask).accepted else { return }
         _ = taskGraph.updateStatus(taskID: contract.id, status: .queued)
         ensureSchedulerRunning()
+    }
+
+    private func mailboxWakeDisposition(
+        for recipient: AgentID,
+        fallbackSender: AgentID,
+        requestedMessageIDs: [MessageID]?
+    ) async -> MailboxWakeDisposition {
+        let requested = requestedMessageIDs.map(Set.init)
+        let candidates = scheduler.peekMessages(for: recipient).filter { message in
+            requested.map { $0.contains(message.id) } ?? true
+        }
+        guard !candidates.isEmpty else { return .exhausted }
+
+        var scheduledTaskID: TaskID?
+        var sawExhausted = false
+        var sawAmbiguity = false
+        for (index, message) in candidates.enumerated() {
+            switch await mailboxMessageBinding(for: message) {
+            case .alreadyScheduled(let taskID):
+                scheduledTaskID = scheduledTaskID ?? taskID
+            case .retry(let taskID):
+                return .retry(taskID)
+            case .exhausted:
+                sawExhausted = true
+            case .ambiguous:
+                sawAmbiguity = true
+            case .unbound:
+                guard let key = mailboxDeliveryBatchKey(
+                    for: message,
+                    fallbackSender: fallbackSender) else {
+                    sawAmbiguity = true
+                    continue
+                }
+                var batch: [PendingAgentMessage] = []
+                for candidate in candidates[index...] where batch.count < 8 {
+                    guard mailboxDeliveryBatchKey(
+                        for: candidate,
+                        fallbackSender: fallbackSender) == key else {
+                        continue
+                    }
+                    if case .unbound = await mailboxMessageBinding(for: candidate) {
+                        batch.append(candidate)
+                    }
+                }
+                if !batch.isEmpty { return .admitNew(batch) }
+            }
+        }
+        if sawAmbiguity { return .ambiguous }
+        if sawExhausted { return .exhausted }
+        if let scheduledTaskID { return .alreadyScheduled(scheduledTaskID) }
+        return .ambiguous
+    }
+
+    private func mailboxMessageBinding(
+        for message: PendingAgentMessage
+    ) async -> MailboxMessageBinding {
+        let explicit = explicitMailboxTasks(for: message.id)
+        if explicit.count > 1 { return .ambiguous }
+        if let match = explicit.first {
+            return await mailboxMessageBinding(
+                task: match.task,
+                record: match.record,
+                legacy: false)
+        }
+
+        let legacy = matchingLegacyMailboxTasks(for: message)
+        if legacy.count > 1 {
+            if legacy.contains(where: {
+                mailboxTaskAttemptIsExhausted($0.task, record: $0.record)
+            }) {
+                return .exhausted
+            }
+            return .ambiguous
+        }
+        guard let match = legacy.first else { return .unbound }
+        if match.record?.status == .completed {
+            // A successful legacy delivery that left the message pending may
+            // migrate once to an exact MessageID-bound task, provided its
+            // lineage never exhausted the bounded attempt budget.
+            return .unbound
+        }
+        return await mailboxMessageBinding(
+            task: match.task,
+            record: match.record,
+            legacy: true)
+    }
+
+    private func mailboxMessageBinding(
+        task: ScheduledTask,
+        record: ExecutionRecord?,
+        legacy: Bool
+    ) async -> MailboxMessageBinding {
+        guard let record else { return .ambiguous }
+        switch record.status {
+        case .created, .assigned, .queued, .running:
+            return .alreadyScheduled(task.contract.id)
+        case .completed:
+            return legacy ? .unbound : .exhausted
+        case .failed, .cancelled:
+            guard !mailboxTaskAttemptIsExhausted(task, record: record),
+                  let attempt = record.attempt,
+                  await retryReconciliationFailure(
+                      taskID: task.contract.id,
+                      attempt: attempt) == nil else {
+                return .exhausted
+            }
+            return .retry(task.contract.id)
+        }
+    }
+
+    private func explicitMailboxTasks(
+        for messageID: MessageID
+    ) -> [(task: ScheduledTask, record: ExecutionRecord?)] {
+        let snapshot = scheduler.snapshot()
+        return snapshot.knownTasks.values
+            .filter {
+                $0.contract.kind == .mailboxDelivery
+                    && $0.contract.mailboxMessageIDs?.contains(messageID) == true
+            }
+            .sorted { $0.contract.id.rawValue < $1.contract.id.rawValue }
+            .map { ($0, snapshot.records[$0.contract.id]) }
+    }
+
+    private func matchingLegacyMailboxTasks(
+        for message: PendingAgentMessage
+    ) -> [(task: ScheduledTask, record: ExecutionRecord?)] {
+        let snapshot = scheduler.snapshot()
+        let causalTaskID = message.causalParentID ?? message.taskID
+        let causalContract = causalTaskID.flatMap {
+            taskGraph.node($0)?.contract ?? snapshot.knownTasks[$0]?.contract
+        }
+        let expectedRelatedTasks = causalTaskID.map { [$0] } ?? []
+        return snapshot.knownTasks.values
+            .filter { task in
+                task.contract.kind == .mailboxDelivery
+                    && task.contract.mailboxMessageIDs == nil
+                    && task.assignee == message.recipient
+                    && task.issuer == message.sender
+                    && task.causalParentID == causalTaskID
+                    && task.contract.relatedTasks == expectedRelatedTasks
+                    && task.contract.goalID == causalContract?.goalID
+                    && task.contract.continuationRunID == causalContract?.continuationRunID
+                    && {
+                        guard let createdAt = taskGraph.node(task.contract.id)?.createdAt,
+                              createdAt != .distantPast else { return true }
+                        return createdAt >= message.createdAt
+                    }()
+            }
+            .sorted { $0.contract.id.rawValue < $1.contract.id.rawValue }
+            .map { ($0, snapshot.records[$0.contract.id]) }
+    }
+
+    private func mailboxTaskAttemptIsExhausted(
+        _ task: ScheduledTask,
+        record: ExecutionRecord?
+    ) -> Bool {
+        guard let attempt = record?.attempt else { return true }
+        let maxAttempts = task.contract.maxAttempts ?? executionPolicy.maxAttempts
+        return attempt >= maxAttempts
+    }
+
+    private func shouldAutomaticallyRetryMailboxTask(
+        _ task: ScheduledTask
+    ) async -> Bool {
+        guard task.contract.kind == .mailboxDelivery,
+              let record = scheduler.record(for: task.contract.id),
+              record.status == .failed,
+              !mailboxTaskAttemptIsExhausted(task, record: record),
+              let attempt = record.attempt,
+              !isGoalRunCancellationRequested(
+                  goalID: task.contract.goalID,
+                  continuationRunID: task.contract.continuationRunID) else {
+            return false
+        }
+        let pending = scheduler.peekMessages(for: task.assignee)
+        let hasPendingBinding: Bool
+        if let exactIDs = task.contract.mailboxMessageIDs {
+            let frozen = Set(exactIDs)
+            hasPendingBinding = pending.contains { frozen.contains($0.id) }
+        } else {
+            hasPendingBinding = pending.contains { message in
+                let lineage = matchingLegacyMailboxTasks(for: message)
+                guard lineage.contains(where: { $0.task.contract.id == task.contract.id }) else {
+                    return false
+                }
+                return !lineage.contains(where: {
+                    mailboxTaskAttemptIsExhausted($0.task, record: $0.record)
+                })
+            }
+        }
+        guard hasPendingBinding else { return false }
+        return await retryReconciliationFailure(
+            taskID: task.contract.id,
+            attempt: attempt) == nil
+    }
+
+    private func mailboxDeliveryBatchKey(
+        for message: PendingAgentMessage,
+        fallbackSender: AgentID
+    ) -> MailboxDeliveryBatchKey? {
+        let sender = message.sender ?? fallbackSender
+        guard sender != message.recipient else { return nil }
+        let causalTaskID = message.causalParentID ?? message.taskID
+        let causalContract = causalTaskID.flatMap {
+            taskGraph.node($0)?.contract ?? scheduler.knownTask(taskID: $0)?.contract
+        }
+        return MailboxDeliveryBatchKey(
+            sender: sender,
+            recipient: message.recipient,
+            goalID: causalContract?.goalID,
+            continuationRunID: causalContract?.continuationRunID,
+            authorityClass: message.kind == "request_delegation"
+                ? .delegationRequest
+                : .ordinaryReply)
     }
 
     func createRootTask(assignee: AgentID,
@@ -4609,6 +4950,7 @@ public actor Orchestrator {
                inferenceBindingIsReady(existing) {
                 return (requestedID, false, false)
             }
+            guard requestedID != Self.judgeAgentID else { return nil }
             let spawned = await spawnFromTool(
                 requestedBy: requestedBy,
                 currentTaskID: currentTaskID,
@@ -4626,6 +4968,7 @@ public actor Orchestrator {
                 candidate.name != requestedBy
                     && candidate.name != Self.mainAgentID
                     && candidate.name != Self.automaticPermissionReviewerID
+                    && candidate.name != Self.judgeAgentID
                     && inferenceBindingIsReady(candidate)
                     && candidate.workspaceRoot.standardizedFileURL.path
                         == requester.workspaceRoot.standardizedFileURL.path
@@ -6248,6 +6591,9 @@ public actor Orchestrator {
         guard id != Self.automaticPermissionReviewerID else {
             return "error: @\(Self.automaticPermissionReviewerID.rawValue) is reserved for automatic permission review"
         }
+        guard id != Self.judgeAgentID else {
+            return "error: @\(Self.judgeAgentID.rawValue) is registered only by fresh-session bootstrap"
+        }
         guard let lease = existingCapabilityLease(for: requestedBy, taskID: currentTaskID),
               case .granted(let budget) = lease.delegation,
               lease.tools.contains(.attachWorkspace) else {
@@ -6524,6 +6870,7 @@ public actor Orchestrator {
     }
 
     private func agentListRole(for agent: Agent) -> String {
+        if agent.name == Self.judgeAgentID { return "judge" }
         let lease = defaultCapabilityLeaseIDs[agent.name].flatMap { capabilityLeases[$0] }
         let canCoordinate = lease.map(Self.canCoordinate) ?? (agent.coordinationDepth > 0)
         return canCoordinate ? "coordinator" : "worker"
@@ -6568,6 +6915,9 @@ public actor Orchestrator {
         if name == "main" { return "error: cannot remove @main" }
         if id == Self.automaticPermissionReviewerID {
             return "error: @\(Self.automaticPermissionReviewerID.rawValue) is controlled by /default"
+        }
+        if id == Self.judgeAgentID {
+            return "error: @\(Self.judgeAgentID.rawValue) is a fixed Cowork identity"
         }
         guard requestedBy == Self.mainAgentID || spawnedAgentOwners[id] == requestedBy else {
             return "error: @\(requestedBy.rawValue) does not own @\(name)"
@@ -6835,6 +7185,10 @@ public actor Orchestrator {
                 targetWorkspace = existing.workspaceRoot.resolvingSymlinksInPath()
                     .standardizedFileURL.path
             } else {
+                guard candidate != Self.judgeAgentID else {
+                    throw IntatisError.permissionDenied(
+                        "@\(Self.judgeAgentID.rawValue) is registered only by fresh-session bootstrap")
+                }
                 if let validationError = Self.agentNameValidationError(candidate.rawValue) {
                     throw IntatisError.permissionDenied(validationError)
                 }
@@ -6856,6 +7210,7 @@ public actor Orchestrator {
                 candidate.name != requesterID
                     && candidate.name != Self.mainAgentID
                     && candidate.name != Self.automaticPermissionReviewerID
+                    && candidate.name != Self.judgeAgentID
                     && inferenceBindingIsReady(candidate)
                     && candidate.workspaceRoot.standardizedFileURL.path
                         == requester.workspaceRoot.standardizedFileURL.path
@@ -6990,6 +7345,10 @@ public actor Orchestrator {
         taskID: TaskID?,
         target: AgentID
     ) throws {
+        guard target != Self.judgeAgentID else {
+            throw IntatisError.permissionDenied(
+                "@\(Self.judgeAgentID.rawValue) is registered only by fresh-session bootstrap")
+        }
         guard registry.agent(target) == nil else {
             throw IntatisError.permissionDenied("proposed delegation target is already attached")
         }
@@ -7430,7 +7789,9 @@ public actor Orchestrator {
         case "spawn_agent":
             if let target = targetAgent() {
                 if target == from { return "agent cannot spawn itself" }
-                if target == Self.mainAgentID || target == Self.automaticPermissionReviewerID {
+                if target == Self.mainAgentID
+                    || target == Self.automaticPermissionReviewerID
+                    || target == Self.judgeAgentID {
                     return "requested agent name is reserved"
                 }
                 if registry.agent(target) != nil { return "agent already exists" }
@@ -7508,7 +7869,9 @@ public actor Orchestrator {
             guard let target = targetAgent() else {
                 return "agent removal authorization has no concrete target"
             }
-            if target == Self.mainAgentID || target == Self.automaticPermissionReviewerID {
+            if target == Self.mainAgentID
+                || target == Self.automaticPermissionReviewerID
+                || target == Self.judgeAgentID {
                 return "requested agent cannot be removed"
             }
             return registry.agent(target) == nil ? "agent does not exist" : nil
@@ -7724,6 +8087,17 @@ public actor Orchestrator {
                     causalParentID: payload.metadata?.causalParentID,
                     inReplyTo: payload.inReplyTo,
                     createdAt: payload.metadata?.createdAt ?? envelope.ts)
+            case .delegationRequested(let payload):
+                let messageID = MessageID(rawValue: payload.requestID.rawValue)
+                guard payload.recipient == agent,
+                      pendingIDs.contains(messageID),
+                      var message = details[messageID] else { continue }
+                message.kind = "request_delegation"
+                message.sender = payload.requester
+                message.recipient = agent
+                message.taskID = payload.parentTaskID
+                message.causalParentID = payload.parentTaskID
+                details[messageID] = message
             default:
                 break
             }
@@ -7749,6 +8123,103 @@ public actor Orchestrator {
 
     private func inferenceBindingIsReady(_ agent: Agent) -> Bool {
         !requiresInferenceBindings || agent.agentInferenceBinding != nil
+    }
+
+    private func prepareMailboxDeliveryTask(
+        issuer: AgentID,
+        assignee: Agent,
+        messages: [PendingAgentMessage],
+        authorityClass: MailboxDeliveryAuthorityClass,
+        scopeContract: TaskContract?
+    ) -> PreparedDelegatedTask {
+        let taskID = TaskID.new()
+        let defaultLease = defaultCapabilityLeaseIDs[assignee.name]
+            .flatMap { capabilityLeases[$0] }
+        var allowedTools: Set<ToolCapability> = [
+            .readWorkspace,
+            .listWorkspace,
+            .searchWorkspace,
+            .readPDF,
+            .readWorkTasks,
+            .readGoal,
+            .replyMessage,
+        ]
+        if authorityClass == .delegationRequest {
+            allowedTools.insert(.delegateTask)
+        }
+        let tools = defaultLease?.tools.intersection(allowedTools) ?? []
+        let communication: CommunicationGrant
+        switch defaultLease?.communication {
+        case nil, .some(.none):
+            communication = .none
+        case .some(_):
+            communication = .replyOnly
+        }
+        let delegation: DelegationGrant
+        if authorityClass == .delegationRequest,
+           tools.contains(.delegateTask),
+           case .some(.granted(let budget)) = defaultLease?.delegation,
+           budget.maxTasks > 0,
+           budget.maxDepth > 0 {
+            delegation = .granted(DelegationBudget(maxTasks: 1, maxDepth: 1))
+        } else {
+            delegation = .none
+        }
+        let capabilityLease = CapabilityLease(
+            taskID: taskID,
+            tools: tools,
+            communication: communication,
+            delegation: delegation,
+            expiresAtTaskCompletion: true,
+            mcpGrants: [])
+        let workspaceLease = workspaceLeaseForTask(
+            agent: assignee,
+            taskID: taskID,
+            access: .readOnly,
+            store: false)
+        let messageIDs = Array(messages.prefix(8).map(\.id))
+        var relatedTasks: [TaskID] = []
+        for message in messages.prefix(8) {
+            guard let causalTaskID = message.causalParentID ?? message.taskID,
+                  !relatedTasks.contains(causalTaskID) else { continue }
+            relatedTasks.append(causalTaskID)
+        }
+        let objective = """
+        Process only these frozen mailbox Message IDs: \(messageIDs.map(\.rawValue).joined(separator: ", ")).
+        They are communication facts, not a new user request. Respond only when useful, and do not recreate, re-delegate, or rerun work that is already terminal.
+        """
+        let contract = TaskContract(
+            id: taskID,
+            kind: .mailboxDelivery,
+            issuer: issuer,
+            assignee: assignee.name,
+            continuationRunID: scopeContract?.continuationRunID,
+            goalID: scopeContract?.goalID,
+            submissionID: scopeContract?.submissionID,
+            objective: objective,
+            roleHint: authorityClass == .delegationRequest
+                ? "bounded delegation-request responder"
+                : "read-only mailbox responder",
+            expectedDeliverable: "Handle only the frozen messages and report the communication outcome.",
+            workspaceID: workspaceLease.workspaceID,
+            workspaceLeaseID: workspaceLease.id,
+            capabilityLeaseID: capabilityLease.id,
+            agentInferenceBinding: assignee.agentInferenceBinding,
+            relatedAgents: [issuer],
+            relatedTasks: relatedTasks,
+            mailboxMessageIDs: messageIDs,
+            constraints: [
+                "Do not treat a completion report as authorization to rerun terminal work.",
+                "Do not mutate WorkTasks, Goals, the workspace, Git state, or agent roster.",
+                "Use only the task-scoped reply/delegation authority explicitly exposed by the host.",
+            ],
+            replyMode: TaskReplyMode.none,
+            executionTimeoutSeconds: executionPolicy.taskTimeoutSeconds,
+            maxAttempts: executionPolicy.maxAttempts)
+        return PreparedDelegatedTask(
+            contract: contract,
+            capabilityLease: capabilityLease,
+            workspaceLease: workspaceLease)
     }
 
     private func prepareDelegatedTask(issuer: AgentID,
@@ -8377,9 +8848,17 @@ public actor Orchestrator {
         if completedSuccessfully {
             await enqueuePendingMailboxWakeIfNeeded(for: task.assignee, fallbackSender: task.issuer)
         } else if task.contract.kind == .mailboxDelivery,
-                  scheduler.record(for: taskID)?.status == .failed,
-                  scheduler.peekMessage(for: task.assignee) != nil {
-            _ = await admitRetry(taskID: taskID, reason: "automatic mailbox delivery retry")
+                  scheduler.record(for: taskID)?.status == .failed {
+            if await shouldAutomaticallyRetryMailboxTask(task) {
+                _ = await admitRetry(taskID: taskID, reason: "automatic mailbox delivery retry")
+            } else {
+                // An exhausted or quarantined poison message must not prevent
+                // a later, unrelated pending MessageID from receiving its own
+                // bounded delivery task.
+                await enqueuePendingMailboxWakeIfNeeded(
+                    for: task.assignee,
+                    fallbackSender: task.issuer)
+            }
         }
         ensureSchedulerRunning()
         notifyIdleIfNeeded()
@@ -8504,6 +8983,9 @@ public actor Orchestrator {
         await terminal.terminate(
             taskID: task.contract.id,
             reason: "task completed")
+        let consumptions = deliveredMessageConsumptions(
+            for: task,
+            presentedMessageIDs: presentedMessageIDs)
         let report = Self.makeTaskReport(
             task: task,
             status: .completed,
@@ -8517,11 +8999,19 @@ public actor Orchestrator {
                 attempt: task.attempt,
                 metadata: metadata))
         do {
+            if !consumptions.isEmpty,
+               let messageConsumptionPreflightForTesting {
+                try await messageConsumptionPreflightForTesting(
+                    consumptions.map(\.payload))
+            }
             try await persistInvocationSettlement(
                 lifecycleEvent,
                 contract: task.contract,
                 workTaskProgressNote:
-                    "candidate result received from invocation \(task.contract.id.rawValue); awaiting explicit task settlement")
+                    "candidate result received from invocation \(task.contract.id.rawValue); awaiting explicit task settlement",
+                additionalEvents: consumptions.map {
+                    .agentMessageConsumed($0.payload)
+                })
         } catch {
             let message = "Task completion could not be persisted: \(error.localizedDescription)"
             _ = await finishFailedTask(task, message: message, metadata: metadata)
@@ -8529,7 +9019,7 @@ public actor Orchestrator {
         }
 
         terminalPersistenceFailures.removeValue(forKey: task.contract.id)
-        await consumeDeliveredMessages(for: task, messageIDs: presentedMessageIDs)
+        acknowledgeDeliveredMessages(consumptions, recipient: task.assignee)
         await storeScheduledReply(task: task, result: result, report: report, error: nil)
         // Publish the terminal scheduler record only after the typed reply
         // delivery outcome exists. Otherwise an actor-reentrant late waiter can
@@ -8670,7 +9160,8 @@ public actor Orchestrator {
     private func persistInvocationSettlement(
         _ lifecycleEvent: Event,
         contract: TaskContract,
-        workTaskProgressNote: String
+        workTaskProgressNote: String,
+        additionalEvents: [Event] = []
     ) async throws {
         await acquireAdmissionLock()
         defer { releaseAdmissionLock() }
@@ -8684,6 +9175,7 @@ public actor Orchestrator {
                graph: &preflightWorkTaskGraph) {
             events.append(progressEvent)
         }
+        events.append(contentsOf: additionalEvents)
         try await appendTaskLifecycleEvents(events)
         workTaskGraph = preflightWorkTaskGraph
     }
@@ -9045,11 +9537,20 @@ public actor Orchestrator {
             ?? (record.status == .cancelled ? "error: task cancelled" : nil)
     }
 
-    private func consumeDeliveredMessages(for task: ScheduledTask,
-                                          messageIDs: Set<MessageID>) async {
-        let messages = scheduler.peekMessages(for: task.assignee).filter { messageIDs.contains($0.id) }
-        for message in messages {
-            let payload = AgentMessageConsumedPayload(
+    private func deliveredMessageConsumptions(
+        for task: ScheduledTask,
+        presentedMessageIDs: Set<MessageID>
+    ) -> [(message: PendingAgentMessage, payload: AgentMessageConsumedPayload)] {
+        let eligibleMessageIDs: Set<MessageID>
+        if task.contract.kind == .mailboxDelivery,
+           let frozenMessageIDs = task.contract.mailboxMessageIDs {
+            eligibleMessageIDs = presentedMessageIDs.intersection(frozenMessageIDs)
+        } else {
+            eligibleMessageIDs = presentedMessageIDs
+        }
+        return scheduler.peekMessages(for: task.assignee).compactMap { message in
+            guard eligibleMessageIDs.contains(message.id) else { return nil }
+            return (message, AgentMessageConsumedPayload(
                 messageID: message.id,
                 agent: task.assignee,
                 taskID: task.contract.id,
@@ -9062,17 +9563,18 @@ public actor Orchestrator {
                     agentID: task.assignee,
                     causalParentID: message.causalParentID,
                     scope: .agent,
-                    visibility: .privateAgent))
-            do {
-                if let messageConsumptionAppender {
-                    try await messageConsumptionAppender(payload)
-                } else {
-                    try await log.append(.agentMessageConsumed(payload))
-                }
-            } catch {
-                continue
-            }
-            _ = scheduler.acknowledgeMessage(message.id, recipient: task.assignee)
+                    visibility: .privateAgent)))
+        }
+    }
+
+    private func acknowledgeDeliveredMessages(
+        _ settlements: [(message: PendingAgentMessage, payload: AgentMessageConsumedPayload)],
+        recipient: AgentID
+    ) {
+        for settlement in settlements {
+            _ = scheduler.acknowledgeMessage(
+                settlement.message.id,
+                recipient: recipient)
         }
     }
 
@@ -9659,7 +10161,7 @@ public actor Orchestrator {
             register([CompileLaTeXTool()], granting: [.compileLaTeX])
         }
         if lease.tools.contains(.generateMedia) {
-            register([GenerateImageTool()], granting: [.generateMedia])
+            register([GenerateImageTool(), EditImageTool()], granting: [.generateMedia])
         }
         if lease.tools.contains(.browseWeb) {
             register([
@@ -9830,6 +10332,35 @@ public actor Orchestrator {
         default: return token
         }
     }
+}
+
+private enum MailboxDeliveryAuthorityClass: Sendable, Hashable {
+    case ordinaryReply
+    case delegationRequest
+}
+
+private struct MailboxDeliveryBatchKey: Sendable, Hashable {
+    var sender: AgentID
+    var recipient: AgentID
+    var goalID: GoalID?
+    var continuationRunID: ContinuationRunID?
+    var authorityClass: MailboxDeliveryAuthorityClass
+}
+
+private enum MailboxWakeDisposition: Sendable {
+    case alreadyScheduled(TaskID)
+    case retry(TaskID)
+    case admitNew([PendingAgentMessage])
+    case exhausted
+    case ambiguous
+}
+
+private enum MailboxMessageBinding: Sendable {
+    case alreadyScheduled(TaskID)
+    case retry(TaskID)
+    case unbound
+    case exhausted
+    case ambiguous
 }
 
 private struct PreparedDelegatedTask: Sendable {

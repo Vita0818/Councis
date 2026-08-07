@@ -45,11 +45,20 @@ final class IntatisSkillsTests: XCTestCase {
         XCTAssertTrue(catalog.contains("scope=\"system\""))
 
         let activation = try snapshot.activationPrompt(skillID: skill.id)
+        XCTAssertTrue(activation.contains("Drive the request proactively"))
+        XCTAssertTrue(activation.contains("Create a durable Goal only"))
+        XCTAssertTrue(activation.contains("collaboration should not be reserved only"))
+        XCTAssertTrue(activation.contains("instead of waiting idly"))
         XCTAssertTrue(activation.contains("cost-efficient-balanced"))
         XCTAssertTrue(activation.contains("Prefer the smallest team"))
         XCTAssertTrue(activation.contains("Mandatory multimodal companion"))
         XCTAssertTrue(activation.contains("prefer a more recently released"))
         XCTAssertTrue(activation.contains("capabilities unspecified"))
+        XCTAssertTrue(activation.contains("Use the fixed Judge when comparison helps"))
+        XCTAssertTrue(activation.contains("host-registered, read-only data-plane worker"))
+        XCTAssertTrue(activation.contains("explicitly delegate a final evaluation task"))
+        XCTAssertTrue(activation.contains("returns ordinary text"))
+        XCTAssertTrue(activation.contains("never replaces `@permission-reviewer`"))
 
         let registry = snapshot.augmenting(
             ToolRegistry([], registryVersion: "test.bundled"))

@@ -1,9 +1,25 @@
 # Councis 项目常驻上下文
 
-当前业务源码直接采用 `/Users/vita/Vitemis/Intatis` 的 v0.32 工作树快照作为根工作树；
-这里没有需要仿照或同步的 `Upstream/Intatis` 副本。后续实现必须直接修改本仓库根目录下的
-`Apps/`、`Packages/`、`Vendor/`、配置与测试。Intatis 的现有工程名和模块名是当前基线事实，
-Councis 的产品方向与尚未实现的差异化约束见 `docs/COUNcis_IDENTITY.md`。
+当前业务源码直接采用 `/Users/vita/Vitemis/Intatis` 的干净提交
+`2d849dbe592a4532a23d0b5a0f84c4e52e459505`（提交标题 `v0.37`；`project.yml` 产品版本
+`0.36 (36)`）作为根工作树快照；这里没有需要仿照或同步的 `Upstream/Intatis` 副本。
+后续实现必须直接修改本仓库根目录下的 `Apps/`、`Packages/`、`Vendor/`、配置与测试。
+Intatis 的现有工程名和模块名是当前基线事实；用户可见产品品牌已独立覆盖为 `Councis`，但
+target/module/type、bundle ID、可执行文件、配置与存储命名空间仍保持 Intatis 基线。Councis 的
+产品方向与已实现差异的边界见 `docs/COUNcis_IDENTITY.md`，精确来源与复制边界见
+`docs/INTATIS_BASELINE.md`。
+
+当前基线的 Councis 专属控制文件是根 `AGENTS.md`、`docs/COUNcis_IDENTITY.md` 与
+`docs/INTATIS_BASELINE.md`；`docs/README.md`、`docs/CURRENT_STATE.md` 与
+`docs/NEXT_TARGET.md` 可保留最小项目导航、状态和下一目标覆盖。除此之外，源码、配置、测试和
+文档的初始内容必须保持来源快照。后续用户要求实现 Councis 功能时，应直接修改本仓库根工作树
+并同步真正受该功能影响的文档，不得回到 Intatis 来源仓库修改，也不得重新建立参考树/实现树双轨。
+
+Councis 的产品定位只是 **Intatis Cowork 的有限角色与提示词修饰**。已实现的有限差异是在 fresh
+Cowork session 中，为现有固定 `@main` 与 `@permission-reviewer` 增加第三个固定身份
+`@judge`，并调整 Main/Judge 系统提示词与 Cowork Skill。Main 仍自主决定 Sub-agent 数量、配置、
+模型、策略、任务和 Judge 用法；Judge 通过现有 Cowork 机制返回文本。除此之外，Cowork 工作流程、
+运行时语义和 Intatis 现有安全合同全部保持不变。
 
 本文件继承 `/Users/vita/Vitemis/AGENTS.md` 中的 Vitemis 通用 Agent 规则。若本文件与通用规则冲突，在不违反系统和用户指令的前提下，以更具体、更严格的项目规则为准。
 
@@ -94,7 +110,8 @@ managed-terminal Seatbelt、Hardened Runtime、签名/公证或 iOS 平台边界
 - 入口：`Apps/IntatisMac/Sources/IntatisMacApp.swift`（`@main struct IntatisMacApp`，全量 macOS）、`Apps/IntatisiOS/Sources/IntatisiOSApp.swift`（`@main struct IntatisiOSApp`，chat 子集）、`Apps/intatis-cli/Sources/IntatisCLI.swift`（CLI）。
 - Chat 链路：`ChatViewModel` → `GoalInputParser`（行首 `/goal` 只生成可选 Goal 元数据，provider 收到清洗后的文本）→ `ChatLoop`（无工具）→ `EventLog`(JSONL append-only) → `ConversationProjection`。
 - Code 链路：`CodeViewModel` → `GoalInputParser` → 共享 headless `AgentRuntime.code` → `AgentLoop`（maxIterations 50）→ `ContextBuilder` + `RuntimeEnvironmentManifest` → `OpenAIWireProvider` → `runTool` → `PermissionEngine`（3 层门）→ `EventLog` → `CodeProjection`。
-- Cowork 链路：`CoworkViewModel` → `GoalInputParser` + `CoworkMentionRouter` → `SubmittedIntentStore`（outbox → 原子 `user_message + queued`）→ `Orchestrator.runtime`（先取得 session writer lease）→ FIFO scheduler → 共享 headless `AgentRuntime.cowork` → `AgentLoop` → `PermissionEngine` → durable tool execution ticket → executor → `EventLog`；`MessageBus` → `Mediator`。fresh Cowork 在任何模型请求前，以同一原子 7-event batch 登记完整 session settings、`@main` 与 `@permission-reviewer` 各自的 workspace/capability lease 和 identity；两者初始 exact inference binding 与 canonical workspace 相同，但 identity/lease 独立，reviewer 为 read_only、空工具/通信/委派且 depth 0。GUI/CLI 默认启用该保留控制面 agent，`AgentPermissionResponder` 把结构化 `PermissionReviewTask` 交给独立 `PermissionReviewControlPlane` FIFO/single-flight；reviewer 有独立 timeout/cancel 与可选 soft token warning，不占普通 scheduler 槽，只返回 `allow` / `deny`。reviewer 默认不得注入 `temperature`、output-token 或字符上限；只有用户/host 显式策略或真实上游/上下文约束存在时才可传递相应控制。request/settled 均先落 EventLog，allow 只有 settled 成功后生效；pre-submit caller cancel 直接返回 typed deny、不创建 review lifecycle；timeout、malformed、provider/persistence failure 和已登记 review 在 terminal-claim 前被观察到的 cancel durable deny 当前调用，不转 GUI 人工等待；claim 后 cancel 保留唯一 settlement 但最终 authorization delivery deny。每个 provider dispatch 都使用 exact `{reviewTaskID, nonce}` generation；provider/timeout 竞争同代首 terminal，caller cancel 由同步 request token、actor path 与下游围栏共同处理。production 按冻结 reviewer exact binding 逐代 fresh-resolve provider wrapper；timeout/cancel 只影响当前 call，若已有 active generation 就只 retire 该代，late/duplicate output 无权影响新代或执行工具。`ToolCallingProvider.stream` 必须立即返回 request-owned stream，并传播 consumer termination；不得用 `Task.detached` 宣称支持同步永久阻塞实现。旧 `provider_still_stopping` 只保留 legacy decode。Phase A 后 GUI composer 始终可编辑，Send 先冻结并持久化本地提交；reviewer 未就绪只显示状态并使后续 ask-class tool fail closed，不阻止普通主请求。CLI `/auto` 重启，只有用户明确 `/default` 才进入人工模式。审查者不得作为普通 send/delegate/message/ask 目标，不得运行嵌套 `AgentLoop`。
+- Cowork 链路：`CoworkViewModel` → `GoalInputParser` + `CoworkMentionRouter` → `SubmittedIntentStore`（outbox → 原子 `user_message + queued`）→ `Orchestrator.runtime`（先取得 session writer lease）→ FIFO scheduler → 共享 headless `AgentRuntime.cowork` → `AgentLoop` → `PermissionEngine` → durable tool execution ticket → executor → `EventLog`；`MessageBus` → `Mediator`。fresh Cowork 在任何模型请求前，以同一原子 10-event batch 登记完整 session settings，以及 `@main`、`@permission-reviewer`、`@judge` 各自的 workspace/capability lease 和 identity。三者 identity/lease 独立并使用同一 canonical workspace；reviewer 继承 Main 的 initial exact binding，固定 read_only、空工具/通信/委派且 depth 0；Judge 使用 `judge_model` 的独立 exact binding（字段缺失时继承配置 `model`），固定 read_only ordinary data-plane、depth 0，使用普通只读 worker capability，不可 attach/spawn/remove、不会被 auto delegation 选择，但可被显式 task/message/delegation 使用。显式 `judge_model` 无法解析时 fresh 创建 fail closed；注册不调用模型/provider，历史 session 不回填 Judge。
+- GUI/CLI 默认启用 `@permission-reviewer` 保留控制面 agent，`AgentPermissionResponder` 把结构化 `PermissionReviewTask` 交给独立 `PermissionReviewControlPlane` FIFO/single-flight；reviewer 有独立 timeout/cancel 与可选 soft token warning，不占普通 scheduler 槽，只返回 `allow` / `deny`。reviewer 默认不得注入 `temperature`、output-token 或字符上限；只有用户/host 显式策略或真实上游/上下文约束存在时才可传递相应控制。request/settled 均先落 EventLog，allow 只有 settled 成功后生效；pre-submit caller cancel 直接返回 typed deny、不创建 review lifecycle；timeout、malformed、provider/persistence failure 和已登记 review 在 terminal-claim 前被观察到的 cancel durable deny 当前调用，不转 GUI 人工等待；claim 后 cancel 保留唯一 settlement 但最终 authorization delivery deny。每个 provider dispatch 都使用 exact `{reviewTaskID, nonce}` generation；provider/timeout 竞争同代首 terminal，caller cancel 由同步 request token、actor path 与下游围栏共同处理。production 按冻结 reviewer exact binding 逐代 fresh-resolve provider wrapper；timeout/cancel 只影响当前 call，若已有 active generation 就只 retire 该代，late/duplicate output 无权影响新代或执行工具。`ToolCallingProvider.stream` 必须立即返回 request-owned stream，并传播 consumer termination；不得用 `Task.detached` 宣称支持同步永久阻塞实现。旧 `provider_still_stopping` 只保留 legacy decode。Phase A 后 GUI composer 始终可编辑，Send 先冻结并持久化本地提交；reviewer 未就绪只显示状态并使后续 ask-class tool fail closed，不阻止普通主请求。CLI `/auto` 重启，只有用户明确 `/default` 才进入人工模式。审查者不得作为普通 send/delegate/message/ask 目标，不得运行嵌套 `AgentLoop`。
 - 权限 3 层：`DeterministicPolicyGate`（纯函数、模型无关、deny 终局；普通写入/网络/exec 进入 ask 流）→ `ModelPermissionReviewer`（只能收窄 gate `pass`，不能放行 hard deny）→ `PermissionEngine`（`askUser` 交给当前 `PermissionResponder`；Cowork 自动模式只接受 control-plane allow/deny，人工模式须由用户显式切换）。
 - Phase C 权限/turn 合同：每个新 Chat/Code/Cowork turn 使用稳定 `TurnID` 并追加唯一语义的 `turn_outcome`；权限请求携带 turn/tool-call/authorization correlation 与 manual/automatic mode。`EventLog.registerPermissionRequest` 对同一 RequestID first-write-wins，`settlePermissionRequest` 在 complete-known history 与跨进程锁内执行 first-terminal CAS：exact duplicate 幂等，冲突 payload/terminal fail closed。人工 `Decline Call` 只写当前 call 的 typed denied `tool_result` 并允许模型继续；`Cancel Turn` 写 permission terminal 后中断整个 turn，禁止伪造 denied tool result。user/policy/reviewer/sandbox/runtime/cancel 必须保留 typed source；明确的 sandbox wrapper startup denial 结算为 `sandbox_denied/not_started` 且不自动 retry，普通 nonzero/EPERM 不得误分类。权限投影保持 FIFO，重显复用同一 RequestID，任意一项终结不得重排其余项；取消/终止必须先 drain tool/provider 清理，再写 task/turn terminal 并恢复 caller。
 - Phase L 应用生命周期：macOS 的 Chat/Code/Cowork runtime 由进程级 `AppSessionRuntimeManager` 按 exact `{SessionKind, SessionID}` 持有，窗口只持有当前展示选择；切换 mode/session、Command-W 或关闭最后窗口不得隐式 stop。删除 session 必须先精确 drain 对应 runtime，其他窗口收到 removal 后退出已删除详情。Command-Q 先关闭新操作 admission，再同时广播所有 runtime stop，并在有界 deadline 后允许进程退出；超时不伪造 settled。冷启动只 replay/reconcile：历史 active Goal durable 转为 paused（达到预算则 budget-limited），历史 running/stopping 由既有恢复路径显示 interrupted，不自动调用 provider；只有明确 Retry、Resume、Send 或 CLI `/auto|/default` 后的显式 data-plane 动作才可继续。Chat/Code/Cowork shutdown 均须取消并等待本 runtime 已登记的 provider/tool/operation task，再释放权限 waiter、subscription 与 workspace scope。
@@ -113,17 +130,17 @@ managed-terminal Seatbelt、Hardened Runtime、签名/公证或 iOS 平台边界
 
 ## 文档索引
 
-- `docs/COUNcis_IDENTITY.md`：Councis 身份、差异化方向，以及“当前事实”和“后续目标”的边界。
+- `docs/COUNcis_IDENTITY.md`：Councis 固定 `@judge` 身份与提示词/Skill 修饰的范围及非目标。
 - `docs/INTATIS_BASELINE.md`：本次直接根工作树快照的来源、范围和复现边界。
 - `docs/PROJECT_MAP.md`：目录、target、入口、关键文件、生成物和脚本地图。
 - `docs/MACOS_DISTRIBUTION.md`：macOS Developer ID 直接分发决策、遗留
   App Store target 状态、仍须保留的运行时安全边界和默认验证矩阵。
 - `docs/ARCHITECTURE.md`：总体架构、主要链路、数据模型、权限与安全机制。
-- `docs/CURRENT_STATE.md`：当前真实状态、已有能力、风险、工作区改动。
+- `docs/CURRENT_STATE.md`：Intatis 快照当前能力，以及 Councis 文档覆盖与实现状态。
 - `docs/TESTING.md`：环境、构建、测试、lint/format 与手动验证方式。
 - `docs/DO_NOT_BREAK.md`：工程禁区、数据格式、协议、路径和回归要求。
 - `docs/OPEN_SOURCE_REUSE.md`：开源源码/公开 prompt/依赖准入、provenance、Apple-first 集成、NOTICE 与上游升级规则。
-- `docs/NEXT_TARGET.md`：临时下一目标记录；目标完成或不再有效后删除。
+- `docs/NEXT_TARGET.md`：Councis 唯一下一目标；不得把继承的 Intatis 发版任务自动当作本项目路线图。
 - `docs/COWORK_PRINCIPLES.md`：Cowork 架构原则（agent 身份/任务契约/能力租约/上下文投影/递归禁止/安全边界/实现顺序/测试期望）。
 
 ## 完成标准

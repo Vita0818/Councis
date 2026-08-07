@@ -400,7 +400,7 @@ final class MCPCLIProcessOwnerTests:
                     .readDataToEndOfFile(),
             as: UTF8.self)
         XCTAssertEqual(process.terminationStatus, 0)
-        XCTAssertTrue(stdout.contains("Intatis"))
+        XCTAssertTrue(stdout.contains("Councis"))
         XCTAssertTrue(stdout.contains("cli-no-mcp-model"))
         XCTAssertTrue(stdout.contains("code"))
         XCTAssertFalse(stdout.contains("Code session "))

@@ -16,6 +16,9 @@ final class SessionProjectionStoreTests: XCTestCase {
         let reviewerCapability = CapabilityLease(
             tools: [], communication: .none, delegation: .none,
             expiresAtTaskCompletion: false)
+        let judgeWorkspace = WorkspaceLease(rootPath: fixture.workspace.path, access: .readOnly)
+        var judgeCapability = CapabilityLease.worker(workspaceAccess: .readOnly)
+        judgeCapability.expiresAtTaskCompletion = false
         try await fixture.log.append([
             .sessionSettingsUpdated(SessionSettingsUpdatedPayload(
                 revision: 1,
@@ -43,20 +46,34 @@ final class SessionProjectionStoreTests: XCTestCase {
                 model: binding.modelID,
                 profile: "read_only",
                 agentInferenceBinding: binding)),
+            .workspaceLeaseGranted(WorkspaceLeaseGrantedPayload(
+                agent: AgentID(rawValue: "judge"), lease: judgeWorkspace)),
+            .capabilityLeaseCreated(CapabilityLeaseCreatedPayload(
+                agent: AgentID(rawValue: "judge"), lease: judgeCapability)),
+            .agentAttached(AgentAttachedPayload(
+                agent: AgentID(rawValue: "judge"),
+                path: fixture.workspace.path,
+                model: binding.modelID,
+                profile: "read_only",
+                agentInferenceBinding: binding)),
         ])
 
         let first = try await SessionProjectionStore.rebuild(from: fixture.log)
-        XCTAssertEqual(first.projectedThroughSeq, 6)
+        XCTAssertEqual(first.projectedThroughSeq, 9)
         XCTAssertEqual(first.settingsRevision, 1)
         var canonicalSettings = settings
         canonicalSettings.defaultProviderID = nil
         XCTAssertEqual(first.coworkSettings, canonicalSettings)
-        XCTAssertEqual(first.agentRegistrations.map(\.agent.rawValue), ["main", "permission-reviewer"])
+        XCTAssertEqual(
+            Set(first.agentRegistrations.map(\.agent.rawValue)),
+            Set(["main", "permission-reviewer", "judge"]))
         XCTAssertEqual(Set(first.workspaceCapabilities.map(\.access)), Set([.readWrite, .readOnly]))
         XCTAssertEqual(first.capabilitySummaries.first(where: {
             $0.agent == AgentID(rawValue: "permission-reviewer")
         })?.tools, [])
-        XCTAssertEqual(first.agentRegistrations.map(\.agentInferenceBinding), [binding, binding])
+        XCTAssertEqual(
+            first.agentRegistrations.map(\.agentInferenceBinding),
+            [binding, binding, binding])
 
         let projectionURL = SessionProjectionStore.fileURL(for: fixture.log)
         try FileManager.default.removeItem(at: projectionURL)

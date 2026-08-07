@@ -41,16 +41,20 @@ public struct ResolvedAgentRuntimeRoute: Sendable {
     }
 }
 
-/// One atomically resolved Chat route. Provider-hosted search may use a
-/// separately configured endpoint/model, while ordinary turns keep using the
-/// visible Chat selection.
+/// One atomically resolved Chat route. Provider, model, effective variant
+/// options, and optional provider-hosted search dialect all belong to the
+/// user's current exact Chat selection.
 public struct ResolvedChatRuntimeRoute: Sendable {
     public let provider: ChatProvider
     public let model: ModelID
+    public let webSearch: ChatWebSearchConfiguration?
 
-    public init(provider: ChatProvider, model: ModelID) {
+    public init(provider: ChatProvider,
+                model: ModelID,
+                webSearch: ChatWebSearchConfiguration? = nil) {
         self.provider = provider
         self.model = model
+        self.webSearch = webSearch
     }
 }
 
@@ -93,17 +97,43 @@ public actor ProviderRegistry {
         try await chatProvider(for: config.models.chat)
     }
 
-    /// Resolves the transparent hosted-search provider and model as one
-    /// actor-isolated operation. A missing search binding deliberately falls
-    /// back to the ordinary Chat route; an invalid configured binding fails
-    /// instead of silently changing providers.
-    public func hostedSearchChatRuntimeRoute() async throws
-        -> ResolvedChatRuntimeRoute
+    /// Resolves one exact Chat selection. The legacy `models.webSearch`
+    /// binding is deliberately ignored: hosted search can only be advertised
+    /// by the current route when both its model capability and exact adapter
+    /// dialect are known. Unsupported/unknown search remains an ordinary Chat
+    /// request on the same provider and model without a user-facing warning.
+    public func chatRuntimeRoute(model overrideModel: ModelID? = nil)
+        async throws -> ResolvedChatRuntimeRoute
     {
-        let ref = config.models.webSearch ?? config.models.chat
+        let selected = config.models.chat
+        let ref = ModelRef(
+            endpoint: selected.endpoint,
+            model: overrideModel ?? selected.model)
+        guard let endpoint = config.endpoint(id: ref.endpoint) else {
+            throw IntatisError.config("unknown endpoint '\(ref.endpoint)'")
+        }
+
+        let requestAdapter = endpoint.requestAdapter(for: ref.model)
+        // Search capability must never mask an unsupported ordinary Chat
+        // adapter. Validate the primary route before planning the optional
+        // hosted-search extension.
+        _ = try requestAdapter.chatCompletionsAdapter()
+
+        let webSearch: ChatWebSearchConfiguration?
+        if endpoint.capabilities(for: ref.model)
+            .contains(.hostedWebSearch),
+           let dialect = requestAdapter.hostedWebSearchDialect() {
+            webSearch = ChatWebSearchConfiguration(
+                dialect: dialect,
+                contextSize: .medium)
+        } else {
+            webSearch = nil
+        }
+
         return ResolvedChatRuntimeRoute(
             provider: try await chatProvider(for: ref),
-            model: ref.model)
+            model: ref.model,
+            webSearch: webSearch)
     }
 
     /// Runs a minimal model-backed request and returns a user-facing diagnostic
@@ -360,14 +390,38 @@ public actor ProviderRegistry {
         }
     }
 
-    public func transcriptionProvider(for ref: ModelRef) async throws -> TranscriptionProvider {
+    public func imageEditingProvider(for ref: ModelRef) async throws -> ImageEditingProvider {
         guard let endpoint = config.endpoint(id: ref.endpoint) else {
             throw IntatisError.config("unknown endpoint '\(ref.endpoint)'")
         }
         let apiKey = try await resolver.secret(for: endpoint.apiKeyRef)
         switch endpoint.wire {
         case .openai:
-            return OpenAITranscriptionProvider(endpoint: endpoint, apiKey: apiKey, http: dataClient)
+            return OpenAIImageProvider(endpoint: endpoint, apiKey: apiKey, http: dataClient)
+        }
+    }
+
+    public func transcriptionProvider(for ref: ModelRef) async throws -> TranscriptionProvider {
+        guard let endpoint = config.endpoint(id: ref.endpoint) else {
+            throw IntatisError.config("unknown endpoint '\(ref.endpoint)'")
+        }
+        let adapter = try endpoint.requestAdapter(for: ref.model)
+            .transcriptionAdapter()
+        let requestEncoding: TranscriptionRequestEncoding
+        switch adapter {
+        case .openAICompatibleMultipart:
+            requestEncoding = .multipartFormData
+        case .openRouterJSONBase64:
+            requestEncoding = .jsonBase64
+        }
+        let apiKey = try await resolver.secret(for: endpoint.apiKeyRef)
+        switch endpoint.wire {
+        case .openai:
+            return OpenAITranscriptionProvider(
+                endpoint: endpoint,
+                apiKey: apiKey,
+                http: dataClient,
+                requestEncoding: requestEncoding)
         }
     }
 
@@ -377,9 +431,49 @@ public actor ProviderRegistry {
         return try await imageProvider(for: ref)
     }
 
+    /// Uses the same host-owned `image_model` route as generation. The model
+    /// never selects a provider or model through `edit_image` arguments.
+    public func defaultImageEditingProvider() async throws -> ImageEditingProvider? {
+        guard let ref = config.models.imageGen else { return nil }
+        return try await imageEditingProvider(for: ref)
+    }
+
     public func defaultTranscriptionProvider() async throws -> TranscriptionProvider? {
         guard let ref = config.models.transcription else { return nil }
         return try await transcriptionProvider(for: ref)
+    }
+
+    /// Builds the single recorded-file runtime without resolving its
+    /// credential. This mirrors Flotis's adapter-plan boundary while keeping
+    /// Intatis configuration intentionally narrow: WAV/16 kHz/mono and the
+    /// duration/upload bounds are host defaults, not new settings fields.
+    public func configuredTranscriptionRuntime() throws
+        -> ConfiguredTranscriptionRuntime? {
+        guard let ref = config.models.transcription else { return nil }
+        guard let endpoint = config.endpoint(id: ref.endpoint) else {
+            throw IntatisError.config(
+                "unknown endpoint '\(ref.endpoint)'")
+        }
+        _ = try endpoint.requestAdapter(for: ref.model)
+            .transcriptionAdapter()
+        return ConfiguredTranscriptionRuntime(
+            model: ref,
+            audio: RecordedFileTranscriptionConfiguration(
+                format: .wav,
+                sampleRate: 16_000,
+                channels: 1,
+                maximumRecordingDurationSeconds: 120,
+                stopLeadSeconds: 0,
+                maximumUploadBytes: maximumTranscriptionUploadBytes))
+    }
+
+    /// Returns the exact host-configured transcription route without resolving
+    /// its credential. Composer voice input freezes this reference when
+    /// recording starts, then resolves the provider only when audio is ready to
+    /// transcribe. A missing endpoint or unsupported adapter is a configuration
+    /// error rather than a reason to fall back to the current Chat model.
+    public func configuredTranscriptionModelRef() throws -> ModelRef? {
+        try configuredTranscriptionRuntime()?.model
     }
 
     public func imageModel() -> ModelID? { config.models.imageGen?.model }

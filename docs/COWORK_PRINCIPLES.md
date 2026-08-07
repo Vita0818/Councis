@@ -1,8 +1,8 @@
 # COWORK_PRINCIPLES
 
 文档状态：当前 Cowork/AgentKernel 原则
-最近核对：2026-08-03
-产品基线：v0.5（build 33）
+最近核对：2026-08-05
+产品基线：v0.36（build 36）
 
 本文提炼自仓内 v0.10 历史 Cowork 设计文档、`PER_AGENT_INFERENCE_PROFILES.md` 及
 项目操作规则。旧设计文档只保留迁移 provenance；本文件是当前原则基准，**不是**完成度
@@ -52,6 +52,8 @@ Task Graph + Scheduler  任务图 + 调度器驱动协作
 
 ### 2.1 Agent Identity
 Agent 是持久本地身份。应含 `id` / `displayName` / exact `AgentInferenceBinding` / `workspace lease or default workspace` / `local memory or mailbox` / `status`。兼容 `model` 字段不能覆盖 exact binding。**不应**含永久 "leaf" 或 "coordinator" 角色。
+
+必须区分 durable identity history 与 live operational roster。`agent_detached` 终止当前运行时成员资格、lease 与可操作入口，但不抹除该 identity 已写入 EventLog 的对话和生命周期。GUI 的 session 历史目录保留所有曾 durable attach/spawn 的 agent；ordinary detached agent 仍可只读查看，当前正在查看它时不得强制跳回 `@main`，状态由既有状态图标显示为 detached。send/delegate/message/ask/rebind/remove、workspace 恢复与 capability 引用判断仍只接受 live roster；控制面 identity 即使保留在历史目录也继续 status-only。
 
 ### 2.2 Task Contract（AgentInvocation 层）
 角色按 AgentInvocation 分派。Task contract 应告诉 agent 它为何存在于当前工作流、预期交付什么；它不是用户可见 WorkTask。建议 shape：
@@ -144,6 +146,8 @@ Task lifecycle 是 durable state machine：
 created -> assigned -> queued -> running -> completed | failed | cancelled
 failed | cancelled -> queued  only through an explicit bounded retry attempt
 ```
+一次 Cowork turn 的自然语言 final 不是独立 authority。AgentLoop 必须先完成 host-derived side-effect evidence 校验；只有通过后，final message/model-history、idle 与 `turn_outcome(completed)` 才能在一个 EventLog batch 发布。failed/interrupted outcome 必须让 presentation 和下一轮 provider history 都拒绝旧日志里先写出的 final assistant，同时保留真实 user/tool 协议历史；同一 TurnID 的冲突 terminal fail closed。
+
 恢复时不能默认把所有 running 任务整段重放。每个实际 tool executor 调用前必须先持久化 execution ticket，结果持久化后再 settle；只有明确 eligible 的 non-root/CLI recovery task 内的普通 read-only 调用可自动重放；GUI restored root 不适用。write/exec/network/destructive 与通信、委派、spawn/remove 等协作副作用处于“prepared 但未 settled”时，任务必须进入人工对账失败态，不能自动增加 attempt。只有明确 eligible 的 non-root/CLI read-only running task 才可在新 attempt 的 queue 事件成功落盘后重排；Phase A GUI restored root submission 始终 paused/interrupted，必须 exact Retry；半完成 admission、耗尽 attempts 或缺失关键 lease 也必须明确失败。执行应有 bounded timeout/cancel、attempt 和明确标为 soft 的 session token budget；模型缺完成标记、迭代耗尽或不完整 finish reason 都是失败。
 
 这里的判断单位是“这一次具体调用是否可能已经产生副作用”，不是只看工具静态类别。write 类工具继续默认 non-replayable；只有拥有 mutation boundary 的受信实现或 prepare 前 durable state 能证明该边界未被跨越时，才能追加可选 `effectDisposition=not_started` 的失败/取消 settlement。typed ordinary failure 可作为 observation 回灌同一 Agent turn；pre-executor cancellation 结算后仍中断 turn；legacy repair 只对账 EventLog，不存在当前 turn。新成功 settlement 必须显式标为 `committed`；legacy nil+succeeded 仅兼容成已完成效果并继续阻断 whole-task retry。生产 Orchestrator 的 `task_update` stale revision 是当前首个精确 no-effect case；公共 manager 的同名错误、普通 error、timeout、executor 内 cancellation、legacy failure nil/unknown 都不能套用。Projection 对 execution ID 坚持一次 prepare：第二个 prepare 即使相同也永久 ambiguous，冲突 terminal 同样保留首记录并永久 ambiguous；只有完全相同 terminal 可幂等，`succeeded + not_started` 是无效矛盾并进入 uncertain。旧日志修复必须先由 `replayForProjectionChecked()` + `hasCompleteKnownHistory` 证明历史完整，并且只能发生在无 current Goal、exact 唯一 prepare、没有任何 settlement/ambiguity、JSON safe integer 与 prepare 前 monotonic revision proof 同时成立时，不得解析自由文本或用 prepare 后状态猜测。Goal startup/进程内 launch、Orchestrator restore 与 whole-task retry 都必须使用同一 complete-known-history gate；unknown future type 或 seq gap 不能支持 absence/order proof。任务级确定错误应局部终结，不应无条件升级成整个 session 不可输入；无 Goal 的隔离仍须证明 exact contract-before-prepare、正 attempt 与 exact-attempt terminal-after-prepare，无法归属、损坏/不完整历史、非终态任务与任何 current Goal 的 uncertain 副作用保持 fail closed。
@@ -156,9 +160,22 @@ Goal Verifier 是另一条独立控制面，职责仅是判定 Goal 是否已有
 
 Goal 生命周期必须由 host 串行化：start、ordinary turn、Goal mutation 与 stop/shutdown 分别有 single-flight/mutation/stop gate；pending durable stop 未结算前不得启动新 run，start 取消后若已创建 continuation，必须先 scoped cancel、等待退出并 checkpoint 才返回失败。restore 必须持续暂停 scheduler，直到 roster/reviewer/main 与 Goal recovery/reconcile 完成。GUI 随后只释放新工作并继续围栏 restored roots；CLI 才执行显式 data-plane resume。Cowork `/goal` 是明确 host action；普通自然语言只有在窄、确定性的中英文持续目标分类器命中时才可为本轮提供 create intent，复杂请求、Goal 提及、一次性目标、引用示例或附件内容不得提升权限。
 
-模型可见的 agent/task/message/goal/session 操作与文件、网络、文档工具遵循同一个 ToolCall 协议。WorkTask CRUD、Goal create/update 与 session rename 都必须先过 schema、lease（Cowork）与 PermissionEngine；`rename_session` 的 exact current-session/no-path/no-network/no-data-effect intent 可由 deterministic gate 低风险放行，但 near-miss 与 locked 状态不能借此绕过。worker 默认只能读取 Goal/相关 WorkTask，并更新自己当前绑定的 WorkTask，不能改 DAG/owner/priority/retry/cancel、提交 Goal verdict或改 session 名称。一个外部 ToolCall 只能有一个权限决定；`spawn_agent` / 原子 `delegate_task` 获准后，内部 roster、lease、mailbox、task graph 与 scheduler admission 必须作为 executor 的 durable transaction 完成，不能再次递归进入 PermissionEngine。Code 与 Cowork agent 共用 headless `AgentRuntime`；首个 system message 必须稳定声明 Intatis 模式、API tools 权威性、严格 JSON Schema 与 ToolResult 完成语义，动态 workspace/task/lease/goal/run 数据仍放在 user-role untrusted context。
+模型可见的 agent/task/message/goal/session 操作与文件、网络、文档工具遵循同一个 ToolCall 协议。WorkTask CRUD、Goal create/update 与 session rename 都必须先过 schema、lease（Cowork）与 PermissionEngine；`task_get/update` 使用 durable WorkTask ID（正常为 `wt_…`）和最新 authoritative revision，不能把 AgentInvocation `task_…` ID 或旧 revision 当成 WorkTask authority，也不能重复 settle 已 terminal 的 WorkTask。WorkTask permission preview 只提供 bounded、脱敏的语义字段，完整执行参数继续由 digest/count 和 immutable authorization 绑定。`rename_session` 的 exact current-session/no-path/no-network/no-data-effect intent 可由 deterministic gate 低风险放行，但 near-miss 与 locked 状态不能借此绕过。worker 默认只能读取 Goal/相关 WorkTask，并更新自己当前绑定的 WorkTask，不能改 DAG/owner/priority/retry/cancel、提交 Goal verdict或改 session 名称。一个外部 ToolCall 只能有一个权限决定；`spawn_agent` / 原子 `delegate_task` 获准后，内部 roster、lease、mailbox、task graph 与 scheduler admission 必须作为 executor 的 durable transaction 完成，不能再次递归进入 PermissionEngine。Code 与 Cowork agent 共用 headless `AgentRuntime`；首个 system message 必须稳定声明 Intatis 模式、API tools 权威性、严格 JSON Schema 与 ToolResult 完成语义，动态 workspace/task/lease/goal/run 数据仍放在 user-role untrusted context。
 
 ### 2.3b Coordinator routing Skill
+
+拥有 coordinator lease 的 agent 默认是主动执行者，而不是等待用户逐步给出下一步：每个请求先
+建立本轮执行目标、交付物、约束和验证方式，检查 bounded Skill catalog 并激活/完整读取明确相关的
+exact Skill；非简单工作在 task tools 可用时建立最小可验证 WorkTask DAG，持续更新开始、进展、
+阻塞、重规划、result 与 evidence。它应在任务开始时识别真正受益于并行、专业能力、独立复核、
+多模态或不同 workspace 的分支，满足调度收益时尽早委派，并在子 agent 运行时继续自己的关键路径，
+最后核验报告、显式结算 WorkTask 并持续推进到验证完成或真实 blocker。这里的“本轮执行目标”不自动
+创建 durable Goal；后者仍只由用户明确要求的持续/跨 run 意图触发。
+
+主动性不改变既有边界：coordinator 仍只能使用 authoritative tool list 中的工具，Skill 仍只是上下文，
+必须服从 CapabilityLease、WorkspaceLease、PermissionEngine、exact inference binding、最小 team 与
+最小权限；一步两步可直接完成的工作不得仪式化 spawn，child report 也不能自动证明 WorkTask/Goal
+完成。普通 worker 继续只执行自己的 task，不获得上述全局拆解、spawn 或协调语义。
 
 拥有 coordinator lease 的 agent 必须在第一次 direct/reuse/delegate/spawn/profile/
 lease 调度决定前激活 exact bundled system Skill
@@ -205,7 +222,7 @@ reply_message
 
 **不要**长期用一个模糊的 `ask_agent` 操作覆盖所有用途。
 
-MessageBus 投递采用持久化的至少一次语义：先通过 Mediator，再持久化 typed message，然后进入 mailbox。只有确实投影给 agent 且该轮成功完成的 message ID 才能写 consumed event；消费确认必须先持久化再从运行时 mailbox 移除。若 owning Goal/run 在成功呈现前取消，迟到 durable message 必须以专用 discarded event durable 结算后再 ack，不能伪装成 consumed。恢复后既未 consumed 也未 discarded 的消息必须重新触发 wake task，单轮批量应有上限；旧 run discarded message 不得复活或阻塞新 run。
+MessageBus 投递采用持久化的至少一次语义：先通过 Mediator，再持久化 typed message，然后进入 mailbox。每个 new delivery invocation 必须在 `TaskContract.mailboxMessageIDs` 冻结 1–8 个 exact ID；同 batch 保持 sender/recipient/Goal-run/authority class 一致，ContextProjector 只能呈现这些 ID。ordinary delivery 只有 read-only workspace、reply-only communication 和必要读取工具；无 WorkTask/Goal mutation、spawn、delegation、shell、Git、patch、browser 或 MCP。`request_delegation` 另行收窄为最多一次、深度 1 的 delegation。只有确实投影且该轮成功完成的 ID 才能 consumed，并与 task completion 在同一 EventLog batch 落盘后再从 runtime mailbox ack。失败只重试同一 TaskID 到 `maxAttempts`；poison ID 耗尽后保持 pending、不换 TaskID，也不阻塞后来新 ID。若 owning Goal/run 在成功呈现前取消，迟到 durable message 必须以专用 discarded event durable 结算后再 ack，不能伪装成 consumed。legacy nil binding 只能按 exact causal/scope lineage 保守恢复，歧义或耗尽 fail closed；旧 run discarded message 不得复活或阻塞新 run。
 
 ## 4. 递归与循环规则
 
@@ -239,7 +256,7 @@ workspace-access.plist    schema-v1 session-owned opaque bookmark capability; ne
 - UserDefaults/旧 path map 只作迁移输入。只有 session 自己存在 ownership evidence，且 exact binding、全部必需 bookmark、primary 语义与 capability 文件都验证成功，才可追加稳定 migration marker并清理旧 key；symlink alias 必须先 resolve bookmark、启用 scope、验证 canonical identity，再把 canonical settings 写入 EventLog，最后写 marker。候选发现可跳过无关 stale evidence，但真正选中的 source 必须再次严格 resolve。marker 后禁止从 global map 恢复能力材料。
 - Session settings 本身不授予 capability/workspace lease，也不触发 provider。可恢复“登记”不等于可恢复“执行”；普通 recovered root task 不得因 projection 重建而自动续跑，active Goal 也只能在冷启动对账后 durable pause。运行中的 app 内 session 切换/Command-W 不等于 Stop；Command-Q 才对全部 runtime 发起 bounded stop，crash/reopen 只显示 reconciled interrupted/paused 状态。继续执行必须是用户显式 Send、Retry 或 Resume。
 
-工作区扩展**绝非**只读。创建或附加 agent 到新目录是能力/工作区扩展，必须经权限。唯一例外是 brand-new session 的初始 bootstrap：用户在 New Cowork Session 文件选择器或 CLI workspace 参数中明确选定 primary workspace 后，这次显式选择本身授权一个严格 settings-first 七事件合同，连续 `seq 0...6` 依次登记 settings、`@main` workspace/capability/agent、`@permission-reviewer` workspace/capability/agent。两者共享 host-selected exact inference binding，但 identity、workspace lease 与 capability lease 必须不同；reviewer 固定 read-only、空工具、无 communication/delegation、depth 0。该路径还必须要求空 EventLog、空 roster、敏感/过宽根目录拒绝、canonical identity 与 durable-first；初始化不调用模型/provider，也不能被普通 attach/spawn/tool/recovery 复用。
+工作区扩展**绝非**只读。创建或附加 agent 到新目录是能力/工作区扩展，必须经权限。唯一例外是 brand-new session 的初始 bootstrap：用户在 New Cowork Session 文件选择器或 CLI workspace 参数中明确选定 primary workspace 后，这次显式选择本身授权一个严格 settings-first 十事件合同，连续 `seq 0...9` 依次登记 settings、`@main` workspace/capability/agent、`@permission-reviewer` workspace/capability/agent、`@judge` workspace/capability/agent。三者 identity、workspace lease 与 capability lease 必须不同；reviewer 继承 Main 的 host-selected exact inference binding，固定 read-only、空工具、无 communication/delegation、depth 0；Judge 使用 `judge_model` 对应的独立 exact binding（缺失时继承配置 `model`），固定 read-only ordinary data-plane、普通只读 worker capability、depth 0。显式 Judge binding 无法解析时必须 fail closed。该路径还必须要求空 EventLog、空 roster、敏感/过宽根目录拒绝、canonical identity 与 durable-first；初始化不调用模型/provider，也不能被普通 attach/spawn/tool/recovery 复用，历史 session 不自动回填 Judge。
 
 不得让 model 静默附加到：
 ```text
@@ -253,9 +270,25 @@ secret/token/key directories
 
 所有文件访问必须经工作区约束与权限策略。
 
+`@main` 与其他 agent 本身仍只有一个 `workspaceRoot`。如果 coordinator 预先知道任务所需目录
+在根外，或直接工具返回 out-of-workspace denial，不应重复同一路径、尝试 `..`/绝对路径逃逸，
+也不应因目录内工作很小就停在错误路径上。只有当当前 authoritative tool list 包含
+`spawn_agent` 时，system prompt 才应要求它以目标绝对目录创建子 agent：默认
+`requestedAccess=read_only`，只有目录内交付物需要修改时才请求 `read_write`，并保持
+`canCoordinate=false`，除非子 agent 确实需要拥有下级任务图；spawn 成功后再用 `delegate_task`
+交付目录内工作。工具不存在或 workspace expansion 被拒时，coordinator 应报告需要的目录能力
+与 blocker；普通 worker 只报告给上级/用户，不得宣称能 spawn。这是失败后的可行动路由，不是
+对 WorkspaceLease、bookmark、PathConfinement、PermissionEngine 或 hard deny 的例外。
+
 managed terminal 不能成为这条规则的例外。macOS process/PTY 必须在 WorkspaceLease 对应的 OS sandbox 内运行并默认断网；交互输入也要经过危险命令 hard deny。输出要持续有界 drain，stdin 原文/无盐固定摘要/延迟回显不能进入 EventLog 或 agent 间消息；取消、失败、task terminal 与 runtime shutdown 必须先 drain terminal process tree，再发布上层终态。Linux 缺少可证明的 sandbox/PTY backend 时应 fail closed。
 
-新增或删除项目工作目录是 session/project metadata 变更；真正派生工作 agent 应由 `@main` 或被显式授予协调权的 agent 通过调度器和工具完成。新建子 agent 默认只获得普通 worker + read-only workspace；`requestedAccess=read_write` 和 `canCoordinate=true` 是两个独立、显式、不可超过 issuer lease 的授权维度。除非 task contract/capability lease 明确授予，不得让子 agent 继承 `@main` 的 `spawn_agent` / `remove_agent` / `delegate_task` 等 coordinator 工具。`@main` 和自动权限审查者不应作为普通删除对象。
+新增或删除项目工作目录是 session/project metadata 变更；真正派生工作 agent 应由 `@main` 或被显式授予协调权的 agent 通过调度器和工具完成。新建子 agent 默认只获得普通 worker + read-only workspace；`requestedAccess=read_write` 和 `canCoordinate=true` 是两个独立、显式、不可超过 issuer lease 的授权维度。除非 task contract/capability lease 明确授予，不得让子 agent 继承 `@main` 的 `spawn_agent` / `remove_agent` / `delegate_task` 等 coordinator 工具。`@main`、`@permission-reviewer` 和 `@judge` 都不是普通删除对象。
+
+`@judge` 是固定但普通的数据面 agent：它走既有 scheduler/mailbox/task/message 流并返回普通文本，
+不获得 coordinator 权限，也不替代 permission reviewer 或 Goal Verifier。Main 仍自主决定是否需要
+候选 agent、数量、模型、策略以及是否显式委派 Judge；`delegate_task(to:auto)` 不得自动选 Judge，
+但显式 `to:judge` 可以使用已经登记且 exact binding 可解析的 Judge。Main/model 不得 attach、spawn、
+replace 或 remove 该保留 identity。
 
 自动权限审查若启用，审查者也必须是受控子 agent：
 ```text
@@ -338,7 +371,7 @@ hard deny remains final before the reviewer can see anything
 9. Add Goal / WorkTask / ContinuationRun above the existing AgentInvocation layer without renaming old durable event types.
 10. Add host-driven continuation and an independent GoalVerifier; never let an agent self-certify Goal completion.
 11. Add versioned immutable inference catalog + exact per-agent binding before adding multi-wire, route-lease or fallback policy; do not retrofit a mutable session-global model pointer into agent identity.
-12. Keep session state EventLog-first, `session.json` rebuildable, bookmark capability session-owned, legacy migration provenance-bound, and fresh bootstrap fixed at seven local events before changing composer/reviewer/lifecycle behavior.
+12. Keep session state EventLog-first, `session.json` rebuildable, bookmark capability session-owned, legacy migration provenance-bound, and fresh bootstrap fixed at ten local events before changing composer/reviewer/lifecycle behavior.
 ```
 
 ## 8. 测试期望
@@ -359,8 +392,10 @@ terminal execution unions the mandatory credential-path floor into every current
 managed terminal uses a real controlling PTY when requested, continuously bounds/drains output, preserves newest tail, cleans descendants, and does not cap normal build-artifact file size
 delegation cycle is rejected
 workspace expansion requires permission
-fresh-session bootstrap attaches fixed @main with a host-selected exact inference binding, without model review, and cannot be reused after any durable session state exists
-fresh-session bootstrap writes exactly seven ordered events (settings, main workspace/capability/agent, reviewer workspace/capability/agent), uses distinct identities/leases, and never calls a provider
+fresh-session bootstrap attaches fixed @main, @permission-reviewer, and read-only ordinary @judge with host-selected exact inference bindings, without model review, and cannot be reused after any durable session state exists
+fresh-session bootstrap writes exactly ten ordered events (settings, main workspace/capability/agent, reviewer workspace/capability/agent, judge workspace/capability/agent), uses distinct identities/leases, and never calls a provider
+judge_model resolves independently, absent config inherits model, explicit unresolved config fails before durable session creation, and historical sessions are not backfilled
+@judge cannot be attach/spawn/remove or auto-selected, remains explicitly targetable through ordinary data-plane delegation/task/message flow, and has no coordinator/control-plane authority
 session settings protocol round-trips/legacy-decodes additively, rejects wrong session/kind/schema/revision/migration IDs, and canonical encoding omits legacy defaultProviderID
 session.json schema-v2 refresh is EventLog-wins against same-watermark and lagging corruption, serializes concurrent writers, refuses unknown future session events, and is safely rebuildable
 workspace-access.plist is schema-v1 binary owner-only 0600, validates session/path/single primary, preserves primary on bookmark refresh, and rejects unsafe lock/write states
@@ -404,6 +439,9 @@ Goal completes only after a non-empty all-proven audit; the same normalized bloc
 Goal/Tasks UI is derived from CoworkProjection, including revision/result/evidence/dependencies/invocation links, rather than TaskContract objective or transcript text
 only actually presented mailbox messages are consumed; cancelled-run messages are durably discarded, and remaining batches survive replay
 late scoped mailbox sends after cancellation are durably discarded rather than consumed, including across restore and a later run
+new mailbox tasks freeze 1-8 exact MessageIDs; success commits task completion plus consumed IDs atomically before in-memory ack
+mailbox retries preserve one TaskID and bounded attempts; an exhausted poison ID never receives a replacement TaskID and never blocks a later unbound ID
+ordinary mailbox leases are read-only/reply-only with no coordinator, mutation, terminal, Git, browser, or MCP authority; delegation requests receive at most one depth-1 delegation
 task-scoped capability/workspace leases are enforced, revoked, and safely renewed on retry
 dynamic task/message/event text stays in a bounded, escaped user-role context block
 inference catalog reuses semantically equal revisions, appends on semantic change, retains old revisions, and rejects unsafe/corrupt/insecure definitions without overwriting the store

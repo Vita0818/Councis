@@ -153,71 +153,6 @@ public struct IntatisThreadBottomAnchorID: Hashable, Sendable {
     }
 }
 
-struct IntatisThreadViewportFrames: Equatable {
-    var viewport: CGRect?
-    var bottomAnchor: CGRect?
-
-    init(viewport: CGRect? = nil, bottomAnchor: CGRect? = nil) {
-        self.viewport = viewport
-        self.bottomAnchor = bottomAnchor
-    }
-
-    static func isBottomAnchorVisible(
-        _ frames: Self,
-        tolerance: CGFloat = 1
-    ) -> Bool? {
-        guard let viewport = frames.viewport,
-              let bottomAnchor = frames.bottomAnchor,
-              viewport.width > 0,
-              viewport.height > 0 else {
-            return nil
-        }
-        return bottomAnchor.minY >= viewport.minY - tolerance
-            && bottomAnchor.maxY <= viewport.maxY + tolerance
-    }
-}
-
-struct IntatisThreadViewportFramesPreferenceKey: PreferenceKey {
-    static let defaultValue = IntatisThreadViewportFrames()
-
-    static func reduce(
-        value: inout IntatisThreadViewportFrames,
-        nextValue: () -> IntatisThreadViewportFrames
-    ) {
-        let next = nextValue()
-        if let viewport = next.viewport {
-            value.viewport = viewport
-        }
-        if let bottomAnchor = next.bottomAnchor {
-            value.bottomAnchor = bottomAnchor
-        }
-    }
-}
-
-extension View {
-    func intatisThreadViewportFrameProbe() -> some View {
-        background {
-            GeometryReader { geometry in
-                Color.clear.preference(
-                    key: IntatisThreadViewportFramesPreferenceKey.self,
-                    value: IntatisThreadViewportFrames(
-                        viewport: geometry.frame(in: .global)))
-            }
-        }
-    }
-
-    func intatisThreadBottomAnchorFrameProbe() -> some View {
-        background {
-            GeometryReader { geometry in
-                Color.clear.preference(
-                    key: IntatisThreadViewportFramesPreferenceKey.self,
-                    value: IntatisThreadViewportFrames(
-                        bottomAnchor: geometry.frame(in: .global)))
-            }
-        }
-    }
-}
-
 enum IntatisThreadScrollReason: Equatable, Sendable {
     case initialRestore
     case liveUpdate
@@ -1556,26 +1491,113 @@ private struct IntatisSubtleContentSurfaceModifier: ViewModifier {
     }
 }
 
-private struct IntatisLiquidGlassModifier: ViewModifier {
+/// A content-independent native Glass node. Keeping this in its own Equatable
+/// view gives passive cards a stable optical identity while labels, counters
+/// and selection affordances above it update independently.
+private struct IntatisClearLiquidGlassBackdrop: View, Equatable {
     let cornerRadius: CGFloat
     let isInteractive: Bool
+    let displayScale: CGFloat
+    let colorScheme: ColorScheme
 
-    @ViewBuilder func body(content: Content) -> some View {
+    static func == (
+        lhs: IntatisClearLiquidGlassBackdrop,
+        rhs: IntatisClearLiquidGlassBackdrop
+    ) -> Bool {
+        lhs.cornerRadius == rhs.cornerRadius
+            && lhs.isInteractive == rhs.isInteractive
+            && lhs.displayScale == rhs.displayScale
+            && lhs.colorScheme == rhs.colorScheme
+    }
+
+    @ViewBuilder var body: some View {
         #if compiler(>=6.2)
         if #available(macOS 26.0, iOS 26.0, *) {
-            content.glassEffect(
-                isInteractive ? .regular.interactive() : .regular,
-                in: .rect(cornerRadius: cornerRadius))
+            let glass = isInteractive
+                ? Glass.clear.interactive()
+                : Glass.clear
+            Color.clear
+                .glassEffect(
+                    glass,
+                    in: .rect(cornerRadius: cornerRadius))
+                .glassEffectTransition(.identity)
+                .overlay {
+                    stableOutline
+                }
         } else {
-            fallback(content)
+            fallback
         }
         #else
-        fallback(content)
+        fallback
         #endif
     }
 
-    private func fallback(_ content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    private var stableOutline: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .strokeBorder(
+                intatisPlatformSeparator.opacity(0.42),
+                lineWidth: max(1 / max(displayScale, 1), 0.5))
+            .allowsHitTesting(false)
+    }
+
+    private var fallback: some View {
+        let shape = RoundedRectangle(
+            cornerRadius: cornerRadius,
+            style: .continuous)
+        return Color.clear
+            .background(.ultraThinMaterial, in: shape)
+            .overlay {
+                shape.stroke(
+                    intatisPlatformSeparator.opacity(0.55),
+                    lineWidth: 0.5)
+            }
+    }
+}
+
+private struct IntatisLiquidGlassModifier: ViewModifier {
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.colorScheme) private var colorScheme
+
+    let cornerRadius: CGFloat
+    let isInteractive: Bool
+    let usesClearVariant: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if usesClearVariant {
+            content.background {
+                IntatisClearLiquidGlassBackdrop(
+                    cornerRadius: cornerRadius,
+                    isInteractive: isInteractive,
+                    displayScale: displayScale,
+                    colorScheme: colorScheme)
+                    .equatable()
+            }
+        } else {
+            regularGlass(content)
+        }
+    }
+
+    @ViewBuilder private func regularGlass(_ content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            let glass = isInteractive
+                ? Glass.regular.interactive()
+                : Glass.regular
+            content.glassEffect(
+                glass,
+                in: .rect(cornerRadius: cornerRadius))
+        } else {
+            regularFallback(content)
+        }
+        #else
+        regularFallback(content)
+        #endif
+    }
+
+    private func regularFallback(_ content: Content) -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: cornerRadius,
+            style: .continuous)
         return content
             .background(.regularMaterial, in: shape)
             .overlay {
@@ -1630,7 +1652,19 @@ public extension View {
                             interactive: Bool = false) -> some View {
         modifier(IntatisLiquidGlassModifier(
             cornerRadius: cornerRadius,
-            isInteractive: interactive))
+            isInteractive: interactive,
+            usesClearVariant: false))
+    }
+
+    /// A lower-light native glass surface for passive floating status cards.
+    /// It keeps the system edge/refraction response while allowing the shared
+    /// conversation canvas to remain the dominant visual surface.
+    func intatisClearLiquidGlass(cornerRadius: CGFloat = 16,
+                                 interactive: Bool = false) -> some View {
+        modifier(IntatisLiquidGlassModifier(
+            cornerRadius: cornerRadius,
+            isInteractive: interactive,
+            usesClearVariant: true))
     }
 
     /// Native glass button artwork on current systems, native bordered fallback.
@@ -2131,17 +2165,20 @@ public struct IntatisThreadComposerSecondaryAction {
     public var help: String
     public var isBusy: Bool
     public var isDisabled: Bool
+    public var blocksSubmission: Bool
     public var action: () -> Void
 
     public init(systemImage: String,
                 help: String,
                 isBusy: Bool = false,
                 isDisabled: Bool = false,
+                blocksSubmission: Bool = false,
                 action: @escaping () -> Void) {
         self.systemImage = systemImage
         self.help = help
         self.isBusy = isBusy
         self.isDisabled = isDisabled
+        self.blocksSubmission = blocksSubmission
         self.action = action
     }
 }
@@ -2164,6 +2201,7 @@ public struct IntatisThreadComposer: View {
     private let isInputDisabled: Bool
     private let style: IntatisThreadStyle
     private let secondaryAction: IntatisThreadComposerSecondaryAction?
+    private let trailingAction: IntatisThreadComposerSecondaryAction?
     private let stopAction: IntatisThreadComposerSecondaryAction?
     private let accessory: AnyView?
     private let leadingAccessory: AnyView?
@@ -2187,6 +2225,7 @@ public struct IntatisThreadComposer: View {
                 secondaryAction: IntatisThreadComposerSecondaryAction? = nil,
                 leadingAccessory: AnyView? = nil,
                 inputLeadingAccessory: AnyView? = nil,
+                trailingAction: IntatisThreadComposerSecondaryAction? = nil,
                 stopAction: IntatisThreadComposerSecondaryAction? = nil,
                 accessory: AnyView? = nil,
                 onSend: @escaping () -> Void) {
@@ -2196,6 +2235,7 @@ public struct IntatisThreadComposer: View {
         self.isInputDisabled = isInputDisabled
         self.style = style
         self.secondaryAction = secondaryAction
+        self.trailingAction = trailingAction
         self.stopAction = stopAction
         self.accessory = accessory
         self.leadingAccessory = leadingAccessory
@@ -2211,6 +2251,7 @@ public struct IntatisThreadComposer: View {
                                  secondaryAction: IntatisThreadComposerSecondaryAction? = nil,
                                  leadingAccessory: AnyView? = nil,
                                  inputLeadingAccessory: AnyView? = nil,
+                                 trailingAction: IntatisThreadComposerSecondaryAction? = nil,
                                  stopAction: IntatisThreadComposerSecondaryAction? = nil,
                                  @ViewBuilder accessory: () -> Accessory,
                                  onSend: @escaping () -> Void) {
@@ -2220,6 +2261,7 @@ public struct IntatisThreadComposer: View {
         self.isInputDisabled = isInputDisabled
         self.style = style
         self.secondaryAction = secondaryAction
+        self.trailingAction = trailingAction
         self.stopAction = stopAction
         self.accessory = AnyView(accessory())
         self.leadingAccessory = leadingAccessory
@@ -2269,6 +2311,9 @@ public struct IntatisThreadComposer: View {
         ) {
             inputLeadingControls
             inputControl
+            if let trailingAction {
+                compactActionButton(trailingAction)
+            }
             if let stopAction {
                 stopButton(stopAction)
             } else {
@@ -2602,11 +2647,17 @@ enum IntatisThreadActivity {
     }
 }
 
+public enum IntatisThreadHeaderActionPresentation: Sendable {
+    case glass
+    case compactSystemIcon
+}
+
 public struct IntatisThreadHeaderAction {
     let title: String
     let systemImage: String
     let isDisabled: Bool
     let isIconOnly: Bool
+    let presentation: IntatisThreadHeaderActionPresentation
     let help: String
     let accessibilityIdentifier: String
     let action: () -> Void
@@ -2615,6 +2666,7 @@ public struct IntatisThreadHeaderAction {
                 systemImage: String,
                 isDisabled: Bool = false,
                 isIconOnly: Bool = false,
+                presentation: IntatisThreadHeaderActionPresentation = .glass,
                 help: String? = nil,
                 accessibilityIdentifier: String? = nil,
                 action: @escaping () -> Void) {
@@ -2622,6 +2674,7 @@ public struct IntatisThreadHeaderAction {
         self.systemImage = systemImage
         self.isDisabled = isDisabled
         self.isIconOnly = isIconOnly
+        self.presentation = presentation
         self.help = help ?? title
         self.accessibilityIdentifier = accessibilityIdentifier
             ?? "thread.header.action.\(systemImage)"
@@ -2669,16 +2722,33 @@ struct IntatisWorkspaceThreadHeader: View {
             IntatisGlassEffectGroup(spacing: 8) {
                 HStack(spacing: 8) {
                     ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                        Button(action: action.action) {
-                            actionLabel(action)
-                        }
-                        .intatisGlassButton()
-                        .disabled(action.isDisabled)
-                        .help(action.help)
-                        .accessibilityIdentifier(action.accessibilityIdentifier)
+                        actionButton(action)
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder private func actionButton(
+        _ action: IntatisThreadHeaderAction
+    ) -> some View {
+        switch action.presentation {
+        case .glass:
+            Button(action: action.action) {
+                actionLabel(action)
+            }
+            .intatisGlassButton()
+            .disabled(action.isDisabled)
+            .help(action.help)
+            .accessibilityIdentifier(action.accessibilityIdentifier)
+        case .compactSystemIcon:
+            Button(action: action.action) {
+                actionLabel(action)
+            }
+            .intatisCompactIconButton()
+            .disabled(action.isDisabled)
+            .help(action.help)
+            .accessibilityIdentifier(action.accessibilityIdentifier)
         }
     }
 

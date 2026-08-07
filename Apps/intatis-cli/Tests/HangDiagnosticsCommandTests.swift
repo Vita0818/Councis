@@ -126,7 +126,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
             ])
 
         let bundle = explicitParent
-            .appendingPathComponent("Intatis-HangDiagnostics")
+            .appendingPathComponent("Councis-HangDiagnostics")
             .appendingPathComponent(report.bundleDisplayName)
         let sampleData = try XCTUnwrap(try DurableOwnerOnlyFile.read(
             from: bundle.appendingPathComponent("sample.txt")))

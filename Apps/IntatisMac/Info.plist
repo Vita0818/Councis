@@ -3,21 +3,23 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-	<string>Councis</string>
+    <string>Councis</string>
     <key>CFBundleDisplayName</key>
-	<string>Councis</string>
+    <string>Councis</string>
     <key>CFBundleIdentifier</key>
     <string>com.Vita0818.IntatisMac</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5</string>
+    <string>0.36</string>
     <key>CFBundleVersion</key>
-    <string>33</string>
+    <string>36</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 Councis contributors. See NOTICE.md.</string>
+    <string>Copyright © 2026 Councis contributors. See NOTICE.md.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Councis uses the microphone to turn voice into editable message drafts.</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
 </dict>

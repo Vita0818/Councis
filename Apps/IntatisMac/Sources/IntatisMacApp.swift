@@ -284,6 +284,15 @@ final class AppEnvironment: ObservableObject {
             throw IntatisError.config(IntatisLocalization.string(
                 "Choose a resolvable default inference profile before creating Cowork."))
         }
+        guard let judgeBinding = AppInferenceCatalogCompiler.judgeBinding(
+            catalog: providerCatalog,
+            snapshot: inferenceCatalogSnapshot) else {
+            primaryWorkspace.release()
+            let message = providerCatalog.judgeModel == nil
+                ? "The default model cannot be resolved for @judge."
+                : "The configured judge_model cannot be resolved to an exact inference profile."
+            throw IntatisError.config(IntatisLocalization.string(message))
+        }
         let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
         do {
             try WorkspaceAccess.remember(
@@ -302,6 +311,7 @@ final class AppEnvironment: ObservableObject {
                     log: coworkLog,
                     projectSettings: settings,
                     launchMode: .fresh,
+                    freshJudgeInferenceBinding: judgeBinding,
                     initialWorkspaceAccess: primaryWorkspace)
             }
         } catch {
@@ -418,6 +428,7 @@ final class AppEnvironment: ObservableObject {
         projectSettings: CoworkProjectSettings,
         launchMode: CoworkSessionLaunchMode,
         sessionStorageWarning: String? = nil,
+        freshJudgeInferenceBinding: AgentInferenceBinding? = nil,
         initialWorkspaceAccess: WorkspaceAccessLease? = nil
     ) throws -> CoworkViewModel {
         let artifactStore = try ArtifactStore(root: AppConfig.artifactsDir(session))
@@ -430,6 +441,7 @@ final class AppEnvironment: ObservableObject {
             inferenceProfileOptions: inferenceProfileOptions,
             projectSettings: projectSettings,
             launchMode: launchMode,
+            freshJudgeInferenceBinding: freshJudgeInferenceBinding,
             sessionStorageWarning: sessionStorageWarning,
             initialWorkspaceAccess: initialWorkspaceAccess,
             mcpSnapshots:
@@ -867,7 +879,8 @@ struct CodeSessionView: View {
                   isWorking: vm.isWorking,
                   workspaceName: vm.workspaceName,
                   agentState: vm.agentState,
-                  composerError: vm.composerError,
+                  composerError: vm.voiceInput.errorText
+                    ?? vm.composerError,
                   threadStyle: .intatisMac(scheme),
                   onShowSessions: onShowSessions,
                   onNewSession: onNewSession,
@@ -886,6 +899,16 @@ struct CodeSessionView: View {
                             vm.cancelPendingMCPExternalContexts()
                         })
                   }),
+                  composerTrailingAction:
+                    IntatisThreadComposerSecondaryAction(
+                        systemImage: vm.voiceInput.buttonSystemImage,
+                        help: vm.voiceInput.buttonHelp,
+                        isBusy: vm.voiceInput.showsProgress,
+                        isDisabled: vm.voiceInput.isToggleDisabled
+                            || (vm.isWorking
+                                && !vm.voiceInput.isRecording),
+                        blocksSubmission: vm.voiceInput.isEngaged,
+                        action: { vm.toggleVoiceInput() }),
                   headerActions: [
                     IntatisThreadHeaderAction(
                         title: "MCP Content",
@@ -933,6 +956,8 @@ struct CodeSessionView: View {
 
 struct CoworkSessionView: View {
     @ObservedObject var vm: CoworkViewModel
+    @StateObject private var agentThreadPresentation:
+        CoworkAgentThreadPresentationModel
     let sessionTitle: String
     let catalog: AppProviderCatalog
     let mcpProjectSettingsHost:
@@ -952,8 +977,46 @@ struct CoworkSessionView: View {
     @State private var goalTokenBudgetDraft = ""
     @State private var goalEditorSubmissionError: String?
     @State private var showAttachmentImporter = false
-    @State private var showMCPContent = false
     @Environment(\.colorScheme) private var scheme
+
+    init(
+        vm: CoworkViewModel,
+        sessionTitle: String,
+        catalog: AppProviderCatalog,
+        mcpProjectSettingsHost: MCPProjectSettingsHost,
+        mcpContentHost: MCPConversationContentHost,
+        onShowSessions: @escaping () -> Void,
+        onNewSession: @escaping () -> Void,
+        onSessionDidBecomeReady: @escaping () -> Void,
+        showsInspector: Binding<Bool>
+    ) {
+        self.vm = vm
+        self.sessionTitle = sessionTitle
+        self.catalog = catalog
+        self.mcpProjectSettingsHost = mcpProjectSettingsHost
+        self.mcpContentHost = mcpContentHost
+        self.onShowSessions = onShowSessions
+        self.onNewSession = onNewSession
+        self.onSessionDidBecomeReady = onSessionDidBecomeReady
+        self._showsInspector = showsInspector
+        self._agentThreadPresentation = StateObject(
+            wrappedValue: CoworkAgentThreadPresentationModel(
+                mainAgentID: vm.project.mainAgentName,
+                loadPage: { [weak vm] agentID, upperBound in
+                    guard let vm else {
+                        return .empty(agentID: agentID)
+                    }
+                    return await vm.agentThreadPage(
+                        agentID: agentID,
+                        requestedUpperBound: upperBound)
+                },
+                updates: { [weak vm] agentID in
+                    guard let vm else {
+                        return AsyncStream { $0.finish() }
+                    }
+                    return vm.agentThreadUpdates(for: agentID)
+                }))
+    }
 
     private var hasMainAgent: Bool {
         vm.agents.contains { $0.name == vm.project.mainAgentName }
@@ -965,7 +1028,7 @@ struct CoworkSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CoworkShell(items: vm.items,
+            CoworkShell(threadPage: agentThreadPresentation.page,
                         presentationScope: IntatisThreadPresentationScope(
                             kind: .cowork,
                             sessionID: vm.sessionID),
@@ -979,7 +1042,8 @@ struct CoworkSessionView: View {
                         project: vm.project,
                         goal: vm.goal,
                         workTasks: vm.workTasks,
-                        composerError: vm.composerError
+                        composerError: vm.voiceInput.errorText
+                            ?? vm.composerError
                             ?? vm.inferenceComposerError
                             ?? vm.projectionError
                             ?? vm.sessionStorageWarning,
@@ -1044,16 +1108,22 @@ struct CoworkSessionView: View {
                         .frame(
                             minHeight: IntatisComposerControlMetrics.controlHeight,
                             alignment: .center)),
-                        headerActions: [
-                            IntatisThreadHeaderAction(
-                                title: "MCP Content",
-                                systemImage: "shippingbox.and.arrow.backward",
-                                isIconOnly: true,
-                                help: "Browse granted MCP resources, prompts, tasks, and calls",
-                                accessibilityIdentifier: "cowork.mcp.content") {
-                                    showMCPContent = true
-                                },
-                        ],
+                        composerTrailingAction:
+                            IntatisThreadComposerSecondaryAction(
+                                systemImage:
+                                    vm.voiceInput.buttonSystemImage,
+                                help: vm.voiceInput.buttonHelp,
+                                isBusy:
+                                    vm.voiceInput.showsProgress,
+                                isDisabled:
+                                    vm.voiceInput.isToggleDisabled
+                                    || (vm.isAcceptingSubmission
+                                        && !vm.voiceInput.isRecording),
+                                blocksSubmission:
+                                    vm.voiceInput.isEngaged,
+                                action: {
+                                    vm.toggleVoiceInput()
+                                }),
                         showsInspector: $showsInspector,
                         input: $vm.input,
                         onSend: { vm.send() },
@@ -1067,7 +1137,25 @@ struct CoworkSessionView: View {
                         onPauseGoal: { vm.pauseGoal() },
                         onResumeGoal: { vm.resumeGoal() },
                         onEditGoal: { presentGoalEditor() },
-                        onClearGoal: { showGoalClearConfirmation = true })
+                        onClearGoal: { showGoalClearConfirmation = true },
+                        selectedAgentID:
+                            agentThreadPresentation.selectedAgentID,
+                        isThreadPageLoading:
+                            agentThreadPresentation.isLoading,
+                        isRichRenderingEligible:
+                            agentThreadPresentation.isRichRenderingEligible,
+                        onSelectAgent: {
+                            agentThreadPresentation.select($0)
+                        },
+                        onShowEarlier: {
+                            agentThreadPresentation.showEarlier()
+                        },
+                        onShowNewer: {
+                            agentThreadPresentation.showNewer()
+                        },
+                        onShowLatest: {
+                            agentThreadPresentation.showLatest()
+                        })
         }
         // SwiftUI preserves this view's structural identity when one Cowork
         // session replaces another. Key startup to the durable session ID so
@@ -1078,11 +1166,20 @@ struct CoworkSessionView: View {
             // so a history rescan can expose the new session in the sidebar.
             onSessionDidBecomeReady()
         }
+        .onAppear {
+            activateAgentThreadPresentation()
+        }
+        .onDisappear {
+            agentThreadPresentation.deactivate()
+        }
+        .onChange(of: vm.agents) { _, _ in
+            reconcileAgentThreadPresentation()
+        }
+        .onChange(of: vm.project.mainAgentName) { _, _ in
+            reconcileAgentThreadPresentation()
+        }
         .sheet(isPresented: $showProjectSettings) { projectSettingsSheet }
         .sheet(isPresented: $showGoalEditor) { goalEditorSheet }
-        .sheet(isPresented: $showMCPContent) {
-            MCPConversationCenterSheet(host: mcpContentHost)
-        }
         .fileImporter(
             isPresented: $showAttachmentImporter,
             allowedContentTypes: [.data, .content],
@@ -1106,6 +1203,22 @@ struct CoworkSessionView: View {
         } message: {
             Text("The Goal card will be cleared without marking the Goal completed. Its durable history remains in the session log.")
         }
+    }
+
+    private func activateAgentThreadPresentation() {
+        agentThreadPresentation.activate(
+            mainAgentID: vm.project.mainAgentName,
+            selectableAgentIDs: vm.agents
+                .filter(\.isConversationSelectable)
+                .map(\.id))
+    }
+
+    private func reconcileAgentThreadPresentation() {
+        agentThreadPresentation.reconcile(
+            mainAgentID: vm.project.mainAgentName,
+            selectableAgentIDs: vm.agents
+                .filter(\.isConversationSelectable)
+                .map(\.id))
     }
 
     private var goalEditorValidationMessage: String? {
@@ -1155,7 +1268,9 @@ struct CoworkSessionView: View {
             NavigationStack {
                 MCPProjectSettingsView(
                     host:
-                        mcpProjectSettingsHost)
+                        mcpProjectSettingsHost,
+                    contentHost:
+                        mcpContentHost)
                     .navigationTitle(
                         "MCP Project Settings")
             }
@@ -1506,6 +1621,15 @@ struct IntatisMacApp: App {
         return nil
     }
 
+    #if DEBUG
+    private var launchesCoworkAgentConversationFixture: Bool {
+        ProcessInfo.processInfo.arguments.contains(
+            "-IntatisCoworkAgentConversationFixture")
+            || Bundle.main.bundleIdentifier?.hasSuffix(
+                ".CoworkAgentConversationFixture") == true
+    }
+    #endif
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG || INTATIS_RENDERER_VALIDATION
@@ -1515,6 +1639,9 @@ struct IntatisMacApp: App {
                     .preferredColorScheme(launchAppearance)
             } else if ProcessInfo.processInfo.arguments.contains("-IntatisPhaseCPermissionFixture") {
                 PhaseCPermissionFixtureView()
+                    .preferredColorScheme(launchAppearance)
+            } else if launchesCoworkAgentConversationFixture {
+                CoworkAgentConversationFixtureView()
                     .preferredColorScheme(launchAppearance)
             } else if ProcessInfo.processInfo.arguments.contains("-IntatisRendererFixture") {
                 RendererFixtureView()

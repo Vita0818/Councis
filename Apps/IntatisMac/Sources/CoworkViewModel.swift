@@ -212,13 +212,58 @@ private enum CoworkSubmissionAttachmentError: LocalizedError {
     }
 }
 
+/// MainActor-owned latest-only fanout. It is intentionally not ObservableObject:
+/// non-selected agents must not invalidate a window's transcript subtree.
+@MainActor
+private final class CoworkAgentThreadUpdateHub {
+    private struct Subscription {
+        let agentID: AgentID
+        let continuation: AsyncStream<CoworkAgentThreadUpdate>.Continuation
+    }
+
+    private var subscriptions: [UUID: Subscription] = [:]
+    private var revisions: [AgentID: UInt64] = [:]
+    private var throughSeqByAgent: [AgentID: Int] = [:]
+
+    func stream(for agentID: AgentID) -> AsyncStream<CoworkAgentThreadUpdate> {
+        let id = UUID()
+        let pair = AsyncStream<CoworkAgentThreadUpdate>.makeStream(
+            bufferingPolicy: .bufferingNewest(1))
+        subscriptions[id] = Subscription(
+            agentID: agentID,
+            continuation: pair.continuation)
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { @MainActor in
+                self?.subscriptions.removeValue(forKey: id)
+            }
+        }
+        return pair.stream
+    }
+
+    func publish(agentIDs: [AgentID], throughSeq: Int) {
+        for agentID in Set(agentIDs) {
+            revisions[agentID, default: 0] &+= 1
+            throughSeqByAgent[agentID] = max(
+                throughSeqByAgent[agentID] ?? -1,
+                throughSeq)
+            let update = CoworkAgentThreadUpdate(
+                agentID: agentID,
+                throughSeq: throughSeqByAgent[agentID] ?? throughSeq,
+                revision: revisions[agentID] ?? 0)
+            for subscription in subscriptions.values
+                where subscription.agentID == agentID {
+                subscription.continuation.yield(update)
+            }
+        }
+    }
+}
+
 /// Drives a Cowork project session: user input defaults to the project `Main`
 /// agent, while the orchestrator and scheduler handle sub-agent work behind it.
 /// The view model folds the shared event log into the visible thread, project
 /// summary, and agent roster.
 @MainActor
 final class CoworkViewModel: ObservableObject, PermissionResponder {
-    @Published private(set) var items: [CodeItem] = []
     @Published private(set) var agents: [CoworkAgentInfo] = []
     @Published private(set) var summary = CoworkStatusSummary()
     @Published private(set) var project = CoworkProjectInfo()
@@ -253,6 +298,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     @Published private(set) var inferenceResolutionFailures: [String: String] = [:]
     @Published private var nextMainInferenceOption: AppInferenceProfileOption?
 
+    #if canImport(AVFoundation)
+    let voiceInput: ComposerVoiceInputController
+    private var voiceInputObservation: AnyCancellable?
+    #endif
+
     var isAutomaticPermissionReviewReady: Bool {
         switch permissionReviewerStatus {
         case .enabled, .degraded:
@@ -263,12 +313,12 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     var isMainInferenceReady: Bool {
-        agents.first(where: { $0.name == projectSettings.mainAgentName })?
+        liveAgentInfo(named: projectSettings.mainAgentName)?
             .inferenceResolution == .resolved
     }
 
     var mainInferenceDisplayLabel: String {
-        guard let main = agents.first(where: { $0.name == projectSettings.mainAgentName }) else {
+        guard let main = liveAgentInfo(named: projectSettings.mainAgentName) else {
             return IntatisLocalization.format(
                 "@%@ inference not attached",
                 projectSettings.mainAgentName)
@@ -304,7 +354,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     var inferenceComposerError: String? {
-        guard agents.contains(where: { $0.name == projectSettings.mainAgentName }),
+        guard liveAgentInfo(named: projectSettings.mainAgentName) != nil,
               !isMainInferenceReady else {
             return nil
         }
@@ -352,13 +402,15 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         didSet { refreshRuntimeBusy() }
     }
     private var directOperationDrainWaiters: [CheckedContinuation<Void, Never>] = []
-    private var canonicalItems: [CodeItem] = []
+    private let agentThreadUpdateHub = CoworkAgentThreadUpdateHub()
     private var submissionQueue: [SubmissionID] = []
     private var submittedPayloads: [SubmissionID: UserMessagePayload] = [:]
+    private var canonicalSubmissionIDs: Set<SubmissionID> = []
     private var submissionAttempts: [SubmissionID: Int] = [:]
     private var submissionRetryTasks: [SubmissionID: CoworkTaskView] = [:]
     private var restoredSubmissionIDs: Set<SubmissionID> = []
     private var outboxEntries: [SubmissionID: SubmittedIntentOutboxEntry] = [:]
+    private var outboxThreadItemsByAgent: [AgentID: [CodeItem]] = [:]
     private var pendingMCPExternalContexts:
         [UntrustedExternalContext] = []
     private var pendingMCPExternalContextAgentID:
@@ -370,6 +422,10 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private var workspaceAccessLeases: [String: WorkspaceAccessLease] = [:]
     private var steadyPermissionReviewerStatus: CoworkPermissionReviewerStatus = .disabled
     private let launchMode: CoworkSessionLaunchMode
+    /// Supplied only for brand-new sessions. Restored sessions recover a
+    /// durable Judge from EventLog and never synthesize one from today's
+    /// configuration.
+    private let freshJudgeInferenceBinding: AgentInferenceBinding?
     let sessionID: SessionID
 
     init(sessionID: SessionID,
@@ -380,6 +436,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
          inferenceProfileOptions: [AppInferenceProfileOption],
          projectSettings: CoworkProjectSettings,
          launchMode: CoworkSessionLaunchMode = .restored,
+         freshJudgeInferenceBinding: AgentInferenceBinding? = nil,
          sessionStorageWarning: String? = nil,
          initialWorkspaceAccess: WorkspaceAccessLease? = nil,
          mcpSnapshots:
@@ -394,11 +451,15 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         self.registryBox = ProviderRegistryBox(
             registry,
             controlPlaneBinding: nil)
+        #if canImport(AVFoundation)
+        self.voiceInput = ComposerVoiceInputController(registry: registry)
+        #endif
         self.mcpSnapshots = mcpSnapshots
         self.inferenceProfileOptions = inferenceProfileOptions
         self.nextMainInferenceOption = nil
         self.projectSettings = projectSettings
         self.launchMode = launchMode
+        self.freshJudgeInferenceBinding = freshJudgeInferenceBinding
         self.sessionStorageWarning = sessionStorageWarning
         if let initialWorkspaceAccess {
             self.workspaceAccessLeases[initialWorkspaceAccess.canonicalPath] = initialWorkspaceAccess
@@ -407,6 +468,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             sessionID: sessionID,
             settings: projectSettings,
             projection: CoworkProjection())
+        #if canImport(AVFoundation)
+        observeVoiceInput()
+        #endif
     }
 
     deinit {
@@ -459,6 +523,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         inferenceProfileOptions: [AppInferenceProfileOption]? = nil
     ) {
         guard acceptsNewOperations else { return }
+        #if canImport(AVFoundation)
+        voiceInput.updateProviderRegistry(registry)
+        #endif
         let refreshedOptions = inferenceProfileOptions
         let approvedOptions = refreshedOptions ?? self.inferenceProfileOptions
         let bindings = approvedOptions.map(\.binding)
@@ -731,9 +798,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     : 0,
                 published: published)
         }
-        let isInitialCommit =
-            projectionCommitFence?
-                .throughSeq == Int.min
         guard projectionCommitFence?
                 .accept(
                     identity:
@@ -749,15 +813,13 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 snapshot.barrierEnvelope {
             observeProjectionBarrier(barrier)
         }
-        if let nextItems = snapshot.items,
-           nextItems != canonicalItems {
-            canonicalItems = nextItems
-            refreshPresentedItems()
-        } else if snapshot.items != nil,
-                  isInitialCommit {
-            // The canonical thread can be empty while the owner-only outbox
-            // still contains a locally preserved submission.
-            refreshPresentedItems()
+        let changedThreadAgents = IntatisExecutionTracePresentation.isEnabled
+            ? snapshot.threadAgentIDs
+            : snapshot.visibleThreadAgentIDs
+        if !changedThreadAgents.isEmpty {
+            agentThreadUpdateHub.publish(
+                agentIDs: changedThreadAgents,
+                throughSeq: snapshot.throughSeq)
         }
         if let permission =
                 snapshot.permission {
@@ -983,6 +1045,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         addAgentStatus = .idle
         setPermissionReviewerStatus(.disabled)
         let task = Task<Void, Never> {
+            #if canImport(AVFoundation)
+            await self.voiceInput.shutdown()
+            #endif
             // Let the cancelled startup/stream task observe cancellation before
             // teardown touches the captured runtime. This prevents a stale
             // startup continuation from releasing the restore scheduler gate.
@@ -1025,6 +1090,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     ) {
         for intent in projection.submittedIntents {
             submittedPayloads[intent.id] = intent.payload
+            canonicalSubmissionIDs.insert(intent.id)
             if let attempt = intent.attempt {
                 submissionAttempts[intent.id] = attempt
             }
@@ -1043,6 +1109,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     guard let id = entry.payload.submissionID else { return nil }
                     return (id, entry)
                 })
+            rebuildOutboxThreadItems(publishesChanges: true)
         } catch {
             composerError = IntatisLocalization.format(
                 "The local submission outbox could not be read: %@",
@@ -1053,9 +1120,16 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private func observeSubmittedIntentEvent(_ envelope: Envelope) {
         switch envelope.event {
         case .userMessage(let payload):
-            guard let id = payload.submissionID,
-                  submittedPayloads[id] == nil else { return }
+            guard let id = payload.submissionID else { return }
+            canonicalSubmissionIDs.insert(id)
+            guard submittedPayloads[id] == nil else {
+                rebuildOutboxThreadItems(publishesChanges: false)
+                return
+            }
             submittedPayloads[id] = payload
+            // A canonical user row supersedes an owner-only outbox overlay.
+            // The same snapshot already publishes the typed target agent.
+            rebuildOutboxThreadItems(publishesChanges: false)
         case .submissionStatusChanged(let payload):
             submissionAttempts[payload.submissionID] = max(
                 submissionAttempts[payload.submissionID] ?? 0,
@@ -1068,55 +1142,113 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
     }
 
-    private func refreshPresentedItems() {
-        var presented = canonicalItems
+    func agentThreadUpdates(
+        for agentID: AgentID
+    ) -> AsyncStream<CoworkAgentThreadUpdate> {
+        agentThreadUpdateHub.stream(for: agentID)
+    }
+
+    func agentThreadPage(
+        agentID: AgentID,
+        requestedUpperBound: Int?
+    ) async -> CoworkAgentThreadPage {
+        let additionalItems = outboxThreadItemsByAgent[agentID] ?? []
+        guard let projectionPump else {
+            return CodeProjection().coworkAgentThreadPage(
+                agentID: agentID,
+                requestedUpperBound: requestedUpperBound,
+                showsExecutionTrace:
+                    IntatisExecutionTracePresentation.isEnabled,
+                additionalItems: additionalItems,
+                projectedThroughSeq: -1,
+                projectionGeneration: UUID(),
+                isAgentWorking: false)
+        }
+        let projected = await projectionPump.coworkAgentThreadPage(
+            agentID: agentID,
+            requestedUpperBound: requestedUpperBound,
+            showsExecutionTrace: IntatisExecutionTracePresentation.isEnabled,
+            additionalItems: additionalItems)
         let interruptedFailure = SubmissionFailure(
             code: "interrupted",
             message: IntatisLocalization.string(
                 "This submission was queued or running when the previous runtime stopped. Retry explicitly to run it again."),
             retryable: true)
-        for index in presented.indices {
-            guard let id = presented[index].submissionID,
-                  restoredSubmissionIDs.contains(id),
-                  presented[index].kind == .user else { continue }
-            presented[index].submissionStatus = .failed
-            presented[index].submissionFailure = interruptedFailure
-            presented[index].isFailure = true
+        let items = projected.items.map { item -> CodeItem in
+            guard item.kind == .user,
+                  let submissionID = item.submissionID,
+                  restoredSubmissionIDs.contains(submissionID) else {
+                return item
+            }
+            var interrupted = item
+            interrupted.submissionStatus = .failed
+            interrupted.submissionFailure = interruptedFailure
+            interrupted.isFailure = true
+            return interrupted
         }
+        return CoworkAgentThreadPage(
+            agentID: projected.agentID,
+            items: items,
+            lowerBound: projected.lowerBound,
+            upperBound: projected.upperBound,
+            totalCount: projected.totalCount,
+            capacity: projected.capacity,
+            projectedThroughSeq: projected.projectedThroughSeq,
+            projectionGeneration: projected.projectionGeneration,
+            isAgentWorking: projected.isAgentWorking)
+    }
 
-        let canonicalSubmissionIDs = Set(presented.compactMap(\.submissionID))
-        let outboxItems = outboxEntries.values
-            .filter { entry in
-                guard let id = entry.payload.submissionID else { return false }
-                return !canonicalSubmissionIDs.contains(id)
-            }
-            .sorted { $0.createdAt < $1.createdAt }
-            .compactMap { entry -> CodeItem? in
-                guard let id = entry.payload.submissionID else { return nil }
-                let failure = SubmissionFailure(
-                    code: "event_log_unavailable",
-                    message: entry.lastCanonicalError
-                        ?? IntatisLocalization.string(
-                            "The submission is safe in the local outbox but has not entered the session EventLog."),
-                    retryable: true)
-                return CodeItem(
-                    id: id.rawValue,
-                    kind: .user,
-                    title: IntatisLocalization.string("You"),
-                    body: entry.payload.text,
-                    tags: entry.payload.tags ?? [],
-                    goal: entry.payload.goal,
-                    attachments: entry.payload.attachments ?? [],
-                    isFailure: true,
-                    submissionID: id,
-                    submissionStatus: .failed,
-                    submissionAttempt: nil,
-                    submissionFailure: failure)
-            }
-        presented.append(contentsOf: outboxItems)
-        if presented != items {
-            items = presented
+    private func rebuildOutboxThreadItems(
+        publishesChanges: Bool
+    ) {
+        let previous = outboxThreadItemsByAgent
+        var next: [AgentID: [CodeItem]] = [:]
+        for entry in outboxEntries.values.sorted(by: {
+            $0.createdAt < $1.createdAt
+        }) {
+            guard let id = entry.payload.submissionID,
+                  !canonicalSubmissionIDs.contains(id) else { continue }
+            let failure = SubmissionFailure(
+                code: "event_log_unavailable",
+                message: entry.lastCanonicalError
+                    ?? IntatisLocalization.string(
+                        "The submission is safe in the local outbox but has not entered the session EventLog."),
+                retryable: true)
+            let item = CodeItem(
+                id: id.rawValue,
+                kind: .user,
+                title: IntatisLocalization.string("You"),
+                body: entry.payload.text,
+                tags: entry.payload.tags ?? [],
+                goal: entry.payload.goal,
+                attachments: entry.payload.attachments ?? [],
+                isFailure: true,
+                submissionID: id,
+                submissionStatus: .failed,
+                submissionAttempt: nil,
+                submissionFailure: failure)
+            let agentID = entry.payload.to
+                ?? AgentID(rawValue: projectSettings.mainAgentName)
+            next[agentID, default: []].append(item)
         }
+        guard next != previous else { return }
+        outboxThreadItemsByAgent = next
+        guard publishesChanges else { return }
+        agentThreadUpdateHub.publish(
+            agentIDs: Array(Set(previous.keys).union(next.keys)),
+            throughSeq: projectionCommitFence?.throughSeq ?? -1)
+    }
+
+    private func publishSubmissionThreadChange(_ submissionID: SubmissionID) {
+        guard let payload = submittedPayloads[submissionID]
+                ?? outboxEntries[submissionID]?.payload else {
+            return
+        }
+        let agentID = payload.to
+            ?? AgentID(rawValue: projectSettings.mainAgentName)
+        agentThreadUpdateHub.publish(
+            agentIDs: [agentID],
+            throughSeq: projectionCommitFence?.throughSeq ?? -1)
     }
 
     private func applyCoworkProjection(_ projection: CoworkProjection) {
@@ -1205,20 +1337,39 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     private func agentPresentation(from projection: CoworkProjection) -> [CoworkAgentInfo] {
-        projection.agentRoster.values
-            .sorted { $0.agent.rawValue < $1.agent.rawValue }
+        let liveAgentIDs = Set(projection.agentRoster.keys)
+        let runningAgentIDs = Set(projection.tasks.values.compactMap { task in
+            task.status == .running ? task.assignee : nil
+        })
+        let failedAgentIDs = Set(projection.tasks.values.compactMap { task in
+            task.status == .failed ? task.assignee : nil
+        })
+        var workspaceLeaseCounts: [AgentID: Int] = [:]
+        for agentID in projection.workspaceLeaseAgents.values {
+            workspaceLeaseCounts[agentID, default: 0] += 1
+        }
+        var capabilityLeasesByAgent: [AgentID: [CapabilityLease]] = [:]
+        for (leaseID, agentID) in projection.capabilityLeaseAgents {
+            guard let lease = projection.capabilityLeases[leaseID] else { continue }
+            capabilityLeasesByAgent[agentID, default: []].append(lease)
+        }
+        var inferenceOptionsByBinding: [AgentInferenceBinding: AppInferenceProfileOption] = [:]
+        for option in inferenceProfileOptions where inferenceOptionsByBinding[option.binding] == nil {
+            inferenceOptionsByBinding[option.binding] = option
+        }
+
+        return projection.historicalAgentsInCreationOrder
             .map { payload in
                 let mailbox = projection.mailboxes[payload.agent] ?? CoworkMailboxView()
-                let capabilityLeases = projection.capabilityLeaseAgents
-                    .filter { $0.value == payload.agent }
-                    .compactMap { projection.capabilityLeases[$0.key] }
-                let workspaceLeaseCount = projection.workspaceLeaseAgents.values.filter { $0 == payload.agent }.count
+                let capabilityLeases = capabilityLeasesByAgent[payload.agent] ?? []
+                let workspaceLeaseCount = workspaceLeaseCounts[payload.agent] ?? 0
                 let capabilityLeaseCount = capabilityLeases.count
                 let isMain = payload.agent.rawValue == projectSettings.mainAgentName
+                let isReviewer = payload.agent == Orchestrator.automaticPermissionReviewerID
+                let isJudge = payload.agent == Orchestrator.judgeAgentID
+                let isAttached = liveAgentIDs.contains(payload.agent)
                 let binding = payload.agentInferenceBinding
-                let inferenceOption = binding.flatMap { binding in
-                    inferenceProfileOptions.first(where: { $0.binding == binding })
-                }
+                let inferenceOption = binding.flatMap { inferenceOptionsByBinding[$0] }
                 let inferenceResolution: CoworkInferenceResolution
                 if binding == nil {
                     inferenceResolution = .legacy
@@ -1226,6 +1377,22 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     inferenceResolution = .unresolved
                 } else {
                     inferenceResolution = .resolved
+                }
+                let status: String
+                if !isAttached {
+                    status = "detached"
+                } else if runningAgentIDs.contains(payload.agent) {
+                    status = "running"
+                } else if let state = projection.agentStatuses[payload.agent] {
+                    status = state.rawValue
+                } else if !mailbox.pendingTasks.isEmpty {
+                    status = "queued"
+                } else if !mailbox.pendingMessages.isEmpty {
+                    status = "mailbox"
+                } else if failedAgentIDs.contains(payload.agent) {
+                    status = "failed"
+                } else {
+                    status = "idle"
                 }
                 return CoworkAgentInfo(
                     id: payload.agent.rawValue,
@@ -1238,8 +1405,8 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     inferenceConnectionLabel: binding?.safeRouteLabel,
                     inferenceVariant: inferenceOption?.variantTitle ?? binding?.variantID,
                     inferenceResolution: inferenceResolution,
-                    status: agentStatus(for: payload.agent, in: projection),
-                    role: isMain ? "main" : Self.role(for: capabilityLeases),
+                    status: status,
+                    role: isMain ? "main" : isReviewer ? "reviewer" : isJudge ? "judge" : Self.role(for: capabilityLeases),
                     pendingTasks: mailbox.pendingTasks.count,
                     pendingMessages: mailbox.pendingMessages.count,
                     completedTasks: mailbox.completedTasks.count,
@@ -1253,8 +1420,21 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                             "%lld capability lease",
                             Int64(capabilityLeaseCount))
                         : nil,
-                    canRemove: !isMain && payload.agent != Orchestrator.automaticPermissionReviewerID)
+                    isAttached: isAttached,
+                    canRemove: isAttached && !isMain && !isReviewer && !isJudge,
+                    isConversationSelectable: !isReviewer)
             }
+    }
+
+    /// UI history and runtime routing deliberately use different membership
+    /// tests. A detached identity remains in `agents` for transcript browsing,
+    /// but every operational caller must pass through the live roster first.
+    private func liveAgentInfo(named name: String) -> CoworkAgentInfo? {
+        let agentID = AgentID(rawValue: name)
+        guard latestCoworkProjection.agentRoster[agentID] != nil else {
+            return nil
+        }
+        return agents.first(where: { $0.id == agentID.rawValue })
     }
 
     private func refreshInferenceResolutionState() async {
@@ -1366,26 +1546,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 linkedInvocationIDs: task.latestInvocationIDs.map(\.rawValue))
         }
         return CoworkWorkTaskSummary(tasks: lines)
-    }
-
-    private func agentStatus(for agent: AgentID, in projection: CoworkProjection) -> String {
-        if projection.runningTasks.contains(where: { $0.assignee == agent }) {
-            return "running"
-        }
-        if let state = projection.agentStatuses[agent] {
-            return state.rawValue
-        }
-        let mailbox = projection.mailboxes[agent]
-        if mailbox?.pendingTasks.isEmpty == false {
-            return "queued"
-        }
-        if mailbox?.pendingMessages.isEmpty == false {
-            return "mailbox"
-        }
-        if projection.failedTasks.contains(where: { $0.assignee == agent }) {
-            return "failed"
-        }
-        return "idle"
     }
 
     private func taskLine(_ task: CoworkTaskView) -> CoworkTaskLine {
@@ -1752,8 +1912,24 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             coordinationDepth: Agent.defaultCoordinationDepth)
         let attached: Bool
         if allowsInitialSessionBootstrap {
+            guard let judgeBinding = freshJudgeInferenceBinding else {
+                didRequestMainAgentAttach = false
+                composerError = IntatisLocalization.string(
+                    "A fresh Cowork session requires a resolvable judge_model before registration.")
+                setPermissionReviewerStatus(.failed(
+                    composerError ?? IntatisLocalization.string("Judge inference unavailable.")))
+                return
+            }
+            let judge = Agent(
+                name: Orchestrator.judgeAgentID,
+                workspaceRoot: url,
+                model: judgeBinding.modelID,
+                agentInferenceBinding: judgeBinding,
+                profile: .readOnly,
+                coordinationDepth: 0)
             switch await orchestrator.bootstrapFreshSession(
                 main: main,
+                judge: judge,
                 settings: projectSettings) {
             case .attached, .alreadyAttached:
                 attached = true
@@ -1884,12 +2060,12 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private func persistProjectSettings(_ settings: CoworkProjectSettings) async -> Bool {
         if case .fresh = launchMode {
             let mainID = AgentID(rawValue: projectSettings.mainAgentName)
-            let hasDurableBaseline = await orchestrator?.agentList().contains {
-                $0.name == mainID
-            } ?? false
+            let durableAgents = await orchestrator?.agentList() ?? []
+            let hasDurableBaseline = durableAgents.contains { $0.name == mainID }
+                && durableAgents.contains { $0.name == Orchestrator.judgeAgentID }
             guard hasDurableBaseline else {
                 composerError = IntatisLocalization.string(
-                    "Retry the initial @main registration before changing project settings; the seven-event session baseline must remain atomic.")
+                    "Retry the initial @main/@judge registration before changing project settings; the ten-event session baseline must remain atomic.")
                 return false
             }
         }
@@ -1940,6 +2116,12 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             composerError = IntatisLocalization.format(
                 "@%@ is reserved.",
                 Orchestrator.automaticPermissionReviewerID.rawValue)
+            return
+        }
+        guard AgentID(rawValue: name) != Orchestrator.judgeAgentID else {
+            composerError = IntatisLocalization.format(
+                "@%@ is reserved.",
+                Orchestrator.judgeAgentID.rawValue)
             return
         }
         isWorking = true
@@ -2357,6 +2539,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     func send() {
         guard acceptsNewOperations, !isAcceptingSubmission else { return }
+        #if canImport(AVFoundation)
+        guard !voiceInput.isEngaged else { return }
+        #endif
         let originalInput = input
         let originalAttachments = draftAttachments
         let frozenExternalContexts =
@@ -2468,6 +2653,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     self.submissionAttempts[submissionID] = 1
                     switch acceptance {
                     case .canonical(_, let cleanupWarning):
+                        self.canonicalSubmissionIDs.insert(submissionID)
                         self.outboxEntries.removeValue(forKey: submissionID)
                         if !self.submissionQueue.contains(submissionID) {
                             self.submissionQueue.append(submissionID)
@@ -2482,7 +2668,8 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         self.composerError = IntatisLocalization.format(
                             "Submission saved in the local outbox. Retry when the session EventLog is writable: %@",
                             canonicalError)
-                        self.refreshPresentedItems()
+                        self.rebuildOutboxThreadItems(
+                            publishesChanges: true)
                     }
                 } catch {
                     // Neither canonical EventLog nor the owner-only outbox
@@ -2495,6 +2682,28 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             activeOperations[operationID] = operation
         }
     }
+
+    #if canImport(AVFoundation)
+    func toggleVoiceInput() {
+        guard acceptsNewOperations else { return }
+        if !voiceInput.isRecording {
+            guard !isAcceptingSubmission else { return }
+        }
+        voiceInput.toggle { [weak self] transcript in
+            guard let self else { return }
+            self.input = ComposerVoiceDraft.appending(
+                transcript: transcript,
+                to: self.input)
+        }
+    }
+
+    private func observeVoiceInput() {
+        voiceInputObservation = voiceInput.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+    }
+    #endif
 
     private func consumeMCPExternalContexts(
         _ frozen: [UntrustedExternalContext]
@@ -2575,7 +2784,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             }
             let frozenBindingCanRepairMain = target == mainAgentID
                 && payload.mainAgentInferenceBinding != nil
-            guard let targetAgent = agents.first(where: { $0.name == target.rawValue }),
+            guard let targetAgent = liveAgentInfo(named: target.rawValue),
                   targetAgent.inferenceResolution == .resolved
                     || frozenBindingCanRepairMain else {
                 await settleSubmissionFailure(
@@ -2788,6 +2997,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     let acceptance = try await self.submittedIntentStore.retryOutbox(id: submissionID)
                     switch acceptance {
                     case .canonical(let entry, let cleanupWarning):
+                        self.canonicalSubmissionIDs.insert(submissionID)
                         self.outboxEntries.removeValue(forKey: submissionID)
                         self.submittedPayloads[submissionID] = entry.payload
                         self.submissionAttempts[submissionID] = 1
@@ -2798,14 +3008,16 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         if let cleanupWarning {
                             self.sessionStorageWarning = cleanupWarning
                         }
-                        self.refreshPresentedItems()
+                        self.rebuildOutboxThreadItems(
+                            publishesChanges: true)
                         self.scheduleSubmissionDrain()
                     case .outbox(let entry, let canonicalError):
                         self.outboxEntries[submissionID] = entry
                         self.composerError = IntatisLocalization.format(
                             "The submission is still safe in the local outbox: %@",
                             canonicalError)
-                        self.refreshPresentedItems()
+                        self.rebuildOutboxThreadItems(
+                            publishesChanges: true)
                     }
                     return
                 }
@@ -2827,7 +3039,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                                 attempt: currentAttempt))
                         self.restoredSubmissionIDs.remove(submissionID)
                         self.composerError = nil
-                        self.refreshPresentedItems()
+                        self.publishSubmissionThreadChange(submissionID)
                         return
                     }
                     if task.status == .queued
@@ -2850,7 +3062,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     self.submissionQueue.append(submissionID)
                 }
                 self.composerError = nil
-                self.refreshPresentedItems()
+                self.publishSubmissionThreadChange(submissionID)
                 self.scheduleSubmissionDrain()
             } catch {
                 self.composerError = IntatisLocalization.format(
@@ -3330,7 +3542,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             return .failure(IntatisLocalization.string(
                 "Agent names cannot contain spaces."))
         }
-        let existing = agents.map(\.name)
+        let existing = latestCoworkProjection.agentRoster.keys.map(\.rawValue)
         if existing.contains(name) {
             return .failure(IntatisLocalization.format(
                 "@%@ is already attached.",

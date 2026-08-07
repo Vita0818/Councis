@@ -1,13 +1,13 @@
 # VERSIONING
 
 文档状态：当前版本规则
-最近核对：2026-08-03
-产品版本：`0.5`
-构建号：`33`
+最近核对：2026-08-05
+产品版本：`0.36`
+构建号：`36`
 
 ## 唯一事实源
 
-Councis 当前直接基线的产品版本由根目录 `project.yml` 的两项全局设置唯一决定：
+Intatis 的产品版本由根目录 `project.yml` 的两项全局设置唯一决定：
 
 - `MARKETING_VERSION`：用户可见的产品版本；
 - `CURRENT_PROJECT_VERSION`：单调递增的构建号。
@@ -23,11 +23,9 @@ Git commit 标题中的 `v0.x` 只记录里程碑，不是版本事实源；仓�
 
 ## 当前基线
 
-Councis 当前用户可见版本为 `0.5`。源码来源仍是 Intatis v0.32 工作树快照；来源版本属于
-provenance，不决定 Councis 的 marketing version。为遵守构建号单调递增规则，本次把
-`MARKETING_VERSION` 从 `0.32` 调整为 `0.5`，同时把
-`CURRENT_PROJECT_VERSION` 从 `32` 增加到 `33`。构建号不要求等于 marketing version
-的 minor，也不得因用户可见版本数字较小而回退。
+当前工作树的产品基线为 `v0.36`。工程元数据此前已从长期停留的 `0.12 (1)` 校准为
+`0.32 (32)`，本轮进一步推进为 `0.36 (36)`。构建号继续保持单调增加，但不要求永远
+等于 marketing version 的 minor。
 
 ## 更新步骤
 

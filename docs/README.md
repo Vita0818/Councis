@@ -1,21 +1,28 @@
-# Councis 文档索引（Intatis v0.32 直接基线）
+# Councis 文档索引（Intatis 快照基线）
 
-当前产品基线：**v0.5**（build 33）
-最近核对：2026-08-03
+当前产品基线：**v0.36**（build 36）
+最近核对：2026-08-06
 
 这个索引区分“当前规范”和“历史证据”。版本、产品状态或下一步判断只允许从当前规范
 读取；带旧版本号的历史文件保留用于解释迁移和兼容性，不能覆盖当前源码。
+
+Councis 直接继承 Intatis 快照，只在现有 Cowork 上增加固定数据面身份 `@judge`，并通过
+Main/Judge 系统提示词与 Cowork Skill 提供协作建议；它不改变 Cowork 工作流程，也不是整个产品
+的重设计。先读 `COUNcis_IDENTITY.md` 确认范围，再用其余当前规范理解继承实现；精确来源见
+`INTATIS_BASELINE.md`。除项目覆盖段落外，继承文档描述的是当前 Intatis 基线事实；`@judge`
+修饰、`judge_model` 及其测试状态以当前规范和源码为准。
 
 ## 当前规范
 
 | 文档 | 权威范围 |
 |---|---|
-| `COUNcis_IDENTITY.md` | Councis 产品身份、差异化方向及当前未实现边界 |
-| `INTATIS_BASELINE.md` | 直接根工作树快照的来源、范围与复现边界 |
+| `COUNcis_IDENTITY.md` | Councis 固定 `@judge` 身份、提示词/Skill 修饰、范围与非目标 |
+| `INTATIS_BASELINE.md` | Intatis 快照来源、manifest、复制边界与项目覆盖规则 |
 | `VERSIONING.md` | 产品版本与 build number 的唯一治理规则 |
-| `CURRENT_STATE.md` | 当前能力、验证状态、已知缺口 |
+| `CURRENT_STATE.md` | Intatis 快照能力、验证状态，以及 Councis 文档/实现状态 |
 | `PROJECT_MAP.md` | 当前目录、target、入口、关键文件和脚本 |
 | `ARCHITECTURE.md` | 当前运行时链路、数据模型、安全与平台边界 |
+| `CHAT_HOSTED_SEARCH.md` | 当前模型自主托管搜索、接入点适配、静默不搜索与实现边界 |
 | `DO_NOT_BREAK.md` | 协议、持久化、权限、工具与 UI 回归禁区 |
 | `TESTING.md` | 当前测试矩阵、命令和最近一次证据 |
 | `MACOS_DISTRIBUTION.md` | Developer ID 直接分发合同 |
@@ -23,10 +30,11 @@
 | `COWORK_PRINCIPLES.md` | 当前 Cowork/AgentKernel 编排原则 |
 | `PER_AGENT_INFERENCE_PROFILES.md` | per-agent exact inference binding 契约 |
 | `CURRENT_UI_COLOR_SYSTEM.md` | 当前 Apple 原生表面与 Liquid Glass 规范 |
-| `NEXT_TARGET.md` | 唯一活跃目标；不保存已完成里程碑流水账 |
+| `NEXT_TARGET.md` | Councis 唯一下一目标；不得自动继承 Intatis 临时发版任务 |
 
-根 `README.md` 是产品入口；根 `ARCHITECTURE.md` 仅为兼容链接，架构正文只维护在
-`docs/ARCHITECTURE.md`。`AGENTS.md` 及 Claude/Gemini shims 是操作政策，不表达产品版本。
+根 `README.md` 仍是当前 Intatis 快照的产品入口；根 `ARCHITECTURE.md` 仅为兼容链接，架构正文
+只维护在 `docs/ARCHITECTURE.md`。根 `AGENTS.md` 是 Councis 操作入口；它与上述两份 Councis
+专属文档定义项目边界，不把尚未实现的 Cowork 特性写成当前能力。
 
 ## 操作政策与供应链资料
 
@@ -61,7 +69,7 @@
 ## 维护纪律
 
 - 当前状态文档保持摘要化；完成事项留在 Git 历史和 dated report，不继续无限追加。
-- `NEXT_TARGET.md` 只保留一个正在推进的目标，完成后删除或替换。
+- `NEXT_TARGET.md` 只保留一个经用户确认的 Councis 目标；来源快照中的临时发版目标不自动继承。
 - `TESTING.md` 保存当前命令和最新证据；旧性能数字或事故细节留在报告中。
 - 不批量替换依赖、协议、schema、历史里程碑中的版本号。
 - 修改产品版本后必须运行 `scripts/check-version-consistency.sh`。

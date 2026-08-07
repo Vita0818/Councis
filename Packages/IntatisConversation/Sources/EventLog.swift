@@ -42,9 +42,9 @@ public enum EventLogError: Error, Equatable, LocalizedError, Sendable {
         case .lockUnavailable(let code):
             return "The session event log lock could not be opened (error code \(code))."
         case .lockTimedOut:
-            return "The session event log is busy in another Intatis operation."
+            return "The session event log is busy in another Councis operation."
         case .writerAlreadyActive:
-            return "Another Intatis runtime is already writing this session."
+            return "Another Councis runtime is already writing this session."
         case .storageUnavailable(let operation, let code):
             return "The session event log could not \(operation) (error code \(code))."
         case .journalCorrupted:
@@ -62,7 +62,7 @@ public enum EventLogError: Error, Equatable, LocalizedError, Sendable {
         case .sequenceExhausted:
             return "The session event log sequence space is exhausted."
         case .unsupportedEventTypes:
-            return "The session contains newer event types that this Intatis version cannot update safely."
+            return "The session contains newer event types that this Councis version cannot update safely."
         case .incompleteEventHistory:
             return "The session event history is incomplete and cannot be updated safely."
         case .staleModelHistory(
@@ -93,7 +93,7 @@ public enum EventLogError: Error, Equatable, LocalizedError, Sendable {
         case .lockUnavailable, .storageUnavailable:
             return "Check storage permissions and available disk space, then retry."
         case .lockTimedOut:
-            return "Wait for the other operation to finish, or close the other Intatis process using this session, then retry."
+            return "Wait for the other operation to finish, or close the other Councis process using this session, then retry."
         case .writerAlreadyActive:
             return "Close the other Code or Cowork runtime for this session, then retry. Read-only replay can remain open."
         case .journalCorrupted, .journalMismatch, .sessionMismatch, .corruptedEvent,
@@ -102,7 +102,7 @@ public enum EventLogError: Error, Equatable, LocalizedError, Sendable {
         case .sequenceExhausted:
             return "Start a new session."
         case .unsupportedEventTypes:
-            return "Open this session with a compatible newer Intatis version before changing its settings."
+            return "Open this session with a compatible newer Councis version before changing its settings."
         case .staleModelHistory:
             return "Reload the agent's canonical model history, rebuild the replacement checkpoint, and retry."
         case .invalidModelHistoryWindowLineage,

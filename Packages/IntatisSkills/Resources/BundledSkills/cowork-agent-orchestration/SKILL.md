@@ -1,6 +1,6 @@
 ---
 name: cowork-agent-orchestration
-description: Plan and route Intatis Cowork work when coordinator capabilities are available, including deciding direct execution versus agent reuse, delegation, or spawn; selecting newer adequate host-approved inference profiles under cost-first, cost-efficient-balanced, or efficiency-first priorities; pairing a declared-capable multimodal companion when needed; and minimizing workspace and coordination leases.
+description: Proactively plan, track, and route Intatis Cowork work when coordinator capabilities are available, including deciding direct execution versus agent reuse, delegation, or spawn; selecting newer adequate host-approved inference profiles under cost-first, cost-efficient-balanced, or efficiency-first priorities; pairing a declared-capable multimodal companion when needed; using a fixed Judge for explicit candidate comparison when useful; and minimizing workspace and coordination leases.
 ---
 
 # Cowork agent orchestration
@@ -28,6 +28,29 @@ or budgets.
   `AgentLoop`, a completed WorkTask, or a successful child result in prose.
 - Prefer the smallest team and the least authority that can complete the task.
   Delegation overhead is real work and real model cost.
+
+## Drive the request proactively
+
+1. Derive a concrete execution objective, expected deliverables, constraints, and
+   verification approach from the current request. Resolve ordinary uncertainty with
+   available inspection tools or safe in-scope assumptions; request user input only
+   when the missing choice materially changes the result or needs new authority.
+2. Treat every request as a current execution objective. Create a durable Goal only
+   when the user explicitly requests a persistent or cross-run objective and the
+   corresponding tool is advertised.
+3. For non-trivial work, use advertised task tools to create the smallest useful
+   graph of verifiable WorkTasks. Keep ownership, dependencies, progress, result, and
+   evidence current instead of maintaining a prose-only plan.
+4. Evaluate the collaboration criteria below at the outset. Start ready independent,
+   specialist, multimodal, review, or directory-scoped branches promptly when their
+   benefit exceeds coordination cost; collaboration should not be reserved only for
+   recovery after direct work fails.
+5. After delegation, continue useful work on the coordinator's own critical path
+   instead of waiting idly. Verify every child report, settle only proven WorkTask
+   results, replan only the affected branch after failure, and synthesize one result.
+6. Keep advancing until the requested outcome is verified or a genuine blocker
+   remains. Never infer completion from a plan, an invocation ending, or unverified
+   prose.
 
 ## Select the operating priority
 
@@ -129,6 +152,26 @@ coding, or synthesis.
 7. Set `canCoordinate: false` unless the child must own a real subgraph and the
    current delegation budget permits another level. Coordination authority is never
    required merely to read, edit, test, or report.
+
+## Use the fixed Judge when comparison helps
+
+- When `@judge` appears in `list_agents` or the current task's related agents, treat
+  it as a host-registered, read-only data-plane worker. Never spawn, replace, remove,
+  or use `auto` to select it.
+- The main agent still decides whether multi-agent work is worthwhile, how many
+  candidate agents to use, and which host-approved profiles, strategies, and task
+  instructions fit them. Do not create candidates merely to satisfy a ritual.
+- When multiple agents were intentionally asked to answer the same problem and a
+  comparison would improve the result, explicitly delegate a final evaluation task
+  to `@judge`. Include every complete candidate answer, the user's constraints,
+  evaluation criteria, and the required final output shape; do not assume hidden
+  transcript or mailbox context.
+- The Judge returns ordinary text through the existing scheduler and Task Report
+  path. Its response does not settle a WorkTask or Goal and does not grant execution
+  authority. After required verification, return the selected answer as the one
+  user-facing result.
+- `@judge` never replaces `@permission-reviewer`, Goal Verifier, permission gates,
+  durable task state, or the coordinator's responsibility for safety and correctness.
 
 ## Minimize leases and information
 

@@ -202,7 +202,7 @@ public enum SessionProjectionStoreError: Error, LocalizedError, Equatable, Senda
     public var errorDescription: String? {
         switch self {
         case .unknownEventTypes:
-            return "This Intatis version cannot fully project one or more newer session events."
+            return "This Councis version cannot fully project one or more newer session events."
         case .invalidSettingsHistory:
             return "The session settings history has an invalid revision or identity."
         case .sessionMismatch:
@@ -214,7 +214,7 @@ public enum SessionProjectionStoreError: Error, LocalizedError, Equatable, Senda
         case .conflictingRenameOperation:
             return "The session rename operation identifier was already used for another change."
         case .unsupportedSchemaVersion:
-            return "The session projection uses an unsupported schema version and must be rebuilt by a compatible Intatis version."
+            return "The session projection uses an unsupported schema version and must be rebuilt by a compatible Councis version."
         case .verificationFailed:
             return "The derived session projection could not be verified after writing."
         }

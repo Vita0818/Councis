@@ -1,19 +1,5 @@
 # NOTICE
 
-## Councis repository lineage
-
-The active Councis working tree is a direct snapshot of the project-owned
-Intatis v0.32 working tree. It is the implementation baseline, not a nested
-dependency and not a read-only reference copy. Councis-specific product work
-will be developed directly on this tree. The detailed source revision and
-dirty-working-tree boundary are recorded in `docs/INTATIS_BASELINE.md`.
-
-The Apple apps currently present the Councis name in product-facing text while
-retaining the Intatis engineering target, module, bundle, and storage identifiers.
-
-The existing Intatis provenance, derivative notices, vendored licenses, and
-clean-room restrictions below remain applicable and must be preserved.
-
 ## Project origin and source-reuse policy
 
 Intatis is an Apple-first, Swift-native-first local AI workbench. Project-owned

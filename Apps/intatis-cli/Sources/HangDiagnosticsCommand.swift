@@ -35,7 +35,7 @@ enum CLIDiagnoseHangError: Error, LocalizedError, Equatable {
         case .targetNotOwnedByCurrentUser:
             return "the target process is not owned by the current user"
         case .targetIsNotIntatis:
-            return "the target process is not the Intatis macOS application"
+            return "the target process is not the Councis macOS application"
         case .sampleFailed:
             return "the hang bundle was saved, but macOS sample capture failed"
         }
@@ -221,7 +221,7 @@ func captureIntatisHang(
     let outputRoot: URL
     if let outputParentURL = options.outputParentURL {
         outputRoot = outputParentURL.appendingPathComponent(
-            "Intatis-HangDiagnostics",
+            "Councis-HangDiagnostics",
             isDirectory: true)
     } else {
         outputRoot = resolvedDefaultRoot

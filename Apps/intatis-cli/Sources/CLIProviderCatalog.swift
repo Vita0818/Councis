@@ -53,6 +53,13 @@ struct CLIProviderModel: Equatable, Sendable {
     }
 }
 
+/// A role-specific model route from the local provider configuration. This is
+/// not an inference profile and does not add the model to any chat/Cowork menu.
+struct CLIProviderModelSelection: Equatable, Sendable {
+    let providerID: String
+    let modelID: String
+}
+
 /// A logical provider route. `id` is used only as local configuration input;
 /// catalog/EventLog identifiers are opaque hashes. Secret material is either a
 /// lazy `credentialRef` or an in-memory value for the legacy/env override path.
@@ -122,6 +129,8 @@ struct CLIModernProviderConfig: Sendable {
     let routes: [CLIProviderRoute]
     let selectedProviderID: String
     let selectedModelID: String
+    let judgeModel: CLIProviderModelSelection?
+    let imageModel: CLIProviderModelSelection?
     let sourceURL: URL
 
     static func existingURL(environment: [String: String]) -> URL? {
@@ -149,13 +158,13 @@ struct CLIModernProviderConfig: Sendable {
     static func load(from url: URL,
                      environment: [String: String]) throws -> CLIModernProviderConfig {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw IntatisError.config("selected Intatis provider config is unavailable")
+            throw IntatisError.config("selected Councis provider config is unavailable")
         }
         let data = try JSONC.data(contentsOf: url)
         guard case .object(let root) = try JSONDecoder().decode(JSONValue.self, from: data),
               let providerMap = root.object("provider"),
               !providerMap.isEmpty else {
-            throw IntatisError.config("selected Intatis provider config has no provider map")
+            throw IntatisError.config("selected Councis provider config has no provider map")
         }
 
         let enabled = Set((root.stringArray("enabled_providers")
@@ -166,6 +175,20 @@ struct CLIModernProviderConfig: Sendable {
             root.string("model") ?? root.string("small_model") ?? root.string("smallModel"),
             environment: environment,
             configDirectory: url.deletingLastPathComponent())
+        let judgeModelRaw = resolvedConfigValue(
+            root.string("judge_model"),
+            environment: environment,
+            configDirectory: url.deletingLastPathComponent())
+        let imageModelRaw = resolvedConfigValue(
+            root.string("image_model") ?? root.string("imageModel"),
+            environment: environment,
+            configDirectory: url.deletingLastPathComponent())
+        let explicitJudgeProviderID = providerID(
+            referencedBy: judgeModelRaw,
+            availableProviderIDs: Array(providerMap.keys))
+        let explicitImageProviderID = providerID(
+            referencedBy: imageModelRaw,
+            availableProviderIDs: Array(providerMap.keys))
 
         var routes: [CLIProviderRoute] = []
         for providerID in providerMap.keys.sorted() {
@@ -194,7 +217,11 @@ struct CLIModernProviderConfig: Sendable {
                 options: options,
                 sourceURL: url)
             let models = parseModels(provider.object("models") ?? [:])
-            guard !models.isEmpty else { continue }
+            guard !models.isEmpty
+                    || providerID == explicitJudgeProviderID
+                    || providerID == explicitImageProviderID else {
+                continue
+            }
             routes.append(CLIProviderRoute(
                 id: providerID,
                 displayName: provider.string("displayName")
@@ -210,15 +237,28 @@ struct CLIModernProviderConfig: Sendable {
                 inlineSecret: nil,
                 models: models))
         }
-        guard !routes.isEmpty else {
-            throw IntatisError.config("selected Intatis provider config has no usable routes")
+        let inferenceRoutes = routes.filter { !$0.models.isEmpty }
+        guard !inferenceRoutes.isEmpty else {
+            throw IntatisError.config("selected Councis provider config has no usable routes")
         }
 
-        let selection = try selectModel(selectedRaw, routes: routes)
+        let selection = try selectModel(selectedRaw, routes: inferenceRoutes)
+        let judgeModel = try selectRoleModel(
+            judgeModelRaw,
+            preferredProviderID: selection.providerID,
+            routes: routes,
+            roleName: "judge")
+        let imageModel = try selectRoleModel(
+            imageModelRaw,
+            preferredProviderID: selection.providerID,
+            routes: routes,
+            roleName: "image")
         return CLIModernProviderConfig(
             routes: routes,
             selectedProviderID: selection.providerID,
             selectedModelID: selection.modelID,
+            judgeModel: judgeModel,
+            imageModel: imageModel,
             sourceURL: url.standardizedFileURL)
     }
 
@@ -302,6 +342,78 @@ struct CLIModernProviderConfig: Sendable {
         }
         let route = routes[0]
         return (route.id, route.models[0].id)
+    }
+
+    private static func selectRoleModel(
+        _ raw: String?,
+        preferredProviderID: String,
+        routes: [CLIProviderRoute],
+        roleName: String
+    ) throws -> CLIProviderModelSelection? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        let exact = routes.filter { route in
+            route.models.contains(where: { $0.id == raw })
+        }
+        if exact.count == 1, let route = exact.first {
+            return CLIProviderModelSelection(
+                providerID: route.id,
+                modelID: raw)
+        }
+        if exact.count > 1 {
+            if let preferred = exact.first(where: { $0.id == preferredProviderID }) {
+                return CLIProviderModelSelection(
+                    providerID: preferred.id,
+                    modelID: raw)
+            }
+            throw IntatisError.config(
+                "ambiguous CLI \(roleName) model; qualify it with a provider ID")
+        }
+
+        for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
+            let prefix = route.id + "/"
+            if raw.hasPrefix(prefix) {
+                let modelID = String(raw.dropFirst(prefix.count))
+                guard !modelID.isEmpty else {
+                    throw IntatisError.config("invalid CLI \(roleName) model")
+                }
+                return CLIProviderModelSelection(
+                    providerID: route.id,
+                    modelID: modelID)
+            }
+        }
+
+        // A slash-bearing value that was neither an exact configured model ID
+        // nor prefixed by a known provider is an unresolved provider route.
+        // Do not reinterpret it as a new model under the preferred provider.
+        if raw.contains("/") {
+            throw IntatisError.config(
+                "selected CLI \(roleName) provider route is unavailable")
+        }
+
+        guard routes.contains(where: { $0.id == preferredProviderID }) else {
+            throw IntatisError.config(
+                "selected CLI \(roleName) provider route is unavailable")
+        }
+        return CLIProviderModelSelection(
+            providerID: preferredProviderID,
+            modelID: raw)
+    }
+
+    private static func providerID(
+        referencedBy raw: String?,
+        availableProviderIDs: [String]
+    ) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return availableProviderIDs
+            .sorted(by: { $0.count > $1.count })
+            .first { raw.hasPrefix($0 + "/") }
     }
 
     private static func parseModels(

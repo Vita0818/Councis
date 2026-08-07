@@ -10,7 +10,7 @@
             <key>Title</key>
             <string>Message Rendering</string>
             <key>FooterText</key>
-            <string>Rich Markdown uses the audited upstream renderer; images, math typesetting, and syntax highlighting are disabled for the first release. Plain text safe mode bypasses Markdown entirely. Use it before opening Intatis if a restored session cannot finish rendering.</string>
+            <string>Rich Markdown uses the audited upstream renderer; images, math typesetting, and syntax highlighting are disabled for the first release. Plain text safe mode bypasses Markdown entirely. Use it before opening Councis if a restored session cannot finish rendering.</string>
         </dict>
         <dict>
             <key>Type</key>

@@ -153,7 +153,7 @@ struct BrowserBackendInvocation: Sendable {
     var injectedShellCommand: String {
         """
         set -e
-        command -v node >/dev/null 2>&1 || { echo "node is not installed; install Node.js to use Intatis browser tools" >&2; exit 127; }
+        command -v node >/dev/null 2>&1 || { echo "node is not installed; install Node.js to use Councis browser tools" >&2; exit 127; }
         INTATIS_BROWSER_ARGS='\(encodedArguments)' node <<'INTATIS_BROWSER_INJECTED_NODE'
         \(javaScript)
         INTATIS_BROWSER_INJECTED_NODE
@@ -320,6 +320,12 @@ public protocol ImageGenerationToolService: Sendable {
                        count: Int,
                        outputPath: String,
                        workspaceRoot: URL) async throws -> ToolObservation
+    func editImage(image: Data,
+                   filename: String,
+                   mime: String,
+                   prompt: String,
+                   outputPath: String,
+                   workspaceRoot: URL) async throws -> ToolObservation
 }
 
 /// Seam for agent-to-agent messaging (v0.3). Cowork provides an implementation
@@ -1574,7 +1580,7 @@ public struct ToolRegistry: Sendable {
             GitRemotesTool(), GitFetchTool(), GitPullFastForwardTool(),
             GitPushTool(), GitSwitchBranchTool(),
             ReadPDFTool(), ReadDocumentTool(), EditPDFPagesTool(), ReconstructDocumentImageTool(),
-            CompileLaTeXTool(), GenerateImageTool(),
+            CompileLaTeXTool(), GenerateImageTool(), EditImageTool(),
             WebFetchTool(), BrowserDiagnosticsTool(), BrowserProfilesTool(), BrowserProfileDeleteTool(), BrowserHistoryTool(),
             BrowserNavigateTool(), BrowserSnapshotTool(), BrowserHandoffTool(), BrowserClickTool(),
             BrowserReloadTool(), BrowserBackTool(), BrowserForwardTool(),

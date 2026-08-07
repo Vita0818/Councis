@@ -213,7 +213,7 @@ private struct IntatisDiagnosticBundleBuilder {
     func build() throws -> IntatisDiagnosticExportResult {
         try Task.checkCancellation()
         let temporaryRoot = fileManager.temporaryDirectory.appendingPathComponent(
-            "Councis-Diagnostic-\(UUID().uuidString)",
+            "Intatis-Diagnostic-\(UUID().uuidString)",
             isDirectory: true)
         try createOwnerOnlyDirectory(temporaryRoot)
         defer { try? fileManager.removeItem(at: temporaryRoot) }
