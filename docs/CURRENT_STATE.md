@@ -1,20 +1,25 @@
 # CURRENT_STATE
 
 文档状态：当前源码摘要
-最近核对：2026-08-07
+最近核对：2026-08-08
 产品基线：v0.36（build 36）
 
 ## Councis 项目覆盖
 
-- 当前业务源码是 Intatis 提交 `2d849dbe592a4532a23d0b5a0f84c4e52e459505` 的直接根工作树
-  快照。Councis 自身 Git `HEAD` 仍是快照替换前的 `13ade0f`；本次快照与文档调整尚未提交。
+- 当前业务源码根快照来源仍是 Intatis 提交
+  `2d849dbe592a4532a23d0b5a0f84c4e52e459505`；本轮又按固定清单选择性同步 Intatis
+  `5e86e525d97a3b8489e49f5514c06a9da944a09f` 相对其父提交
+  `43ce5fea9539e84f9f398a65de299f4e9e0289a6` 的 Cowork current-run 终态控制与
+  correlation-scoped mailbox 变更。Councis 当前 Git `HEAD` 是
+  `d9a42106993819a7a659f9b808857585b08402aa`；本轮源码、测试与文档调整尚未提交。
 - Councis 只定位为现有 Cowork 的有限产品表面、角色与提示词修饰：macOS 直接呈现 Cowork，
   fresh session 固定增加只读数据面 `@judge`，并通过 Main/Judge 系统提示词和 Cowork Skill
   提供协作建议；不改变 Cowork 工作流程，不重做整个 Intatis 产品，也不合并三种运行模式。
 - 当前产品实现差异是展示品牌覆盖，以及 macOS 根侧栏隐藏 Chat/Code/Cowork 三个模式按钮、
   默认选择 Cowork、让侧栏 `+` 新建 Cowork session。继承的 Chat/Code 源码、session 数据和 runtime
-  合同未删除或改写；内部 target/module/type、bundle ID、可执行文件、配置/存储 namespace、协议
-  和 Cowork 运行逻辑未改。当前 fresh Cowork 会以一个原子十事件 batch 固定登记 `@main`、控制面
+  合同未删除或改写；内部 target/module/type、bundle ID、可执行文件与配置/存储 namespace 保持
+  Intatis 基线。本轮 run/mailbox 改动是固定来源的同底层同步，不是新增 Councis 产品差异。当前
+  fresh Cowork 会以一个原子十事件 batch 固定登记 `@main`、控制面
   `@permission-reviewer` 与只读普通数据面 `@judge`；Main 可通过既有显式 delegation/task/message
   路径使用 Judge，系统提示词和内置 Cowork Skill 只提供建议。目标差异与非目标以
   `docs/COUNcis_IDENTITY.md` 为准。
@@ -84,11 +89,22 @@ macOS 仍继承完整的 Chat、Code、Cowork 实现、Settings 和本地诊断�
   创建 fail closed。该配置只影响未来 fresh session，历史 session 不回填或重绑定 Judge。
 - Cowork final turn 现在先校验 side-effect evidence，再原子发布 final message/model-history、idle
   与 completed outcome；旧日志中 failed/interrupted turn 的先行完成气泡会被展示投影纠正，失效的
-  final assistant 也不再进入下一次 provider history。mailbox wake contract 冻结 1–8 个 exact
-  MessageID，ordinary delivery 使用 read-only/reply-only 窄 lease，失败只在同一 TaskID 上有界重试；
-  task completion、candidate progress 与 consumed IDs 同批落盘后才 ack。legacy nil binding 的歧义或
-  耗尽 lineage 保持 pending/fail closed，新消息仍可独立投递。WorkTask 工具的 reviewer preview 已
-  补齐 bounded semantic fields，并明确 `wt_…`、AgentInvocation `task_…` 与 latest revision 的边界。
+  final assistant 也不再进入下一次 provider history。只有 exact `@main` root 可见模型主动调用的
+  `finish_run` / `stop_run`；`@judge`、worker、mailbox task 与 reviewer 均没有该能力。参数只有
+  有界 reason，session/run/Goal/submission/root TaskID 全由宿主绑定；
+  close installation 先形成 actor-local admission/authorization tombstone，EventLog 对每个 RunID 安装
+  first-write durable claim 后才等待既有 admission 并 drain 同 run 的其余 task/message，恢复也先兑现该
+  fence。普通自然语言 final 不伪造显式 claim；root failure/timeout、用户取消与 session shutdown 分别
+  保留 runtime/user/hostLifecycle source，并在 provider/tool cleanup 前关闭精确 run。
+- mailbox wake contract 冻结 1–8 个 exact MessageID，并按 ordinary message、information request、
+  information reply receipt 与 delegation request 分配不同窄 authority。ordinary message 是 one-way、
+  无通信工具；information request 只允许对 frozen RequestID 做一次 `reply_message(inReplyTo:)`；
+  reply receipt 不允许 ACK，但允许在确有新问题时用 `request_information(based_on:)` 建立 fresh
+  RequestID，并保留同一 conversation root。这样 `information_replied` 只终结一个 correlation，
+  不终结长期协作。失败只在同一 TaskID 上有界重试；task completion、candidate progress 与 consumed
+  IDs 同批落盘后才 ack。legacy nil binding 的歧义或耗尽 lineage 保持 pending/fail closed，新消息仍
+  可独立投递。WorkTask 工具的 reviewer preview 已补齐 bounded semantic fields，并明确 `wt_…`、
+  AgentInvocation `task_…` 与 latest revision 的边界。
 - Cowork 中每个 agent 的文件、Git、文档、浏览器文件与 terminal 工具仍只作用于自己的单一
   `workspaceRoot`。具有 `spawn_agent` 的 coordinator 提示词会在预知目标位于根外或收到
   out-of-workspace denial 后停止直接重试，改为按目标绝对目录创建默认只读的子 agent，再用
@@ -206,6 +222,13 @@ profiles 与外部 MCP client。macOS/Linux 的 stdio、sandbox、bwrap/guard �
 
 ## 最近验证状态
 
+- 2026-08-08 Cowork current-run/mailbox correlation：覆盖 run close、mailbox correlation、
+  Goal runtime、delegation、orchestration、lease、permission、projection、Skill 与 Protocol 的
+  focused tests 全部通过；完整 `swift test --skip-build` 重跑退出 0。首次完整 run 在成功构建后
+  曾于 SharedUI XCTest async waiter 瞬时停滞，隔离 `ChatHistoryReplayTests` 6/6 与随后完整重跑
+  均通过。Cowork Skill quick validator、`xcodegen generate`、版本一致性检查、`IntatisMac`
+  macOS Debug 与 `IntatisiOS` generic Simulator Debug unsigned build 均通过。Computer Use 两次
+  尝试均因 Sky 服务启动失败而未进入真实 GUI；未执行线上 provider、签名、公证或发行包验收。
 - 2026-08-06 fixed `@judge` / `judge_model`：`IntatisCoworkTests` 322/322、
   `ContextProjectionTests` 23/23、`SessionProjectionStoreTests` 17/17、
   `SessionStateProtocolTests` 4/4、`IntatisCoreTests` 52/52、`CLIProviderAdapterTests` 7/7、

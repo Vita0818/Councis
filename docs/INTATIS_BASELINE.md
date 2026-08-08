@@ -2,6 +2,8 @@
 
 快照日期：2026-08-06
 
+最近同源选择性更新：2026-08-08
+
 来源路径：`/Users/vita/Vitemis/Intatis`
 
 目标根目录：`/Users/vita/Vitemis/Councis`
@@ -55,13 +57,42 @@ App icon 资产名、配置/存储路径与 key、Keychain/UserDefaults namespac
 工作区策略拒绝重复覆盖受保护的 `.agents/` 文件及恢复其目录时间戳，但目录级递归 diff 为空，
 因此该提示不构成内容缺口。
 
+## 2026-08-08 同源选择性更新
+
+本轮没有重新建立参考树/实现树双轨，也没有修改来源仓库；实现仍只落在 Councis 根工作树。
+用户指定的变更清单来自
+`/Users/vita/Vitemis/Intatis/codex-report/08_08_26-09_38-cowork-run-mailbox-change-inventory.md`，
+对应固定、clean 的 Intatis 提交
+`5e86e525d97a3b8489e49f5514c06a9da944a09f`（标题 `v0.39`），其父提交是
+`43ce5fea9539e84f9f398a65de299f4e9e0289a6`（标题 `v0.38`）。本次只选择性同步该提交中
+Cowork current-run 终态控制与 correlation-scoped mailbox 相关的源码、测试和合同文档；
+产品版本继续由 Councis `project.yml` 的 `0.36 (36)` 决定。
+
+源码与测试的复用方式以固定 Git blob 为准：
+
+- 23 个与 Intatis v0.38 preimage 字节一致的已有文件直接应用 v0.39 原始补丁，落盘后逐文件
+  校验为目标 commit blob；
+- 5 个新增 Swift 文件直接复制目标 commit 的完整 blob，并逐文件校验一致；
+- 8 个已有文件因 Councis 的 `@judge`、品牌或既有投影差异而使用
+  `Councis current + Intatis v0.38 base + Intatis v0.39 target` 三方合并；无冲突部分保持上游
+  表达，冲突处只合并 run/mailbox 合同与 Councis Judge/品牌差异；
+- 额外在 `AutomaticPermissionReviewTests` 增加 Councis 专属断言，证明 Main 获得
+  `controlRun`，而 Judge 即使收到错误的 host run-control hint 也看不到
+  `finish_run` / `stop_run`。
+
+同一提交的 7 个架构/状态/测试合同文档按相同三方方式同步，并保留 Councis 的
+`0.36 (36)`、Cowork-only 表面和固定 Judge 描述。此次同源更新没有引入第三方源码、依赖、
+runtime、二进制或资产，不改变现有第三方分发清单，因此 `NOTICE.md` 与
+`docs/OPEN_SOURCE_REUSE.md` 无需新增采用项。
+
 ## Councis 修改范围
 
-该快照是唯一实现起点。除独立、纯展示的 `Councis` 品牌覆盖外，已实现的有限差异是在 fresh Cowork
-session 中增加固定数据面身份 `@judge` 与 `judge_model` 配置，并通过 Main/Judge 系统提示词和
-Cowork Skill 提供协作建议。它不改变既有 Cowork 工作流程，不代表重做整个 Intatis 产品、合并现有模式或为 Chat/Code
-引入全局新合同。当前基线能力继续由来源架构、状态、测试和禁区文档描述；项目定位以
-`docs/COUNcis_IDENTITY.md` 为准。只有该最小修饰真实影响相应事实时，才同步修改来源文档。
+该快照是唯一实现起点。除独立、纯展示的 `Councis` 品牌覆盖外，Councis 相对已同步 Intatis
+底层的有限产品差异仍只是在 fresh Cowork session 中增加固定数据面身份 `@judge` 与
+`judge_model` 配置，并通过 Main/Judge 系统提示词和 Cowork Skill 提供协作建议。本轮
+run/mailbox 变更属于同源底层更新，不是新增 Councis 产品差异；它不代表重做整个 Intatis
+产品、合并现有模式或为 Chat/Code 引入全局新合同。当前基线能力继续由来源架构、状态、测试和
+禁区文档描述；项目定位以 `docs/COUNcis_IDENTITY.md` 为准。
 
 来源 `.git`、ignored/untracked 构建缓存、`.build`、`.swiftpm`、生成的 `Intatis.xcodeproj`、
 `.DS_Store`、`node_modules`、`dist`、Playwright cache 和 `tmp/` 不属于 source HEAD archive，

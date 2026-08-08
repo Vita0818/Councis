@@ -130,6 +130,7 @@ public struct ConversationProjection: Equatable, Sendable {
              .goalContinuationScheduled, .goalProgressed, .goalBlocked,
              .goalBudgetLimited, .goalUsageLimited, .goalCompleted, .goalCleared,
              .continuationRunCreated, .continuationRunStarted, .continuationRunCheckpointed,
+             .continuationRunCloseRequested,
              .continuationRunCompleted, .continuationRunCancelled, .continuationRunRecovered,
              .artifactProgress, .turnStats, .turnOutcome,
              .mcpServerAttached, .mcpServerDetached, .mcpAttachmentPolicyUpdated,

@@ -4,6 +4,8 @@
 > 事故 Session：`cowork_anv6q9f3`
 > 状态：已完成只读事故分析与修复设计；尚未修改业务源码、配置或测试源码
 > 范围：Councis 当前 Cowork 运行时；相关底层路径与 Intatis 当前修复版相同
+> 修订说明：后续设计复核明确，`information_replied` 只应终结当前 request/reply
+> correlation，而不是终结整个 conversation。真实追问与多轮协调应通过新的显式请求继续。
 
 ## MODEL_CHECK_RESULT
 
@@ -18,7 +20,7 @@
 
 ## FILES_WRITTEN
 
-- 仅新增本报告：
+- 仅修改本报告：
   `codex-report/08_07_26-21_56-cowork-run-terminal-control-and-mailbox-livelock-report.md`
 - 未修改 `Apps/`、`Packages/`、`docs/`、配置、测试源码或 session 持久化数据。
 
@@ -35,12 +37,14 @@ delivery 的 retry lineage，既有“同一 MessageID / 同一 TaskID 最多三
 1. **Run 生命周期缺口**：当前没有 Main 可调用的 `finish_run` / `stop_run`；更根本地说，
    没有一个被 Main 正常完成、用户 Stop、root timeout、fatal failure 共同调用的统一
    `closeRun` 控制面终态操作。Root 超时只终结了 root task，没有先关闭该 Run 的新 admission。
-2. **Mailbox 协议缺口**：`reply_message` 的 `inReplyTo` 是可选的；回复本身仍被当作可再次回复的
-   新消息；普通 mailbox responder 继续拥有 `reply_message`。系统提示词中的“Respond only when
-   useful”不是运行时边界，无法阻止模型用一条回复来说明“无需回复”。
+2. **Mailbox 协议缺口**：`reply_message` 的 `inReplyTo` 是可选的；回复本身仍被当作可再次回复并
+   无条件触发 wake 的新消息；协议没有区分“当前请求已经回答”与“接收方显式提出了新的追问”。
+   系统提示词中的“Respond only when useful”不是运行时边界，无法阻止模型用一条回复来说明
+   “无需回复”。
 
-优先级上，统一 Run 终态是主修复，reply-to-reply 的硬性禁止是不可省略的第二道保险。只实现其中
-任何一项都不能完整覆盖本事故。
+优先级上，统一 Run 终态是主修复；单次 request/reply correlation 有界终结、后续协调必须建立新的
+显式通信意图，是不可省略的第二道保险。这里不主张全局禁止 Agent 继续对话；只实现其中任何一项
+都不能完整覆盖本事故。
 
 ## 1. 事故事实
 
@@ -173,12 +177,16 @@ Main 无法通过结构化工具调用向控制面表达：
 代码没有判断被回复的原消息 kind，也没有禁止 reply-to-reply。`inReplyTo` 是 optional，且没有要求
 它必须引用当前 invocation 实际呈现、方向匹配、尚未回复的 message。
 
-### 3.2 普通 mailbox responder 继续获得回复能力
+### 3.2 普通 mailbox responder 缺少通信意图区分
 
 `prepareMailboxDeliveryTask` 会把 ordinary mailbox capability 收窄为 read-only/reply-only，这比旧的
 完整 coordinator lease 安全得多；但它仍固定把 `.replyMessage` 放入 allowed tools。对于输入本身已经
-是 `information_replied` 或 completion report 的 delivery，这个能力没有正当用途，反而允许模型
-用回复表达“无需回复”。
+是 `information_replied` 或 completion report 的 delivery，通用 `.replyMessage` 无法区分“只需
+durable consume/receipt”与“确实需要提出新的追问”，两者都会被实现成新回复并触发 wake。
+
+问题不是接收方此后永远不应再通信，而是它不应复用原 correlation 的通用回复能力来表达 ACK 或
+开启下一轮。真正的后续协调应建立新的、显式期待响应的 request correlation，并保留与原
+conversation 的因果关联。
 
 ### 3.3 Prompt/Skill 不能成为循环保险
 
@@ -193,7 +201,8 @@ ContextBuilder 也会把 exact MessageID、kind、causal task、sender 和最多
 
 - prompt 可以引导正常行为；
 - prompt 不能证明模型一定不回复；
-- “不要回复”必须由 tool availability、correlation validation 和 message state machine 强制执行。
+- “当前请求已终结、是否开启下一轮”必须由 tool availability、correlation validation 和 message
+  state machine 强制执行。
 
 ### 3.4 同 MessageID bounded retry 无法覆盖新 MessageID 链
 
@@ -269,6 +278,18 @@ stateDiagram-v2
 7. timeout/cancel/failure 保留 typed source，不伪造成功答案；
 8. duplicate exact close request 幂等，冲突 outcome first-terminal-wins / fail closed。
 
+源码复核已经确认，当前 `ContinuationRunStatus` 只有 `created`、`running`、`checkpointed`、
+`completed`、`cancelled`，Event enum 也只有 created/started/checkpointed/completed/cancelled/recovered，
+没有可表达“admission 已关闭、terminal 尚未提交”的 durable fact。因此 Closing 不能复用
+`checkpointed` 或只保存在 actor 内存中；前者会混淆 Goal audit barrier，后者会在 crash/restart 后
+重新开放 admission。最小兼容方案是新增 additive、legacy-skippable 的
+`continuation_run_close_requested` 事件，终局仍与既有 completed/cancelled 事件保持可回放关系。
+
+模块所有权也已明确：`GoalRuntimeController` 当前创建并终结 `ContinuationRun`，`Orchestrator` 当前
+拥有 task/message admission、scheduler、timeout 和 drain。统一原语可以由 Orchestrator 执行 durable
+claim + admission fence + drain，但 Goal controller 必须通过同一接口结算普通 turn 与 Goal
+continuation；不能让两边各写一套“看起来相同”的终态逻辑。
+
 ### 4.3 Main-facing 工具层
 
 模型侧可以暴露两个清晰工具，但它们必须映射到同一个 `closeRun`：
@@ -308,7 +329,8 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 ## 5. Mailbox 协议的独立修复
 
 统一 `closeRun` 能在终态时切断新 admission，但正常 Run 尚未结束时仍可能形成 reply loop。因此还需
-同时建立以下硬约束。
+同时建立以下硬约束。核心不变量是：`information_replied` 终结 exact request correlation，但不终结
+整个 conversation；长时间自主协作可以继续多轮，每一轮都必须由新的显式通信意图开启。
 
 ### 5.1 Reply correlation 必须真实存在
 
@@ -316,22 +338,47 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 - 必须引用当前 invocation 实际呈现的 exact MessageID；
 - 原消息必须由目标 Agent 发给当前 Agent；
 - 原消息必须与当前 Submission/Run scope 一致；
-- 原消息必须允许回复且尚无 terminal reply；
+- 原消息必须属于尚未终结、明确允许一次响应的 request correlation；
+- 同一 request correlation 最多接受一个 terminal reply；exact duplicate 幂等，冲突回复 fail closed；
 - 任一验证失败返回 typed no-effect，不写新 mailbox message。
 
-### 5.2 `information_replied` 是终结型消息
+### 5.2 `information_replied` 只终结当前请求轮次
 
 - `request_information` 最多得到一个相关 `information_replied`；
-- `information_replied` 不允许再次通过 `reply_message` 回复；
-- 处理 reply/task-report 的 mailbox delivery 不暴露 `.replyMessage`；
-- 若接收方只需确认已读，成功完成 mailbox task 并 durable consume 即可，不产生对外消息。
+- `information_replied` 关闭的是 exact request correlation，不是所在 conversation、task 或 Run；
+- reply/task-report delivery 不自动获得针对原消息的通用 `.replyMessage`，也不自动产生反向响应义务；
+- 若接收方只需确认已读，成功完成 mailbox task 并写 durable consume/receipt 即可，不产生对外消息或
+  provider wake；
+- 该约束用于消除 ACK 链，不得解释为禁止接收方提出真实追问或继续协作。
 
-### 5.3 最终保险
+现有协议已经有 `agent_message_consumed` 与 `agent_message_discarded`，而且成功 mailbox task 会把
+`task_completed` 与 exact consumed MessageID 放在同一持久化 batch 后才做内存 ack。因此“已读但不
+反向唤醒”应直接复用这条 durable consume 路径，不需要再发一条 ACK message，也不需要新增
+receipt 消息类型。
 
-- 为消息 lineage 保存/推导 root MessageID 和 reply depth；
-- reply depth 上限为 1，或由明确协议类型决定；
-- 检测同一 agent pair 的 A→B→A acknowledgement cycle；
+### 5.3 通过显式新意图继续协调
+
+- 接收方确需澄清时，应创建新的 `request_information`，或使用等价的 exact-scoped
+  `request_followup`；新请求获得新的 MessageID/request correlation；
+- 新请求保留同一 conversation/root lineage，并通过 `basedOn` 或等价字段关联上一条回复；
+- 新轮次必须绑定当前 Run、当前 Agent pair 和仍有效的 task scope，并明确期待一次响应；
+- 单次 correlation 有界，但 conversation 在 Run 保持 Open、任务仍有效且预算允许时可以持续任意多轮；
+- 实现可选择收窄后的现有 `request_information` 或专用 follow-up facade，但不能根据自然语言内容
+  自动猜测是否开启新轮次。
+
+源码复核同时确认：当前 `InformationRequestedPayload` 没有 conversation/root lineage 或 `basedOn`
+字段，`InformationRepliedPayload.inReplyTo` 仍为 optional；ordinary mailbox lease 是
+`.replyOnly`，只固定授予 `.replyMessage`。所以若复用 `request_information` 作为 follow-up，必须
+同时做两件事：为 payload 增加 optional、legacy-decodable 的 lineage 字段，并把该 mailbox
+invocation 的发起权限收窄到 exact sender/当前 Run，而不是恢复任意 Agent 通信能力。
+
+### 5.4 最终保险
+
+- 为消息 lineage 保存/推导 conversation/root MessageID、request correlation 和 reply depth；
+- reply depth 上限作用于单次 request correlation，而不是整个 conversation；
+- 检测同一 agent pair 在没有新 request correlation 时形成的 A→B→A acknowledgement cycle；
 - Run 进入 Closing 后，所有 late message 走 durable discard，不创建 wake task；
+- 消息是否期待响应由协议状态与所用工具决定，不能依赖模型自由填写一个无约束布尔值；
 - 这些限制不能依赖对内容文本做“收到”“ACK”关键词匹配。
 
 ## 6. 与 Judge / Councis 产品边界的关系
@@ -357,14 +404,14 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 
 | 文件/区域 | 预期职责 |
 |---|---|
-| `Packages/IntatisCowork/Sources/Orchestrator.swift` | 统一 Run close claim、admission tombstone、finish/stop/timeout/cancel 接线、reply correlation 与 mailbox tool 收窄 |
-| `Packages/IntatisCowork/Sources/CommunicationDelegationTools.swift` | `reply_message.inReplyTo` schema 与 typed validation；必要时新增 Run control tool facade |
+| `Packages/IntatisCowork/Sources/Orchestrator.swift` | 统一 Run close claim、admission tombstone、finish/stop/timeout/cancel 接线、request/reply correlation、durable receipt 与显式 follow-up admission |
+| `Packages/IntatisCowork/Sources/CommunicationDelegationTools.swift` | `reply_message.inReplyTo` schema 与 typed validation；必要时新增 Run control 与 exact-scoped follow-up facade |
 | `Packages/IntatisCowork/Sources/GoalRuntimeController.swift` | Goal continuation 的完成/停止路径复用统一 closeRun，不重复实现 |
 | `Packages/IntatisAgentKernel/Sources/AgentLoop.swift` | Main implicit final 与 finish-run closing claim 的原子终态协调 |
-| `Packages/IntatisAgentKernel/Sources/ContextBuilder.swift` | Main finish/stop 使用时机；mailbox reply 是 terminal communication fact |
-| `Packages/IntatisProtocol/Sources/*` | 若现有事件无法表达 durable close claim，仅做 additive、legacy-decodable 扩展 |
+| `Packages/IntatisAgentKernel/Sources/ContextBuilder.swift` | Main finish/stop 使用时机；mailbox reply 只终结当前请求轮次，真实追问必须开启新 correlation |
+| `Packages/IntatisProtocol/Sources/*` | 已确认需 additive、legacy-decodable 的 Run Closing 事件；显式 follow-up 还需 additive lineage 字段 |
 | Cowork ToolRegistry 构造路径 | 只向 current root Main 暴露 finish/stop；worker/Judge/reviewer/mailbox 不可见 |
-| `Packages/IntatisSkills/Resources/BundledSkills/cowork-agent-orchestration/SKILL.md` | 教 Main 使用真实已注册的终态工具，不改变其自主编排权 |
+| `Packages/IntatisSkills/Resources/BundledSkills/cowork-agent-orchestration/SKILL.md` | 教 Main 使用真实已注册的终态工具，并区分 receipt 与显式 follow-up，不改变其自主编排权 |
 
 ### 7.2 Tests
 
@@ -377,12 +424,15 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 5. Root timeout 自动调用同一 close path，不等待 mailbox 自然 idle 才建立 tombstone。
 6. 用户 Stop 与现有 Goal cancellation 继续保留 typed source，并复用同一底层状态机。
 7. `reply_message` 缺少、伪造、跨 Agent、跨 Run、已经回复的 `inReplyTo` 全部 fail closed。
-8. `information_replied` delivery 不暴露 `reply_message`，成功 consume 后不产生反向消息。
-9. 复刻本 session：GLM reply → Main acknowledgement attempt；断言没有第二条 reply、新 MessageID
-   或第二个 mailbox task。
-10. duplicate close 幂等；冲突 outcome 不得覆盖 first terminal。
-11. crash/restart 在 Closing 状态只能 reconcile/drain，不恢复 admission 或重新调用 provider。
-12. 旧 JSONL 缺少新增字段仍可解码；不改写现有 session。
+8. `information_replied` 只关闭 exact request correlation；durable consume/receipt 不产生反向消息或
+   provider wake。
+9. 真正的 follow-up 能以新 request correlation 继续同一 conversation，并获得一次相关回复；连续多轮
+   不受全局 reply-depth=1 的错误限制。
+10. 复刻本 session：GLM reply → Main acknowledgement attempt；若没有显式新请求，断言没有第二条
+    reply、新 MessageID 或第二个 mailbox task。
+11. duplicate close 幂等；冲突 outcome 不得覆盖 first terminal。
+12. crash/restart 在 Closing 状态只能 reconcile/drain，不恢复 admission 或重新调用 provider。
+13. 旧 JSONL 缺少新增字段仍可解码；不改写现有 session。
 
 ## 8. 明确非方案
 
@@ -390,19 +440,24 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 - 不靠识别“收到”“ACK”“无需回复”等自然语言阻止循环。
 - 不简单缩短 600 秒 timeout；这只会更早触发同一缺口。
 - 不删除、重写或离线修复 `cowork_anv6q9f3` 的 EventLog。
-- 不放宽 Main、worker、Judge 或 mailbox responder 的 capability。
+- 不向 Main、worker、Judge 或 mailbox responder 恢复完整或无边界 capability；必要的 follow-up
+  必须 exact-scoped、可审计且受当前 Run/task lease 约束。
 - 不让 worker/Judge 获得 Run 终态控制权。
 - 不把 `finish_run` 与 `stop_run` 实现成两套独立状态机。
 - 不因为模型调用 finish 就跳过 tool/side-effect evidence、task settlement 或 EventLog 原子性。
 - 不修改现有 Cowork 的 Main 自主选择 sub-agent、模型、策略和 Judge 用法。
+- 不把单次 request correlation 的 reply-depth 上限误用为整个 conversation 的轮数上限，也不禁止
+  Agent 通过新的显式请求继续真实协调。
 
 ## 9. 建议实施顺序
 
 1. 先冻结统一 `closeRun` 的 scope、outcome、source、first-terminal 与 durable claim 合同。
 2. 把用户 Stop、root timeout、fatal failure、Goal cancellation 接到同一底层 closing 路径。
 3. 新增 Main-only `finish_run` / `stop_run` facade，并把 implicit Main final 接到相同路径。
-4. 收紧 reply correlation；把 `information_replied` 定义为 terminal message。
-5. 调整 mailbox capability preparation，reply/task-report delivery 不再暴露 reply tool。
+4. 收紧 reply correlation；把 `information_replied` 定义为当前 request correlation 的 terminal reply，
+   同时冻结显式 follow-up 的新 correlation 合同。
+5. 调整 mailbox capability preparation：reply/task-report delivery 不再自动获得针对原消息的通用 reply
+   能力；只读 receipt 不 wake，真实追问使用 exact-scoped 新请求。
 6. 更新 Main 系统提示词与 Cowork Skill。
 7. 先运行精确 lifecycle/mailbox 回归，再运行完整 SwiftPM、macOS/iOS build。
 8. 用新的 fresh session 重跑同一会议纪要决策题；确认 Judge 被调用、Run 正常完成、没有确认链。
@@ -419,25 +474,29 @@ Prompt/Skill 负责帮助模型做语义判断，控制面负责保证即使模�
 - 核对 Main-visible Cowork tool descriptors；
 - 核对 GUI Stop、Orchestrator task/all/scoped cancellation 路径；
 - 核对 reply → scheduler → mailbox wake → mailbox capability 源码链路；
+- 复核 `ContinuationRunStatus` / Event enum，确认没有 durable Closing fact；
+- 复核 `InformationRequestedPayload` / `InformationRepliedPayload`，确认 lineage 缺失而 durable
+  consume/discard 已存在；
 - 核对相关底层文件与 Intatis 当前修复版的一致性。
+- 运行 `git diff --check`，通过。
 
 因为本轮只要求形成报告，未运行构建或测试。
 
 ## UNCERTAINTIES
 
-1. Durable Closing claim 应复用哪个现有 Event，还是增加 additive
-   `continuation_run_close_requested`，需要实施前结合现有 Protocol enum 与 legacy decode 再定；不能只保存在
-   内存，否则 crash/restart 可能重新开放 admission。
-2. `finish_run` 调用后是否允许当前 Main 再进行一次 provider turn，还是把最终答案直接包含在工具参数
+1. `finish_run` 调用后是否允许当前 Main 再进行一次 provider turn，还是把最终答案直接包含在工具参数
    中，需要根据现有 model-history/tool-result 原子合同选择。推荐关闭下游 admission、保留当前 Main
    输出一次最终答案，避免把长答案作为控制工具参数重复持久化。
-3. 普通非 Goal submission 与 durable Goal continuation 当前共享 ContinuationRun 事件，但 GUI
+2. 普通非 Goal submission 与 durable Goal continuation 当前共享 ContinuationRun 事件，但 GUI
    cancellation 入口不同；实施时必须证明两者最终进入同一个 close primitive，而不是表面复用名称。
+3. 显式 follow-up 应复用收窄后的 `request_information` 还是新增 `request_followup` 仍需在实施时按
+   provider tool ergonomics 选择；协议现状已经确认：lineage/`basedOn` 缺失，需 additive 扩展，而
+   durable consume/discard 已存在，应直接复用。
 4. 原 Kimi route 的 `developer` role HTTP 400 是独立 provider adapter/route compatibility 问题，不应
    混入本次 Run lifecycle 修复。
 
 ## NEXT_RECOMMENDED_ACTION
 
-在用户确认后，先把统一 `closeRun` 状态机、Main-only 工具合同和 reply terminal invariant 写成精确
-测试，再修改 production。实现必须与 Intatis Cowork 底层保持同构；不应在 Councis 以 Judge 特例或
-额外编排流程绕过该问题。
+在用户确认后，先把统一 `closeRun` 状态机、Main-only 工具合同，以及“单次请求终结、显式新请求
+继续 conversation”的 mailbox invariant 写成精确测试，再修改 production。实现必须与 Intatis
+Cowork 底层保持同构；不应在 Councis 以 Judge 特例或额外编排流程绕过该问题。

@@ -453,6 +453,7 @@ final class AutomaticPermissionReviewTests: XCTestCase {
         }
         XCTAssertEqual(mainCapabilities.count, 1)
         XCTAssertTrue(mainCapabilities[0].tools.contains(.renameSession))
+        XCTAssertTrue(mainCapabilities[0].tools.contains(.controlRun))
         let reviewerCapabilities = projection.capabilityLeaseAgents.compactMap { leaseID, agent in
             agent == reviewer ? projection.capabilityLeases[leaseID] : nil
         }
@@ -465,6 +466,13 @@ final class AutomaticPermissionReviewTests: XCTestCase {
         XCTAssertTrue(judgeCapabilities[0].tools.contains(.readWorkspace))
         XCTAssertTrue(judgeCapabilities[0].tools.contains(.replyMessage))
         XCTAssertFalse(judgeCapabilities[0].tools.contains(.delegateTask))
+        XCTAssertFalse(judgeCapabilities[0].tools.contains(.controlRun))
+        let judgeRegistry = Orchestrator.toolRegistry(
+            for: judgeCapabilities[0],
+            agentID: judge,
+            canControlRun: true)
+        XCTAssertNil(judgeRegistry.tool(named: "finish_run"))
+        XCTAssertNil(judgeRegistry.tool(named: "stop_run"))
         let mainWorkspaceID = try XCTUnwrap(projection.workspaceLeaseAgents.first {
             $0.value == main
         }?.key)

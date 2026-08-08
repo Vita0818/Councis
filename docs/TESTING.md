@@ -1,7 +1,7 @@
 # TESTING
 
 文档状态：当前验证矩阵
-最近核对：2026-08-07
+最近核对：2026-08-08
 产品基线：v0.36（build 36）
 
 历史测试数量、性能数字和事故复验保留在 Git 历史及 dated reports；它们不能替代当前
@@ -157,9 +157,15 @@ recovery App metadata/architecture/signature/entitlements 重新验证；超时�
 - Cowork final message/model-history、idle 与 completed outcome 只有在 side-effect evidence
   校验通过后才同批落盘；failed/interrupted turn 会使旧日志中的先行完成气泡和 final assistant
   history 失效，同时保留真实 user/tool history；
-- mailbox new delivery 冻结 1–8 个 exact MessageID，只呈现和消费该集合；ordinary delivery
-  使用 read-only/reply-only 窄 lease，成功 terminal 与 consumed events 原子提交后才 runtime ack；
-  失败只重试同一 TaskID，poison ID 耗尽不阻塞后来新 ID，legacy 歧义 fail closed；
+- current-run close 只向 exact `@main` root 暴露，模型不得提供 identity，`@judge`、worker、
+  mailbox task 与 reviewer 均不得获得 `controlRun`；in-flight tombstone 必须先挡住重入
+  admission/authorization，RunID first-write claim 必须早于旧 admission wait 与 cleanup/drain
+  落盘，只 drain 同 run、保留 typed source，恢复不得复活 closed run，普通 final 不伪造 claim；
+- mailbox new delivery 冻结 1–8 个 exact MessageID，只呈现和消费该集合，并按 authority class
+  收窄：ordinary message read-only、无通信工具且不 ACK；information request 只接受一个 exact
+  `inReplyTo` terminal reply；information reply receipt 只能用 fresh RequestID +
+  `based_on` 延续同 conversation，不能形成 ACK 环。成功 terminal 与 consumed events 原子提交后
+  才 runtime ack；失败只重试同一 TaskID，poison ID 耗尽不阻塞后来新 ID，legacy 歧义 fail closed；
 - WorkTask 工具区分 `wt_…` 与 AgentInvocation `task_…`，update 使用 latest authoritative
   revision，terminal task 不冗余 settle；create/update reviewer preview 只含 bounded、脱敏语义字段；
 - path escape、symlink/hardlink、secret、credential path、workspace lease fail closed；
@@ -325,25 +331,28 @@ routing options、结构化 unsupported 同路由一次降级、裸 404 拒绝�
 
 ## 最近一次真实结果
 
-2026-08-07 Councis Cowork terminal/mailbox reconciliation 同底层移植的直接证据：
+2026-08-08 Councis Cowork current-run/mailbox correlation 同底层同步的直接证据：
 
-- 报告对应的 TaskContract、AgentLoop policy、model history、context projection、
-  CodeProjection、MessageBus/delegation、orchestration reliability、WorkTask runtime
-  与 permission reviewer 九类 focused tests 退出 0；其中包含 Councis 固有 Judge prompt 回归；
-- 完整 `swift test --skip-build` 退出 0；另按 target 复核为
-  `IntatisCoworkTests` 329 tests / 0 failures、`IntatisSharedUITests` 139 tests /
-  0 failures，完整输出中的 `IntatisAgentKernelTests` 为 176 tests / 0 failures。真实
-  Git/browser/provider/credential 等 opt-in smoke 继续按各自声明 skipped；
+- current-run close、mailbox correlation、Goal runtime、delegation、orchestration、lease、
+  permission、projection、Skill 与 Protocol 的 focused tests 全部退出 0；其中
+  `IntatisCoworkTests` 选中 159 tests / 0 failures、`IntatisSkillsTests` 29/29、
+  `ContextProjectionTests` 24/24、选中的 Protocol tests 14/14，包含 Main/Judge
+  `controlRun` 隔离与普通 root final 不伪造 close claim 的回归；内置 Cowork Skill quick
+  validator 也通过；
+- 完整 `swift test --skip-build` 重跑退出 0。第一次完整 `swift test` 已成功构建，但在
+  `IntatisSharedUITests` 的 XCTest async waiter 中长时间无输出后人工中止；对应
+  `ChatHistoryReplayTests` 隔离重跑 6/6，通过后再跑完整 suite 成功，因此没有用源码修改掩盖
+  这次瞬时等待。真实 Git/browser/provider/credential 等 opt-in smoke 继续按各自声明 skipped；
 - `xcodegen generate` 与 `scripts/check-version-consistency.sh` 通过，版本一致为
   `0.36 (build 36)`；`IntatisMac` macOS Debug、`IntatisiOS` generic Simulator
-  Debug unsigned build 与 `IntatisMac` unsigned universal Release 均退出 0；
-- Release bundle 为 `0.36 (36)`、bundle identifier `com.Vita0818.IntatisMac`，
-  可执行文件包含 `x86_64 arm64`。构建只有既有 unused-result / deprecated
-  `onChange` warning；
+  Debug unsigned build 均退出 0；构建只有既有 unused-result / deprecated `onChange`
+  warning。本轮没有运行 universal Release build，也没有据此新增包体或架构断言；
 - 首次受限沙箱内的 focused test 在 manifest 编译前因 Swift/Clang 用户 module cache
-  不可写而退出；转到获准宿主环境后的 focused、完整 suite 和构建均通过。未启动真实 GUI
-  session，未调用线上 provider/credential，未安装 App，也未执行签名、公证、staple、
-  Gatekeeper 或 DMG/ZIP 打包；现有历史 session/EventLog 未被本轮验证改写。
+  不可写而退出；转到获准宿主环境后的 focused、完整 suite 和构建均通过。按用户建议初始化
+  Computer Use 后两次枚举 macOS 应用均在 Sky 服务启动阶段失败，错误为
+  `Sky Computer Use service startup request failed`，所以没有虚构 GUI smoke 成功，也没有改用
+  AppleScript 绕过技能。未调用线上 provider/credential、未安装 App，也未执行签名、公证、
+  staple、Gatekeeper 或 DMG/ZIP 打包；现有历史 session/EventLog 未被本轮验证改写。
 
 2026-08-06 fixed `@judge` / `judge_model` 的直接证据：
 

@@ -59,6 +59,10 @@ final class IntatisSkillsTests: XCTestCase {
         XCTAssertTrue(activation.contains("explicitly delegate a final evaluation task"))
         XCTAssertTrue(activation.contains("returns ordinary text"))
         XCTAssertTrue(activation.contains("never replaces `@permission-reviewer`"))
+        XCTAssertTrue(activation.contains("When `finish_run` is advertised"))
+        XCTAssertTrue(activation.contains("Keep mailbox conversations live"))
+        XCTAssertTrue(activation.contains("fresh request correlation"))
+        XCTAssertTrue(activation.contains("requires no acknowledgment"))
 
         let registry = snapshot.augmenting(
             ToolRegistry([], registryVersion: "test.bundled"))
