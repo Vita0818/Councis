@@ -161,7 +161,6 @@ public struct CoworkProjection: Equatable, Sendable {
     /// from reordering the UI and avoids sorting the roster on every fold.
     public private(set) var historicalAgentOrder: [AgentID] = []
     public private(set) var mailboxes: [AgentID: CoworkMailboxView] = [:]
-    public private(set) var pendingDelegations: [RequestID: DelegationRequestedPayload] = [:]
     public private(set) var rejectedDelegations: [DelegationRejectedPayload] = []
     public private(set) var workspaceLeases: [WorkspaceLeaseID: WorkspaceLease] = [:]
     public private(set) var capabilityLeases: [CapabilityLeaseID: CapabilityLease] = [:]
@@ -228,7 +227,7 @@ public struct CoworkProjection: Equatable, Sendable {
 
     public var unresolvedNonReplayableToolExecutions: [CoworkToolExecutionView] {
         unresolvedToolExecutions.filter {
-            $0.prepared.requiresTaskReplayReconciliation
+            $0.prepared.blocksTaskReplay
         }
     }
 
@@ -239,7 +238,7 @@ public struct CoworkProjection: Equatable, Sendable {
     public var uncertainNonReplayableToolExecutions: [CoworkToolExecutionView] {
         toolExecutions.values
             .filter { execution in
-                guard execution.prepared.requiresTaskReplayReconciliation else {
+                guard execution.prepared.blocksTaskReplay else {
                     return false
                 }
                 guard let settled = execution.validatedSettlement else {
@@ -260,14 +259,15 @@ public struct CoworkProjection: Equatable, Sendable {
             }
     }
 
-    /// Every non-replayable executor boundary that may have produced an effect.
-    /// A settled success or legacy/unknown disposition remains blocking because
+    /// Every non-replayable executor boundary whose settlement does not prove
+    /// `notStarted`. A settled success or legacy/unknown disposition remains
+    /// blocking because
     /// replaying the enclosing task starts again from its first model/tool step.
     /// Only a validated settlement proving the side effect never started is exempt.
     public var startedNonReplayableToolExecutions: [CoworkToolExecutionView] {
         toolExecutions.values
             .filter { execution in
-                guard execution.prepared.requiresTaskReplayReconciliation else {
+                guard execution.prepared.blocksTaskReplay else {
                     return false
                 }
                 guard let settled = execution.validatedSettlement else {
@@ -386,17 +386,9 @@ public struct CoworkProjection: Equatable, Sendable {
             var mailbox = mailboxes[payload.to, default: CoworkMailboxView()]
             Self.appendUnique(payload.replyID, to: &mailbox.pendingMessages)
             mailboxes[payload.to] = mailbox
-        case .delegationRequested(let payload):
-            pendingDelegations[payload.requestID] = payload
         case .delegationApproved(let payload):
-            if let requestID = payload.requestID {
-                pendingDelegations.removeValue(forKey: requestID)
-            }
             upsertTask(payload.contract, status: .assigned)
         case .delegationRejected(let payload):
-            if let requestID = payload.requestID {
-                pendingDelegations.removeValue(forKey: requestID)
-            }
             rejectedDelegations.append(payload)
         case .taskCreated(let payload):
             upsertTask(payload.contract, status: .created)
@@ -451,8 +443,6 @@ public struct CoworkProjection: Equatable, Sendable {
             applyWorkTaskSnapshot(
                 payload.task,
                 allowsDependencyReadinessRecompute: true)
-        case .workTaskOwnerChanged(let payload):
-            applyWorkTaskSnapshot(payload.task)
         case .workTaskDependencyChanged(let payload):
             applyWorkTaskSnapshot(
                 payload.task,
@@ -474,8 +464,6 @@ public struct CoworkProjection: Equatable, Sendable {
         case .workTaskInvocationLinked(let payload):
             applyWorkTaskSnapshot(payload.task)
         case .workTaskEvidenceAdded(let payload):
-            applyWorkTaskSnapshot(payload.task)
-        case .workTaskCarriedForward(let payload):
             applyWorkTaskSnapshot(payload.task)
         case .goalCreated(let payload):
             applyGoalSnapshot(payload.goal)
@@ -539,10 +527,10 @@ public struct CoworkProjection: Equatable, Sendable {
             }
         case .continuationRunCompleted(let payload):
             applyContinuationRunSnapshot(payload.run, requiredStatus: .completed)
+        case .continuationRunInterrupted(let payload):
+            applyContinuationRunSnapshot(payload.run, requiredStatus: .interrupted)
         case .continuationRunCancelled(let payload):
             applyContinuationRunSnapshot(payload.run, requiredStatus: .cancelled)
-        case .continuationRunRecovered(let payload):
-            applyContinuationRunSnapshot(payload.run, isRecovery: true)
         case .workspaceLeaseGranted(let payload):
             workspaceLeases[payload.lease.id] = payload.lease
             if let agent = payload.agent {
@@ -704,8 +692,6 @@ public struct CoworkProjection: Equatable, Sendable {
             return
         }
         guard snapshot.id == current.id,
-              snapshot.runID == current.runID,
-              snapshot.goalID == current.goalID,
               snapshot.createdAt == current.createdAt,
               snapshot.revision >= current.revision else { return }
         if snapshot.revision == current.revision {
@@ -775,7 +761,6 @@ public struct CoworkProjection: Equatable, Sendable {
 
     private mutating func applyContinuationRunSnapshot(
         _ snapshot: ContinuationRun,
-        isRecovery: Bool = false,
         requiredStatus: ContinuationRunStatus? = nil
     ) {
         if let requiredStatus, snapshot.status != requiredStatus { return }
@@ -787,7 +772,7 @@ public struct CoworkProjection: Equatable, Sendable {
               snapshot.sessionID == current.sessionID,
               snapshot.goalID == current.goalID,
               snapshot.ordinal == current.ordinal,
-              current.status.canTransition(to: snapshot.status, isRecovery: isRecovery) else {
+              current.status.canTransition(to: snapshot.status) else {
             return
         }
         continuationRuns[snapshot.id] = snapshot

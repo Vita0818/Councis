@@ -69,7 +69,7 @@ enum AppInferenceCatalogCompiler {
                     egressClassification: "user-configured-external"),
                 defaultRequestOptions: [:]))
 
-            for model in provider.models {
+            for model in catalog.inferenceModels(for: provider) {
                 try InferenceRequestOptionValidation.validateDurableRequestOptions(
                     model.requestOptions)
                 profiles.append(InferenceProfileDraft(
@@ -173,21 +173,6 @@ enum AppInferenceCatalogCompiler {
             snapshot: snapshot)
     }
 
-    /// Resolves the fixed fresh-session Judge independently from the mutable
-    /// Chat selection. An explicit `judge_model` must resolve exactly; only an
-    /// absent field inherits the same exact binding selected for `@main`.
-    static func judgeBinding(catalog: AppProviderCatalog,
-                             snapshot: InferenceCatalogSnapshot) -> AgentInferenceBinding? {
-        guard let judgeModel = catalog.judgeModel else {
-            return selectedBinding(catalog: catalog, snapshot: snapshot)
-        }
-        return binding(
-            providerID: judgeModel.endpoint,
-            modelID: judgeModel.model.rawValue,
-            variantID: nil,
-            snapshot: snapshot)
-    }
-
     static func binding(providerID: String,
                         modelID: String,
                         variantID: String?,
@@ -265,7 +250,7 @@ enum AppInferenceCatalogCompiler {
         var result: [InferenceProfileID: PresentationMetadata] = [:]
         for provider in catalog.providers {
             let providerTitle = safeProviderTitle(provider)
-            for model in provider.models {
+            for model in catalog.inferenceModels(for: provider) {
                 let modelTitle = safeModelTitle(model)
                 let baseID = profileID(providerID: provider.id, modelID: model.id, variantID: nil)
                 result[baseID] = PresentationMetadata(

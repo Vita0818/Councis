@@ -78,8 +78,7 @@ public actor GoalRuntimeController {
     }
 
     private struct GoalStateSignature: Equatable, Sendable {
-        var taskStates: [String]
-        var evidence: [String]
+        var invocationStates: [String]
         var remainingWork: Set<String>
     }
 
@@ -102,7 +101,6 @@ public actor GoalRuntimeController {
         UserMessagePayload?,
         GoalID?,
         ContinuationRunID?,
-        Bool,
         Bool
     ) async -> OrchestratorSendResult
 
@@ -126,7 +124,6 @@ public actor GoalRuntimeController {
             String,
             ContinuationRunCloseSource
         ) async -> Bool
-    private let carryForwardWorkTasks: @Sendable (GoalID, ContinuationRunID) async throws -> [WorkTask]
     private let consumeProviderUsageLimit: @Sendable (GoalID, ContinuationRunID) async -> String?
     /// Internal-only deterministic seam for the post-launch startup
     /// cancellation window. Shipping construction always leaves it nil.
@@ -166,7 +163,7 @@ public actor GoalRuntimeController {
         self.verifierProvider = verifierProvider
         self.verifierModel = verifierModel
         self.sendOperation = { text, target, images, userMessage, goalID, runID,
-            recordUserMessage, explicitGoalIntent in
+            recordUserMessage in
             await orchestrator.send(
                 text,
                 to: target,
@@ -174,8 +171,7 @@ public actor GoalRuntimeController {
                 userMessage: userMessage,
                 goalID: goalID,
                 continuationRunID: runID,
-                recordUserMessage: recordUserMessage,
-                explicitGoalIntent: explicitGoalIntent)
+                recordUserMessage: recordUserMessage)
         }
         self.waitForSchedulerIdle = {
             await orchestrator.runSchedulerUntilIdle()
@@ -200,11 +196,6 @@ public actor GoalRuntimeController {
                 reason: reason,
                 resumePendingTasksOnSuccess: false,
                 runCloseSource: source)
-        }
-        self.carryForwardWorkTasks = { goalID, runID in
-            try await orchestrator.carryForwardNonterminalWorkTasks(
-                goalID: goalID,
-                toRunID: runID)
         }
         self.consumeProviderUsageLimit = { goalID, runID in
             await orchestrator.consumeProviderUsageLimitFailure(
@@ -233,7 +224,6 @@ public actor GoalRuntimeController {
             String,
             ContinuationRunCloseSource
          ) async -> Bool)? = nil,
-         carryForwardWorkTasks: @escaping @Sendable (GoalID, ContinuationRunID) async throws -> [WorkTask] = { _, _ in [] },
          consumeProviderUsageLimit: @escaping @Sendable (GoalID, ContinuationRunID) async -> String? = { _, _ in nil },
          startupPostRecoveryHook: (@Sendable () async -> Void)? = nil,
          eventAppender: (@Sendable ([Event]) async throws -> Void)? = nil) {
@@ -255,7 +245,6 @@ public actor GoalRuntimeController {
             await cancelActiveInvocations(reason, source)
             return true
         }
-        self.carryForwardWorkTasks = carryForwardWorkTasks
         self.consumeProviderUsageLimit = consumeProviderUsageLimit
         self.startupPostRecoveryHook = startupPostRecoveryHook
     }
@@ -498,8 +487,6 @@ public actor GoalRuntimeController {
                     successCriteria: Self.cleaned(successCriteria),
                     constraints: Self.cleaned(constraints),
                     tokenBudget: tokenBudget),
-                explicitGoalIntent: true,
-                canCreate: true,
                 mainAgentInferenceBinding: userMessage?.mainAgentInferenceBinding)
         } else {
             goal = Goal(
@@ -714,15 +701,13 @@ public actor GoalRuntimeController {
     }
 
     /// Runs a normal Cowork user turn inside a durable run scope. Normal turns
-    /// never create a Goal unless the caller separately supplied explicit Goal
-    /// intent to a model-visible create_goal tool.
+    /// never create a Goal; Goal creation is a separate explicit host action.
     @discardableResult
     public func sendUserTurn(_ text: String,
                              to target: AgentID? = nil,
                              images: [ImageAttachment] = [],
                              userMessage: UserMessagePayload? = nil,
-                             recordUserMessage: Bool = true,
-                             explicitGoalIntent: Bool = false) async -> OrchestratorSendResult {
+                             recordUserMessage: Bool = true) async -> OrchestratorSendResult {
         await acquireGoalMutationLock()
         defer { releaseGoalMutationLock() }
         guard !Task.isCancelled,
@@ -746,24 +731,24 @@ public actor GoalRuntimeController {
         do {
             try await append(.continuationRunCreated(ContinuationRunCreatedPayload(run: run)))
             if Task.isCancelled || shutdownRequested {
-                let cancelled = try run.transitioning(
-                    to: .cancelled,
+                let interrupted = try run.transitioning(
+                    to: .interrupted,
                     progressSummary: "Cowork runtime stopped before turn start").get()
-                try await append(.continuationRunCancelled(
-                    ContinuationRunCancelledPayload(
-                        run: cancelled,
+                try await append(.continuationRunInterrupted(
+                    ContinuationRunInterruptedPayload(
+                        run: interrupted,
                         reason: "Cowork runtime stopped before turn start")))
                 return .failed("Cowork runtime stopped before turn start.")
             }
             let started = try run.transitioning(to: .running).get()
             try await append(.continuationRunStarted(ContinuationRunStartedPayload(run: started)))
             if Task.isCancelled || shutdownRequested {
-                let cancelled = try started.transitioning(
-                    to: .cancelled,
+                let interrupted = try started.transitioning(
+                    to: .interrupted,
                     progressSummary: "Cowork runtime stopped before provider dispatch").get()
-                try await append(.continuationRunCancelled(
-                    ContinuationRunCancelledPayload(
-                        run: cancelled,
+                try await append(.continuationRunInterrupted(
+                    ContinuationRunInterruptedPayload(
+                        run: interrupted,
                         reason: "Cowork runtime stopped before provider dispatch")))
                 return .failed("Cowork runtime stopped before provider dispatch.")
             }
@@ -774,8 +759,7 @@ public actor GoalRuntimeController {
                 userMessage,
                 nil,
                 run.id,
-                recordUserMessage,
-                explicitGoalIntent)
+                recordUserMessage)
             await waitForSchedulerIdle()
             let closeReplay = try await log.replayForProjectionChecked()
             guard closeReplay.hasCompleteKnownHistory else {
@@ -788,26 +772,36 @@ public actor GoalRuntimeController {
             let closeClaim = closeProjection.continuationRunCloseClaims[run.id]
             switch result {
             case .sent:
-                if let closeClaim,
-                   closeClaim.requestedOutcome != .completed {
-                    let cancelled = try started.transitioning(
-                        to: .cancelled,
-                        progressSummary: closeClaim.reason).get()
-                    try await append(.continuationRunCancelled(
-                        ContinuationRunCancelledPayload(
-                            run: cancelled,
-                            reason: closeClaim.reason)))
-                } else {
+                switch closeClaim?.requestedOutcome {
+                case nil, .completed:
                     let completed = try started.transitioning(to: .completed).get()
                     try await append(.continuationRunCompleted(
                         ContinuationRunCompletedPayload(run: completed)))
+                case .stopped, .cancelled:
+                    let reason = closeClaim?.reason ?? "Cowork run cancelled"
+                    let cancelled = try started.transitioning(
+                        to: .cancelled,
+                        progressSummary: reason).get()
+                    try await append(.continuationRunCancelled(
+                        ContinuationRunCancelledPayload(
+                            run: cancelled,
+                            reason: reason)))
+                case .timedOut, .failed, .interrupted:
+                    let reason = closeClaim?.reason ?? "Cowork run interrupted"
+                    let interrupted = try started.transitioning(
+                        to: .interrupted,
+                        progressSummary: reason).get()
+                    try await append(.continuationRunInterrupted(
+                        ContinuationRunInterruptedPayload(
+                            run: interrupted,
+                            reason: reason)))
                 }
             case .failed(let message):
-                let cancelled = try started.transitioning(
-                    to: .cancelled,
+                let interrupted = try started.transitioning(
+                    to: .interrupted,
                     progressSummary: message).get()
-                try await append(.continuationRunCancelled(
-                    ContinuationRunCancelledPayload(run: cancelled, reason: message)))
+                try await append(.continuationRunInterrupted(
+                    ContinuationRunInterruptedPayload(run: interrupted, reason: message)))
             }
             await launchCurrentGoalIfEligible(allowDuringGoalMutation: true)
             return result
@@ -927,10 +921,32 @@ public actor GoalRuntimeController {
         events: [Envelope]
     ) async -> RecoveryDisposition {
         let uncertainNonReplayable = projection.uncertainNonReplayableToolExecutions
+        let interrupted = projection.continuationRuns.values
+            .filter { $0.status == .created || $0.status == .running }
+            .sorted { lhs, rhs in
+                if lhs.ordinal == rhs.ordinal { return lhs.startedAt < rhs.startedAt }
+                return lhs.ordinal < rhs.ordinal
+            }
+        for run in interrupted {
+            do {
+                let recovered = try run.transitioning(
+                    to: .interrupted,
+                    progressSummary: "Recovered after runtime interruption").get()
+                try await append(.continuationRunInterrupted(
+                    ContinuationRunInterruptedPayload(
+                        run: recovered,
+                        reason: "Recovered after runtime interruption")))
+            } catch {
+                await recordRuntimeError(
+                    code: "goal_run_recovery",
+                    message: "Could not interrupt recovered run \(run.id.rawValue): \(error.localizedDescription)")
+                return .failed
+            }
+        }
         guard let goal = projection.currentGoal else {
             // A non-replayable executor outcome remains an audit/retry concern
             // for its owning task, but a durably terminal task cannot be replayed
-            // by this Goal runtime. Keep fail-closed behavior for legacy/unscoped
+            // by this Goal runtime. Keep fail-closed behavior for unscoped
             // tickets, missing task history, and every nonterminal task because
             // their execution scope cannot be proven inert.
             let allExecutionsAreConfinedToTerminalTasks = uncertainNonReplayable.allSatisfy {
@@ -944,27 +960,6 @@ public actor GoalRuntimeController {
                 : .failed
         }
         guard uncertainNonReplayable.isEmpty else { return .failed }
-        let interrupted = projection.continuationRuns.values
-            .filter { $0.goalID == goal.id && ($0.status == .created || $0.status == .running) }
-            .sorted { lhs, rhs in
-                if lhs.ordinal == rhs.ordinal { return lhs.startedAt < rhs.startedAt }
-                return lhs.ordinal < rhs.ordinal
-            }
-        for run in interrupted {
-            do {
-                let recovered = try run.transitioning(
-                    to: .checkpointed,
-                    isRecovery: true,
-                    progressSummary: "Recovered after runtime interruption").get()
-                try await append(.continuationRunRecovered(
-                    ContinuationRunRecoveredPayload(run: recovered)))
-            } catch {
-                await recordRuntimeError(
-                    code: "goal_run_recovery",
-                    message: "Could not checkpoint recovered run \(run.id.rawValue): \(error.localizedDescription)")
-                return .failed
-            }
-        }
         return goal.status == .active ? .continueGoal : .safeWithoutContinuation
     }
 
@@ -1122,8 +1117,6 @@ public actor GoalRuntimeController {
             let checkpointedAt = replayed.last(where: { envelope in
                 switch envelope.event {
                 case .continuationRunCheckpointed(let payload):
-                    return payload.run.id == checkpointed.id
-                case .continuationRunRecovered(let payload):
                     return payload.run.id == checkpointed.id
                 default:
                     return false
@@ -1344,8 +1337,8 @@ public actor GoalRuntimeController {
             interruptedRuns = []
         }
         // In-memory cancellation/failure bookkeeping is advisory. A Goal
-        // mutation is safe only when replay proves the owned run is no longer
-        // created/running. This closes races with run-start, carry-forward, and
+        // mutation is safe only when replay proves the scoped run is no longer
+        // created/running. This closes races with run-start, interruption, and
         // checkpoint persistence failures that can make the continuation task
         // exit without recording `stopSettlementFailures`.
         let stoppedSafely = cancellationSucceeded
@@ -1482,7 +1475,6 @@ public actor GoalRuntimeController {
                 if pending.request.checkpoint {
                     let checkpointed = try run.transitioning(
                         to: .checkpointed,
-                        isRecovery: true,
                         progressSummary: pending.request.reason).get()
                     return .continuationRunCheckpointed(
                         ContinuationRunCheckpointedPayload(run: checkpointed))
@@ -1589,31 +1581,14 @@ public actor GoalRuntimeController {
             return .stopped
         }
 
-        let runProjection: CoworkProjection
-        do {
-            _ = try await carryForwardWorkTasks(startingGoal.id, running.id)
-            runProjection = CoworkProjection.build(from: await log.replay())
-        } catch {
-            let reason = "Could not carry unfinished Goal Tasks into run \(running.id.rawValue): \(error.localizedDescription)"
-            await recordRuntimeError(code: "goal_task_carry_forward", message: reason)
-            if let cancelled = try? running.transitioning(
-                to: .cancelled,
-                progressSummary: reason).get() {
-                try? await append(.continuationRunCancelled(
-                    ContinuationRunCancelledPayload(run: cancelled, reason: reason)))
-            }
-            return .stopGoal
-        }
+        let runProjection = CoworkProjection.build(from: await log.replay())
         if Task.isCancelled || continuationGeneration != generation {
             await settleStoppedRun(running, generation: generation)
             return .stopped
         }
         let runGoal = runProjection.goals[startingGoal.id] ?? startingGoal
         let baseline = Self.signature(goal: runGoal, projection: runProjection)
-        let prompt = Self.continuationPrompt(
-            goal: runGoal,
-            run: running,
-            projection: runProjection)
+        let prompt = Self.continuationPrompt(goal: runGoal, run: running)
         let inferenceBoundUserMessage = runGoal.mainAgentInferenceBinding.map { binding in
             UserMessagePayload(
                 text: prompt,
@@ -1626,7 +1601,6 @@ public actor GoalRuntimeController {
             inferenceBoundUserMessage,
             startingGoal.id,
             running.id,
-            false,
             false)
         await waitForGoalSchedulerIdle(startingGoal.id, running.id)
 
@@ -1635,18 +1609,30 @@ public actor GoalRuntimeController {
             return .stopped
         }
 
-        let checkpointSummary: String
         switch sendResult {
         case .sent:
-            checkpointSummary = "@main and required scheduled invocations reached the run barrier."
+            break
         case .failed(let message):
-            checkpointSummary = "@main invocation failed before synthesis: \(message)"
+            do {
+                let interrupted = try running.transitioning(
+                    to: .interrupted,
+                    progressSummary: message).get()
+                try await append(.continuationRunInterrupted(
+                    ContinuationRunInterruptedPayload(
+                        run: interrupted,
+                        reason: message)))
+            } catch {
+                await recordRuntimeError(
+                    code: "goal_run_interrupt",
+                    message: "Could not persist interrupted Goal run: \(error.localizedDescription)")
+            }
+            return .stopGoal
         }
         let checkpointed: ContinuationRun
         do {
             checkpointed = try running.transitioning(
                 to: .checkpointed,
-                progressSummary: checkpointSummary).get()
+                progressSummary: "@main and required scheduled invocations reached the run barrier.").get()
             try await append(.continuationRunCheckpointed(
                 ContinuationRunCheckpointedPayload(run: checkpointed)))
         } catch {
@@ -1663,12 +1649,6 @@ public actor GoalRuntimeController {
 
         let verificationEvents = await log.replay()
         let beforeVerification = CoworkProjection.build(from: verificationEvents)
-        let currentRunTasks = beforeVerification.workTasks.values
-            .filter { $0.goalID == startingGoal.id && $0.runID == running.id }
-            .sorted(by: Self.workTaskOrder)
-        let goalTasks = beforeVerification.workTasks.values
-            .filter { $0.goalID == startingGoal.id }
-            .sorted(by: Self.workTaskOrder)
         let validationEvidence = Self.durableValidationEvidence(
             goalID: startingGoal.id,
             projection: beforeVerification,
@@ -1676,18 +1656,10 @@ public actor GoalRuntimeController {
         let model = await verifierModel()
         let verificationStart = Date()
         let verification: GoalVerificationResult
-        let nonterminalCurrentTasks = currentRunTasks.filter { !$0.status.isTerminal }
         if let reason = await consumeProviderUsageLimit(startingGoal.id, running.id) {
             verification = GoalVerificationResult(
                 audit: Self.fallbackAudit(goal: runGoal, reason: reason),
                 failureKind: .usageLimit,
-                reason: reason)
-        } else if !nonterminalCurrentTasks.isEmpty {
-            let reason = "GoalVerifier barrier is closed; nonterminal WorkTasks remain in run \(running.id.rawValue): "
-                + nonterminalCurrentTasks.map { $0.id.rawValue }.joined(separator: ", ")
-            verification = GoalVerificationResult(
-                audit: Self.fallbackAudit(goal: startingGoal, reason: reason),
-                failureKind: .hostValidation,
                 reason: reason)
         } else {
             do {
@@ -1695,15 +1667,11 @@ public actor GoalRuntimeController {
                 verification = await verifier.verify(GoalVerificationInput(
                     goal: beforeVerification.goals[startingGoal.id] ?? startingGoal,
                     run: checkpointed,
-                    // Historical Tasks are immutable, but unresolved Tasks from
-                    // a prior run must still prevent a false completion verdict.
-                    workTasks: goalTasks,
                     runHistory: Self.runHistory(
                         goalID: startingGoal.id,
                         excluding: running.id,
                         projection: beforeVerification,
                         limit: policy.maximumRunHistoryItems),
-                    authoritativeWorkspaceSummary: Self.authoritativeSummary(tasks: goalTasks),
                     validationEvidence: validationEvidence))
             } catch {
                 let reason = "Goal verifier provider is unavailable: \(error.localizedDescription)"
@@ -1863,16 +1831,28 @@ public actor GoalRuntimeController {
             if request.checkpoint {
                 let checkpointed = try run.transitioning(
                     to: .checkpointed,
-                    isRecovery: true,
                     progressSummary: request.reason).get()
                 try await append(.continuationRunCheckpointed(
                     ContinuationRunCheckpointedPayload(run: checkpointed)))
             } else {
-                let cancelled = try run.transitioning(
-                    to: .cancelled,
-                    progressSummary: request.reason).get()
-                try await append(.continuationRunCancelled(
-                    ContinuationRunCancelledPayload(run: cancelled, reason: request.reason)))
+                switch request.runCloseSource {
+                case .runtime, .hostLifecycle:
+                    let interrupted = try run.transitioning(
+                        to: .interrupted,
+                        progressSummary: request.reason).get()
+                    try await append(.continuationRunInterrupted(
+                        ContinuationRunInterruptedPayload(
+                            run: interrupted,
+                            reason: request.reason)))
+                case .mainAgent, .user:
+                    let cancelled = try run.transitioning(
+                        to: .cancelled,
+                        progressSummary: request.reason).get()
+                    try await append(.continuationRunCancelled(
+                        ContinuationRunCancelledPayload(
+                            run: cancelled,
+                            reason: request.reason)))
+                }
             }
             return true
         } catch {
@@ -1961,8 +1941,7 @@ public actor GoalRuntimeController {
     }
 
     private static func continuationPrompt(goal: Goal,
-                                           run: ContinuationRun,
-                                           projection: CoworkProjection) -> String {
+                                           run: ContinuationRun) -> String {
         var lines = [
             "Continue the durable user Goal below in Intatis Cowork.",
             "Goal ID: \(goal.id.rawValue)",
@@ -1981,55 +1960,31 @@ public actor GoalRuntimeController {
             }
             if let blocker = audit.blocker { lines.append("Latest blocker candidate: \(blocker)") }
         }
-        let historical = projection.workTasks.values
-            .filter { $0.goalID == goal.id }
-            .sorted(by: workTaskOrder)
-            .suffix(12)
-        if !historical.isEmpty {
-            lines.append("Recent durable Tasks (historical runs are read-only):")
-            lines.append(contentsOf: historical.map {
-                "- \($0.id.rawValue) [\($0.status.rawValue)] \($0.title)"
-            })
-        }
         lines.append(
-            "Use task_create/task_update/task_get/task_list for this run's real work plan. "
-            + "Use task_list with goal history when prior evidence matters. Delegate independent ready Tasks in parallel. "
-            + "An AgentInvocation result is only a candidate; explicitly settle each WorkTask with result and evidence. "
+            "Continue with the existing Session tools and agents as needed. "
             + "Do not claim the Goal complete: synthesize the run and let the independent GoalVerifier decide after the scheduler barrier.")
         return lines.joined(separator: "\n\n")
     }
 
     private static func signature(goal: Goal,
                                   projection: CoworkProjection) -> GoalStateSignature {
-        let tasks = projection.workTasks.values
-            .filter { $0.goalID == goal.id }
-            .sorted(by: workTaskOrder)
-        // Merely creating another pending/ready planning row is not counted as
-        // progress; otherwise a model could evade the no-progress guard by
-        // recreating equivalent Tasks forever. A state becomes countable once
-        // it starts, settles, records progress/result, or gains evidence.
-        let taskStates = tasks.filter {
-            $0.status != .pending && $0.status != .ready
-                || !compact($0.result ?? "").isEmpty
-                || !compact($0.progressNote ?? "").isEmpty
-                || !$0.evidence.isEmpty
-        }.map {
+        let invocationStates = projection.tasks.values
+            .filter { $0.contract?.goalID == goal.id }
+            .sorted { $0.id.rawValue < $1.id.rawValue }
+            .map {
             [
                 $0.id.rawValue,
                 $0.status.rawValue,
-                String($0.revision),
+                String($0.attempt),
                 compact($0.result ?? ""),
-                compact($0.progressNote ?? ""),
+                compact($0.report?.summary ?? ""),
+                compact($0.error ?? ""),
+                compact($0.statusReason ?? ""),
             ].joined(separator: "|")
         }
-        let evidence = tasks.flatMap(\.evidence).map {
-            [compact($0.kind), compact($0.reference), compact($0.summary)]
-                .joined(separator: "|")
-        }.sorted()
         let remaining = Set(goal.latestAudit?.remainingWork.map(normalized) ?? [])
         return GoalStateSignature(
-            taskStates: taskStates,
-            evidence: evidence,
+            invocationStates: invocationStates,
             remainingWork: remaining)
     }
 
@@ -2037,7 +1992,7 @@ public actor GoalRuntimeController {
                                              to after: GoalStateSignature,
                                              audit: GoalAuditSummary,
                                              previousAudit: GoalAuditSummary?) -> Bool {
-        if before.taskStates != after.taskStates || before.evidence != after.evidence {
+        if before.invocationStates != after.invocationStates {
             return true
         }
         let newRemaining = Set(audit.remainingWork.map(normalized))
@@ -2116,24 +2071,8 @@ public actor GoalRuntimeController {
         return entries.sorted { $0.0 < $1.0 }.suffix(limit).map(\.1)
     }
 
-    private static func authoritativeSummary(tasks: [WorkTask]) -> String {
-        guard !tasks.isEmpty else { return "No durable WorkTask records have been recorded yet." }
-        return tasks.map { task in
-            var line = "\(task.id.rawValue) [\(task.status.rawValue)] \(task.title)"
-            if let result = task.result, !compact(result).isEmpty { line += " — result: \(result)" }
-            if !task.evidence.isEmpty {
-                line += " — agent-reported evidence: " + task.evidence.map {
-                    "\($0.kind):\($0.reference) (\($0.summary))"
-                }.joined(separator: "; ")
-            }
-            return line
-        }.joined(separator: "\n")
-    }
-
     /// Builds Goal-completion evidence only from successful durable tool
-    /// execution tickets tied to this Goal's AgentInvocations. Free-form
-    /// WorkTask evidence remains useful planning/audit context but cannot
-    /// authorize a terminal Goal transition by itself.
+    /// execution tickets tied to this Goal's AgentInvocations.
     private static func durableValidationEvidence(
         goalID: GoalID,
         projection: CoworkProjection,
@@ -2176,7 +2115,11 @@ public actor GoalRuntimeController {
         "read_file", "list_files", "search_text",
         "git_status", "git_diff", "git_diff_staged", "git_info",
         "git_recent_commits", "git_diff_base", "git_apply_patch_check",
-        "read_pdf", "compile_latex", "web_fetch", "browser_diagnostics",
+        "read_pdf",
+        "read_docx", "read_pptx", "read_xlsx", "read_html", "read_epub",
+        "document_read", // Historical tool-result compatibility only.
+        "document_ocr",
+        "compile_latex", "web_fetch", "browser_diagnostics",
         "browser_snapshot", "browser_screenshot", "browser_downloads",
         "browser_search",
     ]
@@ -2240,11 +2183,6 @@ public actor GoalRuntimeController {
     private static func milliseconds(since date: Date) -> Int {
         let value = max(0, Date().timeIntervalSince(date) * 1_000)
         return value >= Double(Int.max) ? Int.max : Int(value.rounded())
-    }
-
-    private static func workTaskOrder(_ lhs: WorkTask, _ rhs: WorkTask) -> Bool {
-        if lhs.createdAt == rhs.createdAt { return lhs.id.rawValue < rhs.id.rawValue }
-        return lhs.createdAt < rhs.createdAt
     }
 
     private static func compact(_ value: String) -> String {

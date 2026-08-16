@@ -47,12 +47,22 @@ struct CLIConfig {
     let providerRoutes: [CLIProviderRoute]
     let selectedProviderID: String
     let selectedVariantID: String?
-    /// Optional exact route for the fixed fresh-session `@judge`. Nil inherits
-    /// `defaultBinding`; an explicit unresolved selection fails bootstrap.
-    let judgeModel: CLIProviderModelSelection?
+    /// Exact host-configured base model used by the fixed Cowork `@judge`.
+    /// Missing `judge_model` inherits the same JSON document's top-level model
+    /// exactly once and never follows a later @main selection or rebind.
+    let judgeModel: CLIProviderModelSelection
+    /// Exact host-configured model used by the automatic permission reviewer.
+    /// This is resolved from `permission_reviewer_model`, or from the JSON
+    /// document's top-level `model` when that field is absent. It never follows
+    /// a later @main selection or rebind.
+    let permissionReviewerModel: CLIProviderModelSelection
     /// Host-side route used by `generate_image` and `edit_image`. Agent tool
     /// arguments never carry this provider/model selection.
     let imageModel: CLIProviderModelSelection?
+    /// Independent Knowledge roles. Both must be present before the Knowledge
+    /// tool surface is composed; neither follows the selected inference model.
+    let embeddingModel: CLIProviderModelSelection?
+    let rerankerModel: CLIProviderModelSelection?
     /// The explicitly selected Intatis config is retained only so a lazy
     /// `providerConfig` credential reference can be revalidated. It is never
     /// copied into EventLog/profile bindings or printed by the CLI.
@@ -74,7 +84,10 @@ struct CLIConfig {
          selectedProviderID: String? = nil,
          selectedVariantID: String? = nil,
          judgeModel: CLIProviderModelSelection? = nil,
+         permissionReviewerModel: CLIProviderModelSelection? = nil,
          imageModel: CLIProviderModelSelection? = nil,
+         embeddingModel: CLIProviderModelSelection? = nil,
+         rerankerModel: CLIProviderModelSelection? = nil,
          configurationFileURL: URL? = nil) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -91,10 +104,20 @@ struct CLIConfig {
             model: model,
             wire: wire)
         self.providerRoutes = providerRoutes?.isEmpty == false ? providerRoutes! : [legacy]
-        self.selectedProviderID = selectedProviderID ?? legacy.id
+        let resolvedSelectedProviderID = selectedProviderID ?? legacy.id
+        self.selectedProviderID = resolvedSelectedProviderID
         self.selectedVariantID = selectedVariantID
         self.judgeModel = judgeModel
+            ?? CLIProviderModelSelection(
+                providerID: resolvedSelectedProviderID,
+                modelID: model)
+        self.permissionReviewerModel = permissionReviewerModel
+            ?? CLIProviderModelSelection(
+                providerID: resolvedSelectedProviderID,
+                modelID: model)
         self.imageModel = imageModel
+        self.embeddingModel = embeddingModel
+        self.rerankerModel = rerankerModel
         self.configurationFileURL = configurationFileURL
     }
 
@@ -175,6 +198,9 @@ struct CLIConfig {
             // provider when possible; otherwise the host must qualify them.
             let matchingRoutes = document.routes.filter { route in
                 route.models.contains(where: { $0.id == requestedModel })
+                    && !document.isKnowledgeRoleModel(
+                        providerID: route.id,
+                        modelID: requestedModel)
             }
             if matchingRoutes.count == 1, let only = matchingRoutes.first {
                 selectedProviderID = only.id
@@ -215,16 +241,6 @@ struct CLIConfig {
         }
         if let index = routes.firstIndex(where: { $0.id == selectedRoute.id }) {
             routes[index] = selectedRoute
-        }
-        if let judgeModel = document.judgeModel,
-           let index = routes.firstIndex(where: { $0.id == judgeModel.providerID }),
-           !routes[index].models.contains(where: { $0.id == judgeModel.modelID }) {
-            // `judge_model` uses the same configured provider/model shorthand
-            // as `model`; a known route may therefore name a base model that
-            // is not otherwise listed in the local presentation map.
-            routes[index].models.append(CLIProviderModel(
-                id: judgeModel.modelID,
-                displayName: judgeModel.modelID))
         }
 
         let rawReasoning = value("INTATIS_REASONING", fallback: nil)
@@ -270,7 +286,10 @@ struct CLIConfig {
             selectedProviderID: selectedRoute.id,
             selectedVariantID: selectedVariantID,
             judgeModel: document.judgeModel,
+            permissionReviewerModel: document.permissionReviewerModel,
             imageModel: document.imageModel,
+            embeddingModel: document.embeddingModel,
+            rerankerModel: document.rerankerModel,
             configurationFileURL: configurationFileURL.standardizedFileURL)
     }
 
@@ -344,6 +363,13 @@ struct CLIConfig {
             endpoint: CLIInferenceRouteIdentity.endpointID(route: selectedRoute),
             model: ModelID(rawValue: model))
         var models = ResolvedModels(chat: ref, agent: ref)
+        if let reviewerRoute = providerRoutes.first(where: {
+            $0.id == permissionReviewerModel.providerID
+        }) {
+            models.reviewer = ModelRef(
+                endpoint: CLIInferenceRouteIdentity.endpointID(route: reviewerRoute),
+                model: ModelID(rawValue: permissionReviewerModel.modelID))
+        }
         if let imageModel,
            let imageRoute = providerRoutes.first(where: {
                $0.id == imageModel.providerID
@@ -352,7 +378,32 @@ struct CLIConfig {
                 endpoint: CLIInferenceRouteIdentity.endpointID(route: imageRoute),
                 model: ModelID(rawValue: imageModel.modelID))
         }
+        if let embeddingModel,
+           let embeddingRoute = providerRoutes.first(where: {
+               $0.id == embeddingModel.providerID
+           }) {
+            models.embedding = ModelRef(
+                endpoint: CLIInferenceRouteIdentity.endpointID(route: embeddingRoute),
+                model: ModelID(rawValue: embeddingModel.modelID))
+        }
+        if let rerankerModel,
+           let rerankerRoute = providerRoutes.first(where: {
+               $0.id == rerankerModel.providerID
+           }) {
+            models.reranker = ModelRef(
+                endpoint: CLIInferenceRouteIdentity.endpointID(route: rerankerRoute),
+                model: ModelID(rawValue: rerankerModel.modelID))
+        }
         return ProviderConfig(endpoints: endpoints, models: models)
+    }
+
+    func isKnowledgeRoleModel(
+        providerID: String,
+        modelID: String
+    ) -> Bool {
+        [embeddingModel, rerankerModel].compactMap { $0 }.contains {
+            $0.providerID == providerID && $0.modelID == modelID
+        }
     }
 
     var selectedRouteLabel: String {

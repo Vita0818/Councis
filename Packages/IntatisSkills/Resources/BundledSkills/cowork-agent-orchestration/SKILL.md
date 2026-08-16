@@ -1,6 +1,6 @@
 ---
 name: cowork-agent-orchestration
-description: Proactively plan, track, route, and close Intatis Cowork work when coordinator capabilities are available, including direct execution versus agent reuse, delegation, or spawn; host-approved inference-profile selection; multimodal companions; fixed-Judge candidate comparison; least-authority leases; exact run closure; and correlation-safe mailbox follow-ups without acknowledgment loops.
+description: Proactively plan, track, route, and close Councis Cowork work when coordinator capabilities are available, including direct execution versus agent reuse, explicit fixed-Judge review, delegation, or spawn; host-approved inference-profile selection; multimodal companions; least-authority leases; exact run closure; and correlation-safe mailbox follow-ups without acknowledgment loops.
 ---
 
 # Cowork agent orchestration
@@ -24,8 +24,20 @@ or budgets.
   preserves the issuer's exact immutable profile revision.
 - Agent identity is persistent, but coordinator/worker behavior belongs to the
   current task lease. Do not build a permanent recursive role tree.
+- `@judge` is a fixed, config-bound, read-only data-plane identity. Never spawn,
+  remove, or rebind it. Omitted/`auto` delegation does not select Judge; address it
+  explicitly only when independent comparison, critique, selection, rewrite, or
+  synthesis is useful. Its ordinary report is candidate evidence, not permission,
+  Goal-verification, run-control, or final-decision authority.
 - Use scheduler, task, delegation, and message tools. Never simulate a nested
   `AgentLoop`, a completed WorkTask, or a successful child result in prose.
+- A multi-call assistant response is neither a transaction nor a concurrency
+  guarantee. Do not use one to request or assume parallel execution. Batch only
+  mutually independent calls that remain correct in any host-controlled order.
+- An agent name, WorkTask ID, attachment, or other host object becomes usable only
+  after the call that creates or discovers it returns a successful `ToolResult`.
+  `task_create` does not assign an agent. A `delegate_task` target must be an already
+  attached data-plane agent. Planned or future agents and tasks are not existing objects.
 - Prefer the smallest team and the least authority that can complete the task.
   Delegation overhead is real work and real model cost.
 
@@ -39,8 +51,8 @@ or budgets.
    when the user explicitly requests a persistent or cross-run objective and the
    corresponding tool is advertised.
 3. For non-trivial work, use advertised task tools to create the smallest useful
-   graph of verifiable WorkTasks. Keep ownership, dependencies, progress, result, and
-   evidence current instead of maintaining a prose-only plan.
+   graph of verifiable WorkTasks. Keep dependencies, progress, result, and evidence
+   current instead of maintaining a prose-only plan. Do not assign agents during Task creation.
 4. Evaluate the collaboration criteria below at the outset. Start ready independent,
    specialist, multimodal, review, or directory-scoped branches promptly when their
    benefit exceeds coordination cost; collaboration should not be reserved only for
@@ -99,8 +111,14 @@ Collaborate only when at least one of these is true:
   synthesis, and validation overhead;
 - the user explicitly asks for multi-agent work.
 
+When decision quality materially benefits, the coordinator may request multiple
+independent candidate outputs and then explicitly delegate their comparison or
+synthesis to `@judge`. This is an optional strategy whose benefit must repay its
+model and coordination cost; the coordinator still verifies the evidence and owns
+the final result.
+
 Do not split a serial chain merely to create agents. Keep shared-state edits with one
-owner unless the WorkTasks have non-overlapping expected artifacts.
+active editor unless the WorkTasks have non-overlapping expected artifacts.
 
 ## Select an adequate profile
 
@@ -151,8 +169,9 @@ coding, or synthesis.
 2. Use `list_agents` when available before creating an identity. Reuse an idle agent
    whose exact profile, workspace, and current lease already fit.
 3. For a short-lived read-only task that should inherit the current exact profile,
-   prefer `delegate_task` with `to` omitted or `auto`; Intatis may reuse or create a
-   worker scoped to that invocation.
+   prefer `delegate_task` with `to` omitted or `auto`; Councis selects only an
+   already attached, idle ordinary worker. If no suitable worker exists, spawn one
+   in an earlier tool-call round and wait for its successful `ToolResult`.
 4. A task that must write needs an existing suitable read-write worker or an explicit
    `spawn_agent` request with `requestedAccess: read_write` before delegation. Do not
    assume an automatically created worker can write.
@@ -166,30 +185,34 @@ coding, or synthesis.
 6. Use `spawn_agent` only for a deliberately persistent specialist, a different
    subfolder, a write-capable worker, an explicitly different approved profile, or a
    teammate that must receive several related tasks. Delegate the actual WorkTask
-   after the spawn succeeds.
+   only after the spawn returns a successful `ToolResult`.
 7. Set `canCoordinate: false` unless the child must own a real subgraph and the
    current delegation budget permits another level. Coordination authority is never
    required merely to read, edit, test, or report.
+8. Use `to: "judge"` only as an explicit read-only evaluation route. Do not expect
+   automatic delegation to choose it, do not treat it as a substitute worker for
+   unrelated work, and do not ask it to authorize tools, verify a Goal, or control a
+   run.
 
-## Use the fixed Judge when comparison helps
+### Stage causally dependent calls
 
-- When `@judge` appears in `list_agents` or the current task's related agents, treat
-  it as a host-registered, read-only data-plane worker. Never spawn, replace, remove,
-  or use `auto` to select it.
-- The main agent still decides whether multi-agent work is worthwhile, how many
-  candidate agents to use, and which host-approved profiles, strategies, and task
-  instructions fit them. Do not create candidates merely to satisfy a ritual.
-- When multiple agents were intentionally asked to answer the same problem and a
-  comparison would improve the result, explicitly delegate a final evaluation task
-  to `@judge`. Include every complete candidate answer, the user's constraints,
-  evaluation criteria, and the required final output shape; do not assume hidden
-  transcript or mailbox context.
-- The Judge returns ordinary text through the existing scheduler and Task Report
-  path. Its response does not settle a WorkTask or Goal and does not grant execution
-  authority. After required verification, return the selected answer as the one
-  user-facing result.
-- `@judge` never replaces `@permission-reviewer`, Goal Verifier, permission gates,
-  durable task state, or the coordinator's responsibility for safety and correctness.
+Use separate tool-call rounds whenever a later call depends on an earlier result.
+The recommended sequence for a WorkTask that will be delegated to a new explicit
+worker is:
+
+1. Call `task_create`, wait for its successful `ToolResult`, and retain the returned
+   durable WorkTask ID.
+2. Call `spawn_agent`, then wait for a successful `ToolResult` proving that the agent
+   is attached. A planned name is not proof.
+3. In a later round, call `delegate_task` with the confirmed WorkTask ID and attached
+   agent. The host links the resulting invocation as part of one delegation admission.
+
+Alternatively, spawn first and wait for success before creating and delegating a Task.
+Never pass a planned agent name to `delegate_task` in the same assistant response that
+calls `spawn_agent` for it. Independent calls may be batched, but batching is only an
+efficiency hint, never a concurrency request or guarantee. For multiple workers, batch
+within one stage only: create all Tasks, await all results, spawn all workers, await all
+results, then delegate only the confirmed WorkTask and agent pairs.
 
 ## Minimize leases and information
 
@@ -206,6 +229,9 @@ coding, or synthesis.
 ## Settle and synthesize
 
 - Treat each mediated Task Report as candidate evidence, not completion authority.
+- Treat a Judge report the same way: use its comparisons and synthesis as advisory
+  evidence, then independently verify material claims before choosing the final
+  result.
 - Check the result and required validation evidence. Use `task_update` explicitly
   when the current lease allows settlement; do not infer Goal completion from child
   prose or from all invocations ending.

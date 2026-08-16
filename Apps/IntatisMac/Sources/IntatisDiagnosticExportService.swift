@@ -811,20 +811,20 @@ private struct IntatisDiagnosticBundleBuilder {
     }
 
     private static let readme = """
-    Intatis local diagnostic bundle / Intatis 本地诊断包
+    Councis local diagnostic bundle / Councis 本地诊断包
 
     This ZIP was generated only after the user selected Export Diagnostic Logs.
-    It was saved to the selected local destination. Intatis did not upload it.
+    It was saved to the selected local destination. Councis did not upload it.
 
     本 ZIP 仅在用户主动选择“导出诊断日志”后生成，并保存到用户选择的本地位置。
-    Intatis 没有上传此文件。
+    Councis 没有上传此文件。
 
     Included coverage:
     - privacy-redacted structural session event projections
-    - Intatis process Unified Log entries from the last 24 hours
+    - Councis process Unified Log entries from the last 24 hours
     - current macOS proxy configuration
     - performance counters and retained hang diagnostics
-    - recent Intatis crash reports
+    - recent Councis crash reports
     - manifest.json, including collection failures and every truncation
 
     Excluded by design:

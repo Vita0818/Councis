@@ -47,6 +47,28 @@ final class PermissionReviewProtocolTests: XCTestCase {
         XCTAssertNil(context.intent)
         XCTAssertNil(context.authorization)
         XCTAssertNil(context.executionID)
+        XCTAssertNil(context.reviewInvocationEvidence)
+        XCTAssertNil(context.causalContext?.authorizationContext)
+    }
+
+    func testPermissionRequestContextRoundTripsOnlyInvocationEvidenceMetadata()
+        throws {
+        let metadata = PermissionReviewInvocationEvidenceMetadata(
+            sourceGenerationID: "provider-generation_test",
+            toolSnapshotID: "snapshot_test",
+            modelAuthorizationContextDigest: String(repeating: "a", count: 64))
+        let context = PermissionRequestContext(
+            reviewInvocationEvidence: metadata)
+
+        let data = try JSONEncoder().encode(context)
+        let decoded = try JSONDecoder().decode(
+            PermissionRequestContext.self,
+            from: data)
+        let json = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded.reviewInvocationEvidence, metadata)
+        XCTAssertFalse(json.contains("canonicalBusinessArguments"))
+        XCTAssertFalse(json.contains("modelAuthorizationContextJSON"))
     }
 
     func testLegacyReviewTaskAndSettlementWithoutAuthorizationStillDecode() throws {
@@ -87,6 +109,7 @@ final class PermissionReviewProtocolTests: XCTestCase {
 
         XCTAssertEqual(task.id.rawValue, "review_legacy")
         XCTAssertNil(task.authorization)
+        XCTAssertNil(task.causalContext.authorizationContext)
         XCTAssertEqual(settled.reason, "legacy reason")
         XCTAssertNil(settled.authorization)
         XCTAssertNil(settled.failureKind)
@@ -102,6 +125,66 @@ final class PermissionReviewProtocolTests: XCTestCase {
         XCTAssertEqual(failureKind, .providerStillStopping)
     }
 
+    func testLegacyMalformedVerdictAndTypedReviewerDiagnosticsRemainCodable() throws {
+        let kinds: [PermissionApprovalFailureKind] = [
+            .malformedVerdict,
+            .reviewerIncompleteResponse,
+            .reviewerNonSuccessFinish,
+            .reviewerVerdictMissingMarker,
+            .reviewerVerdictMultipleMarkers,
+            .reviewerVerdictNotFinal,
+            .reviewerVerdictMissingReason,
+            .reviewerVerdictStructuredOutput,
+        ]
+
+        for kind in kinds {
+            let data = try JSONEncoder().encode(kind)
+            XCTAssertEqual(
+                try JSONDecoder().decode(PermissionApprovalFailureKind.self, from: data),
+                kind)
+        }
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                PermissionApprovalFailureKind.self,
+                from: Data(#""malformed_verdict""#.utf8)),
+            .malformedVerdict)
+    }
+
+    func testAuthorizationContextRoundTripsWithoutModelSuppliedBindingFields() throws {
+        let causal = PermissionReviewCausalContext(
+            userGoal: "Update the report",
+            taskLineage: [TaskID(rawValue: "task_report")],
+            authorizationContext: PermissionAuthorizationContext(
+                report: PermissionAuthorizationReport(
+                    authorizationGoal: "Finish the user-requested report revision.",
+                    currentProgress: "The source report has been read and the target section is located.",
+                    latestInstructionInterpretation: "Continue means apply the already agreed revision.",
+                    currentActionJustification: "Writing the bounded patch is the next required step.",
+                    scopeAssessment: "The patch remains inside the named report."),
+                supportingUserEventSequences: [3, 8, 11]))
+
+        let data = try JSONEncoder().encode(causal)
+        let decoded = try JSONDecoder().decode(
+            PermissionReviewCausalContext.self,
+            from: data)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let authorization = try XCTUnwrap(
+            object["authorizationContext"] as? [String: Any])
+
+        XCTAssertEqual(decoded, causal)
+        XCTAssertEqual(
+            decoded.authorizationContext?.supportingUserEventSequences,
+            [3, 8, 11])
+        XCTAssertEqual(Set(authorization.keys), Set([
+            "report",
+            "supportingUserEventSequences",
+        ]))
+        XCTAssertNil(authorization["reportAuthor"])
+        XCTAssertNil(authorization["latestUserInstruction"])
+        XCTAssertNil(authorization["bindingDigest"])
+    }
+
     func testResolvedToolAuthorizationRoundTripsAllPinnedFacts() throws {
         let intent = PermissionIntent(
             action: "filesystem.patch",
@@ -112,7 +195,7 @@ final class PermissionReviewProtocolTests: XCTestCase {
             metadata: ["operation": .string("apply_unified_diff")],
             dataEffects: [.mutate],
             risks: [.workspaceMutation],
-            replayPolicy: .requiresManualReconciliation)
+            replayPolicy: .doNotReplay)
         let gate = PermissionReviewGateSnapshot(
             decision: .ask,
             risk: .medium,
@@ -156,7 +239,7 @@ final class PermissionReviewProtocolTests: XCTestCase {
             intent: intent,
             sideEffect: .write,
             risksNetwork: false,
-            replayPolicy: .requiresManualReconciliation,
+            replayPolicy: .doNotReplay,
             deterministicGate: gate,
             capabilityLeaseFingerprint: String(repeating: "c", count: 64),
             workspaceID: WorkspaceID(rawValue: "workspace-roundtrip"),
@@ -278,7 +361,7 @@ final class PermissionReviewProtocolTests: XCTestCase {
             metadata: ["operation": .string("overwrite")],
             dataEffects: [.mutate],
             risks: [.workspaceMutation],
-            replayPolicy: .requiresManualReconciliation)
+            replayPolicy: .doNotReplay)
         let task = PermissionReviewTask(
             id: reviewID,
             sessionID: SessionID(rawValue: "sess_roundtrip"),

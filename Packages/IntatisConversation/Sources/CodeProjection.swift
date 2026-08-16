@@ -493,10 +493,6 @@ public struct CodeProjection: Equatable, Sendable {
                                   title: "\(p.from.rawValue)->\(p.to.rawValue)", body: p.content,
                                   timestamp: envelope.ts))
 
-        case .delegationRequested(let p):
-            items.append(CodeItem(id: p.requestID.rawValue, kind: .note, title: "delegation requested",
-                                  body: "\(p.requester.rawValue): \(p.objective) — \(p.reason)"))
-
         case .delegationApproved(let p):
             items.append(CodeItem(id: stableID(envelope, "delegation_approved"), kind: .note, title: "delegation approved",
                                   body: "@\(p.contract.assignee.rawValue): \(p.contract.objective)"))
@@ -634,16 +630,16 @@ public struct CodeProjection: Equatable, Sendable {
              .toolExecutionPrepared, .toolExecutionSettled,
              .permissionRequest, .permissionReviewRequested, .permissionReviewSettled,
              .agentStatus,
-             .workTaskCreated, .workTaskUpdated, .workTaskOwnerChanged, .workTaskDependencyChanged,
+             .workTaskCreated, .workTaskUpdated, .workTaskDependencyChanged,
              .workTaskReady, .workTaskStarted, .workTaskProgressed, .workTaskBlocked,
              .workTaskCompleted, .workTaskFailed, .workTaskCancelled,
-             .workTaskInvocationLinked, .workTaskEvidenceAdded, .workTaskCarriedForward,
+             .workTaskInvocationLinked, .workTaskEvidenceAdded,
              .goalCreated, .goalEdited, .goalPaused, .goalResumed, .goalAuditCompleted,
              .goalContinuationScheduled, .goalProgressed, .goalBlocked,
              .goalBudgetLimited, .goalUsageLimited, .goalCompleted, .goalCleared,
              .continuationRunCreated, .continuationRunStarted, .continuationRunCheckpointed,
              .continuationRunCloseRequested,
-             .continuationRunCompleted, .continuationRunCancelled, .continuationRunRecovered,
+             .continuationRunCompleted, .continuationRunInterrupted, .continuationRunCancelled,
              .artifactProgress, .turnStats,
              .mcpServerAttached, .mcpServerDetached, .mcpAttachmentPolicyUpdated,
              .mcpConsentGranted, .mcpConsentRevoked,
@@ -939,8 +935,6 @@ public struct CodeProjection: Equatable, Sendable {
             return uniqueAgents([payload.from, payload.to])
         case .informationReplied(let payload):
             return uniqueAgents([payload.from, payload.to])
-        case .delegationRequested(let payload):
-            return uniqueAgents([payload.requester, payload.recipient])
         case .delegationApproved(let payload):
             return uniqueAgents([
                 payload.contract.issuer,

@@ -129,8 +129,11 @@ struct CLIModernProviderConfig: Sendable {
     let routes: [CLIProviderRoute]
     let selectedProviderID: String
     let selectedModelID: String
-    let judgeModel: CLIProviderModelSelection?
+    let judgeModel: CLIProviderModelSelection
+    let permissionReviewerModel: CLIProviderModelSelection
     let imageModel: CLIProviderModelSelection?
+    let embeddingModel: CLIProviderModelSelection?
+    let rerankerModel: CLIProviderModelSelection?
     let sourceURL: URL
 
     static func existingURL(environment: [String: String]) -> URL? {
@@ -158,13 +161,13 @@ struct CLIModernProviderConfig: Sendable {
     static func load(from url: URL,
                      environment: [String: String]) throws -> CLIModernProviderConfig {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw IntatisError.config("selected Councis provider config is unavailable")
+            throw IntatisError.config("selected Intatis provider config is unavailable")
         }
         let data = try JSONC.data(contentsOf: url)
         guard case .object(let root) = try JSONDecoder().decode(JSONValue.self, from: data),
               let providerMap = root.object("provider"),
               !providerMap.isEmpty else {
-            throw IntatisError.config("selected Councis provider config has no provider map")
+            throw IntatisError.config("selected Intatis provider config has no provider map")
         }
 
         let enabled = Set((root.stringArray("enabled_providers")
@@ -175,20 +178,53 @@ struct CLIModernProviderConfig: Sendable {
             root.string("model") ?? root.string("small_model") ?? root.string("smallModel"),
             environment: environment,
             configDirectory: url.deletingLastPathComponent())
+        let permissionReviewerFieldPresent = root["permission_reviewer_model"] != nil
+        let permissionReviewerModelRaw = resolvedConfigValue(
+            root.string("permission_reviewer_model"),
+            environment: environment,
+            configDirectory: url.deletingLastPathComponent())
+        if permissionReviewerFieldPresent,
+           permissionReviewerModelRaw?.trimmingCharacters(
+               in: .whitespacesAndNewlines).isEmpty != false {
+            throw IntatisError.config(
+                "invalid CLI permission_reviewer_model")
+        }
+        let judgeFieldPresent = root["judge_model"] != nil
         let judgeModelRaw = resolvedConfigValue(
             root.string("judge_model"),
             environment: environment,
             configDirectory: url.deletingLastPathComponent())
+        if judgeFieldPresent,
+           judgeModelRaw?.trimmingCharacters(
+               in: .whitespacesAndNewlines).isEmpty != false {
+            throw IntatisError.config("invalid CLI judge_model")
+        }
         let imageModelRaw = resolvedConfigValue(
             root.string("image_model") ?? root.string("imageModel"),
             environment: environment,
             configDirectory: url.deletingLastPathComponent())
-        let explicitJudgeProviderID = providerID(
-            referencedBy: judgeModelRaw,
-            availableProviderIDs: Array(providerMap.keys))
-        let explicitImageProviderID = providerID(
-            referencedBy: imageModelRaw,
-            availableProviderIDs: Array(providerMap.keys))
+        // Knowledge role fields intentionally accept only their canonical
+        // snake_case spellings. This freezes one portable encoder/decoder
+        // contract instead of adding untested aliases.
+        let embeddingModelRaw = resolvedConfigValue(
+            root.string("embedding_model"),
+            environment: environment,
+            configDirectory: url.deletingLastPathComponent())
+        let rerankerModelRaw = resolvedConfigValue(
+            root.string("reranker_model"),
+            environment: environment,
+            configDirectory: url.deletingLastPathComponent())
+        let explicitRoleProviderIDs = Set([
+            permissionReviewerModelRaw,
+            judgeModelRaw,
+            imageModelRaw,
+            embeddingModelRaw,
+            rerankerModelRaw,
+        ].compactMap {
+            providerID(
+                referencedBy: $0,
+                availableProviderIDs: Array(providerMap.keys))
+        })
 
         var routes: [CLIProviderRoute] = []
         for providerID in providerMap.keys.sorted() {
@@ -217,9 +253,7 @@ struct CLIModernProviderConfig: Sendable {
                 options: options,
                 sourceURL: url)
             let models = parseModels(provider.object("models") ?? [:])
-            guard !models.isEmpty
-                    || providerID == explicitJudgeProviderID
-                    || providerID == explicitImageProviderID else {
+            guard !models.isEmpty || explicitRoleProviderIDs.contains(providerID) else {
                 continue
             }
             routes.append(CLIProviderRoute(
@@ -237,17 +271,55 @@ struct CLIModernProviderConfig: Sendable {
                 inlineSecret: nil,
                 models: models))
         }
-        let inferenceRoutes = routes.filter { !$0.models.isEmpty }
+        // Role models may need model-scoped adapter/options, but they are not
+        // Chat/Code/Cowork inference choices. Resolve the two canonical roles
+        // first, then remove those exact pairs only from the menu/catalog view;
+        // the original routes stay intact for ProviderConfig lowering.
+        let provisionalProviderID = routes.first?.id ?? ""
+        let embeddingModel = try selectRoleModel(
+            embeddingModelRaw,
+            preferredProviderID: provisionalProviderID,
+            routes: routes,
+            roleName: "embedding",
+            requiresQualifiedProvider: true)
+        let rerankerModel = try selectRoleModel(
+            rerankerModelRaw,
+            preferredProviderID: provisionalProviderID,
+            routes: routes,
+            roleName: "reranker",
+            requiresQualifiedProvider: true)
+        let knowledgeRoleKeys = Set([
+            embeddingModel,
+            rerankerModel,
+        ].compactMap { selection in
+            selection.map {
+                $0.providerID + "\u{1F}" + $0.modelID
+            }
+        })
+        let inferenceRoutes = routes.compactMap { route -> CLIProviderRoute? in
+            var filtered = route
+            filtered.models.removeAll { model in
+                knowledgeRoleKeys.contains(route.id + "\u{1F}" + model.id)
+            }
+            return filtered.models.isEmpty ? nil : filtered
+        }
         guard !inferenceRoutes.isEmpty else {
-            throw IntatisError.config("selected Councis provider config has no usable routes")
+            throw IntatisError.config("selected Intatis provider config has no usable routes")
         }
 
         let selection = try selectModel(selectedRaw, routes: inferenceRoutes)
-        let judgeModel = try selectRoleModel(
+        let permissionReviewerModel = try selectFixedCoworkRoleModel(
+            permissionReviewerModelRaw,
+            fieldWasPresent: permissionReviewerFieldPresent,
+            inheritedTopLevelModel: selectedRaw,
+            routes: inferenceRoutes,
+            configurationKey: "permission_reviewer_model")
+        let judgeModel = try selectFixedCoworkRoleModel(
             judgeModelRaw,
-            preferredProviderID: selection.providerID,
-            routes: routes,
-            roleName: "judge")
+            fieldWasPresent: judgeFieldPresent,
+            inheritedTopLevelModel: selectedRaw,
+            routes: inferenceRoutes,
+            configurationKey: "judge_model")
         let imageModel = try selectRoleModel(
             imageModelRaw,
             preferredProviderID: selection.providerID,
@@ -258,7 +330,10 @@ struct CLIModernProviderConfig: Sendable {
             selectedProviderID: selection.providerID,
             selectedModelID: selection.modelID,
             judgeModel: judgeModel,
+            permissionReviewerModel: permissionReviewerModel,
             imageModel: imageModel,
+            embeddingModel: embeddingModel,
+            rerankerModel: rerankerModel,
             sourceURL: url.standardizedFileURL)
     }
 
@@ -266,6 +341,9 @@ struct CLIModernProviderConfig: Sendable {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let exact = routes.filter { route in
             route.models.contains(where: { $0.id == trimmed })
+                && !isKnowledgeRoleModel(
+                    providerID: route.id,
+                    modelID: trimmed)
         }
         if exact.count == 1, let route = exact.first {
             return (route.id, trimmed)
@@ -281,10 +359,27 @@ struct CLIModernProviderConfig: Sendable {
             let prefix = route.id + "/"
             if trimmed.hasPrefix(prefix) {
                 let model = String(trimmed.dropFirst(prefix.count))
-                if !model.isEmpty { return (route.id, model) }
+                if !model.isEmpty {
+                    guard !isKnowledgeRoleModel(
+                        providerID: route.id,
+                        modelID: model) else {
+                        throw IntatisError.config(
+                            "Knowledge role models cannot be selected as CLI inference models")
+                    }
+                    return (route.id, model)
+                }
             }
         }
         return nil
+    }
+
+    func isKnowledgeRoleModel(
+        providerID: String,
+        modelID: String
+    ) -> Bool {
+        [embeddingModel, rerankerModel].compactMap { $0 }.contains {
+            $0.providerID == providerID && $0.modelID == modelID
+        }
     }
 
     func selectedVariantID(providerID: String,
@@ -344,33 +439,93 @@ struct CLIModernProviderConfig: Sendable {
         return (route.id, route.models[0].id)
     }
 
+    /// Fixed Cowork role configuration does not inherit `selectModel`'s
+    /// permissive unknown-model fallback. An explicit value must name one
+    /// enabled inference model using the canonical `<provider>/<model-id>`
+    /// shape; an absent value may inherit only this JSON document's provable
+    /// top-level model, exactly once.
+    private static func selectFixedCoworkRoleModel(
+        _ raw: String?,
+        fieldWasPresent: Bool,
+        inheritedTopLevelModel: String?,
+        routes: [CLIProviderRoute],
+        configurationKey: String
+    ) throws -> CLIProviderModelSelection {
+        if !fieldWasPresent {
+            guard let inheritedRaw = inheritedTopLevelModel?.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+                !inheritedRaw.isEmpty else {
+                throw IntatisError.config(
+                    "\(configurationKey) is absent and the JSON top-level model is unavailable")
+            }
+            let inherited = try selectModel(
+                inheritedRaw,
+                routes: routes)
+            guard routes.contains(where: { route in
+                route.id == inherited.providerID
+                    && route.models.contains(where: {
+                        $0.id == inherited.modelID
+                    })
+            }) else {
+                throw IntatisError.config(
+                    "\(configurationKey) cannot inherit an unknown JSON top-level model")
+            }
+            return CLIProviderModelSelection(
+                providerID: inherited.providerID,
+                modelID: inherited.modelID)
+        }
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            throw IntatisError.config(
+                "invalid CLI \(configurationKey)")
+        }
+        for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
+            let prefix = route.id + "/"
+            guard raw.hasPrefix(prefix) else { continue }
+            let modelID = String(raw.dropFirst(prefix.count))
+            guard !modelID.isEmpty,
+                  route.models.contains(where: { $0.id == modelID }) else {
+                throw IntatisError.config(
+                    "CLI \(configurationKey) does not resolve to a configured inference model")
+            }
+            return CLIProviderModelSelection(
+                providerID: route.id,
+                modelID: modelID)
+        }
+        throw IntatisError.config(
+            "CLI \(configurationKey) must use the canonical provider/model shape")
+    }
+
     private static func selectRoleModel(
         _ raw: String?,
         preferredProviderID: String,
         routes: [CLIProviderRoute],
-        roleName: String
+        roleName: String,
+        requiresQualifiedProvider: Bool = false
     ) throws -> CLIProviderModelSelection? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
             return nil
         }
 
-        let exact = routes.filter { route in
-            route.models.contains(where: { $0.id == raw })
-        }
-        if exact.count == 1, let route = exact.first {
-            return CLIProviderModelSelection(
-                providerID: route.id,
-                modelID: raw)
-        }
-        if exact.count > 1 {
-            if let preferred = exact.first(where: { $0.id == preferredProviderID }) {
+        if !requiresQualifiedProvider {
+            let exact = routes.filter { route in
+                route.models.contains(where: { $0.id == raw })
+            }
+            if exact.count == 1, let route = exact.first {
                 return CLIProviderModelSelection(
-                    providerID: preferred.id,
+                    providerID: route.id,
                     modelID: raw)
             }
-            throw IntatisError.config(
-                "ambiguous CLI \(roleName) model; qualify it with a provider ID")
+            if exact.count > 1 {
+                if let preferred = exact.first(where: { $0.id == preferredProviderID }) {
+                    return CLIProviderModelSelection(
+                        providerID: preferred.id,
+                        modelID: raw)
+                }
+                throw IntatisError.config(
+                    "ambiguous CLI \(roleName) model; qualify it with a provider ID")
+            }
         }
 
         for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
@@ -386,12 +541,9 @@ struct CLIModernProviderConfig: Sendable {
             }
         }
 
-        // A slash-bearing value that was neither an exact configured model ID
-        // nor prefixed by a known provider is an unresolved provider route.
-        // Do not reinterpret it as a new model under the preferred provider.
-        if raw.contains("/") {
+        if requiresQualifiedProvider {
             throw IntatisError.config(
-                "selected CLI \(roleName) provider route is unavailable")
+                "CLI \(roleName)_model must use the canonical provider/model shape")
         }
 
         guard routes.contains(where: { $0.id == preferredProviderID }) else {

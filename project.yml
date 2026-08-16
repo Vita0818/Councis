@@ -26,8 +26,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "0.36"
-    CURRENT_PROJECT_VERSION: "36"
+    MARKETING_VERSION: "0.48"
+    CURRENT_PROJECT_VERSION: "48"
     CODE_SIGN_STYLE: Automatic
     GENERATE_INFOPLIST_FILE: "NO"
     # To run on a device or archive for distribution, set your team:
@@ -56,6 +56,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.IntatisMac
         # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
         GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleName: Councis
         INFOPLIST_KEY_CFBundleDisplayName: Councis
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Councis contributors. See NOTICE.md."
@@ -84,6 +85,8 @@ targets:
         product: IntatisSharedUI
       - package: Intatis
         product: IntatisTools
+      - package: Intatis
+        product: IntatisKnowledge
       - package: Intatis
         product: IntatisPermission
       - package: Intatis
@@ -115,6 +118,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.IntatisMac
         PRODUCT_NAME: Intatis
         GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleName: Councis
         INFOPLIST_KEY_CFBundleDisplayName: Councis
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Councis contributors. See NOTICE.md."
@@ -170,6 +174,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
         GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleName: Councis
         INFOPLIST_KEY_CFBundleDisplayName: Councis
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Councis uses the microphone for voice input transcription."

@@ -6010,6 +6010,23 @@
         }
       }
     },
+    "Error Information" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error Information"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "错误信息"
+          }
+        }
+      }
+    },
     "Exact absolute executable path" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -11467,19 +11484,19 @@
         }
       }
     },
-    "Retry the initial @main/@judge registration before changing project settings; the ten-event session baseline must remain atomic." : {
+    "Retry the initial @main registration before changing project settings; the seven-event session baseline must remain atomic." : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Retry the initial @main/@judge registration before changing project settings; the ten-event session baseline must remain atomic."
+            "value" : "Retry the initial @main registration before changing project settings; the seven-event session baseline must remain atomic."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "更改项目设置前，请重试初始 @main/@judge 注册；十事件会话基线必须保持原子性。"
+            "value" : "更改项目设置前，请重试初始 @main 注册；七事件会话基线必须保持原子性。"
           }
         }
       }

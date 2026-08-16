@@ -148,15 +148,36 @@ final class MessageDelegationSplitTests: XCTestCase {
         XCTAssertEqual(capabilityLease.delegation, .none)
         XCTAssertTrue(capabilityLease.mcpGrants.isEmpty)
         XCTAssertFalse(capabilityLease.tools.contains(.manageWorkTasks))
-        XCTAssertFalse(capabilityLease.tools.contains(.updateOwnedWorkTask))
+        XCTAssertFalse(capabilityLease.tools.contains(.updateBoundWorkTask))
         XCTAssertFalse(capabilityLease.tools.contains(.delegateTask))
         XCTAssertFalse(capabilityLease.tools.contains(.runShell))
         XCTAssertFalse(capabilityLease.tools.contains(.gitControl))
         XCTAssertFalse(capabilityLease.tools.contains(.gitRemote))
         XCTAssertFalse(capabilityLease.tools.contains(.applyPatch))
         XCTAssertFalse(capabilityLease.tools.contains(.browseWeb))
+        XCTAssertTrue(capabilityLease.tools.contains(.readPDF))
+        XCTAssertTrue([
+            ToolCapability.readDOCX,
+            .readPPTX,
+            .readXLSX,
+            .readHTML,
+            .readEPUB,
+        ].allSatisfy(capabilityLease.tools.contains))
+        XCTAssertFalse(capabilityLease.tools.contains(.documentRead))
+        XCTAssertTrue(capabilityLease.tools.contains(.documentOCR))
+        XCTAssertFalse(capabilityLease.tools.contains(.documentRender))
+        XCTAssertFalse(capabilityLease.tools.contains(.documentExportPDF))
+        XCTAssertFalse(capabilityLease.tools.contains(.documentWrite))
         let mailboxToolNames = Set(Orchestrator.toolRegistry(
             for: capabilityLease).descriptors().map(\.name))
+        XCTAssertTrue(mailboxToolNames.contains("read_pdf"))
+        XCTAssertTrue(["read_docx", "read_pptx", "read_xlsx", "read_html", "read_epub"]
+            .allSatisfy(mailboxToolNames.contains))
+        XCTAssertFalse(mailboxToolNames.contains("document_read"))
+        XCTAssertTrue(mailboxToolNames.contains("document_ocr"))
+        XCTAssertFalse(mailboxToolNames.contains("document_render"))
+        XCTAssertFalse(mailboxToolNames.contains("document_export_pdf"))
+        XCTAssertFalse(mailboxToolNames.contains("document_write"))
         XCTAssertFalse(mailboxToolNames.contains("task_create"))
         XCTAssertFalse(mailboxToolNames.contains("task_update"))
         XCTAssertFalse(mailboxToolNames.contains("delegate_task"))
@@ -380,78 +401,18 @@ final class MessageDelegationSplitTests: XCTestCase {
         })
     }
 
-    func testRequestDelegationUsesCurrentTaskAndWakesAssigningAgentWithoutSpawnOrAttach() async throws {
-        let log = try splitLog()
-        let (orch, wsMain, wsWorker) = try await makeOrchestrator(log: log)
-        defer {
-            try? FileManager.default.removeItem(at: wsMain)
-            try? FileManager.default.removeItem(at: wsWorker)
-        }
-        let current = await orch.enqueueDelegatedTask(
-            from: main,
-            to: worker.rawValue,
-            objective: "Inspect the assigned source scope.",
-            replyMode: .none)
-        let currentTaskID = try XCTUnwrap(current.taskID)
-        let before = await log.replay().filter { if case .agentAttached = $0.event { return true } else { return false } }.count
-
-        let result = await orch.requestDelegation(from: worker,
-                                                  objective: "Need docs counter",
-                                                  reason: "Assigned workspace excludes docs",
-                                                  parentTaskID: currentTaskID)
-
-        XCTAssertEqual(result, "delegation request delivered to @main")
-        await orch.runSchedulerUntilIdle()
-        let events = await log.replay()
-        let request = try XCTUnwrap(events.compactMap { envelope -> DelegationRequestedPayload? in
-            if case .delegationRequested(let payload) = envelope.event,
-               payload.requester == worker, payload.objective == "Need docs counter" {
-                return payload
-            }
-            return nil
-        }.first)
-        XCTAssertEqual(request.recipient, main)
-        XCTAssertEqual(request.parentTaskID, currentTaskID)
-        let wakeTask = try XCTUnwrap(splitTaskContracts(events).first {
-            $0.kind == .mailboxDelivery && $0.assignee == main
-        })
-        XCTAssertEqual(wakeTask.relatedTasks, [currentTaskID])
-        XCTAssertEqual(
-            wakeTask.mailboxMessageIDs,
-            [MessageID(rawValue: request.requestID.rawValue)])
-        let wakeLease = try XCTUnwrap(events.compactMap { envelope -> CapabilityLease? in
-            guard case .capabilityLeaseCreated(let payload) = envelope.event,
-                  payload.lease.taskID == wakeTask.id else { return nil }
-            return payload.lease
-        }.first)
-        XCTAssertEqual(wakeLease.communication, .none)
-        XCTAssertEqual(
-            wakeLease.delegation,
-            .granted(DelegationBudget(maxTasks: 1, maxDepth: 1)))
-        XCTAssertTrue(wakeLease.tools.contains(.delegateTask))
-        XCTAssertFalse(wakeLease.tools.contains(.attachWorkspace))
-        XCTAssertFalse(wakeLease.tools.contains(.manageWorkTasks))
-        XCTAssertFalse(wakeLease.tools.contains(.runShell))
-        XCTAssertTrue(events.contains {
-            if case .agentMessageConsumed(let payload) = $0.event {
-                return payload.messageID == MessageID(rawValue: request.requestID.rawValue)
-                    && payload.agent == main
-                    && payload.taskID == wakeTask.id
-            }
-            return false
-        })
-        let mainMailbox = await orch.mailbox(for: main)
-        XCTAssertTrue(mainMailbox.pendingMessages.isEmpty)
-        let after = events.filter { if case .agentAttached = $0.event { return true } else { return false } }.count
-        XCTAssertEqual(after, before)
-        XCTAssertFalse(events.contains { if case .agentSpawned = $0.event { return true } else { return false } })
-    }
-
     func testCapabilityLeaseControlsMessageAndDelegationTools() {
         let workerTools = Set(Orchestrator.toolRegistry(for: .worker()).descriptors().map(\.name))
         XCTAssertTrue(workerTools.contains("reply_message"))
-        XCTAssertTrue(workerTools.contains("request_delegation"))
+        XCTAssertFalse(workerTools.contains("request_delegation"))
         XCTAssertTrue(workerTools.contains("read_pdf"))
+        XCTAssertTrue(["read_docx", "read_pptx", "read_xlsx", "read_html", "read_epub"]
+            .allSatisfy(workerTools.contains))
+        XCTAssertFalse(workerTools.contains("document_read"))
+        XCTAssertTrue(workerTools.contains("document_ocr"))
+        XCTAssertFalse(workerTools.contains("document_render"))
+        XCTAssertFalse(workerTools.contains("document_export_pdf"))
+        XCTAssertFalse(workerTools.contains("document_write"))
         XCTAssertFalse(workerTools.contains("delegate_task"))
         XCTAssertFalse(workerTools.contains("ask_agent"))
         XCTAssertFalse(workerTools.contains("generate_image"))
@@ -485,7 +446,16 @@ final class MessageDelegationSplitTests: XCTestCase {
         XCTAssertTrue(coordinatorTools.contains("reply_message"))
         XCTAssertTrue(coordinatorTools.contains("delegate_task"))
         XCTAssertTrue(coordinatorTools.contains("ask_agent"))
-        XCTAssertTrue(coordinatorTools.contains("edit_pdf_pages"))
+        XCTAssertTrue(["read_docx", "read_pptx", "read_xlsx", "read_html", "read_epub"]
+            .allSatisfy(coordinatorTools.contains))
+        XCTAssertFalse(coordinatorTools.contains("document_read"))
+        XCTAssertTrue(coordinatorTools.contains("document_ocr"))
+        XCTAssertTrue(coordinatorTools.contains("document_render"))
+        XCTAssertTrue(coordinatorTools.contains("document_export_pdf"))
+        XCTAssertTrue(coordinatorTools.contains("document_write"))
+        XCTAssertFalse(coordinatorTools.contains("read_document"))
+        XCTAssertFalse(coordinatorTools.contains("edit_pdf_pages"))
+        XCTAssertFalse(coordinatorTools.contains("reconstruct_document_image"))
         XCTAssertTrue(coordinatorTools.contains("compile_latex"))
         XCTAssertTrue(coordinatorTools.contains("generate_image"))
         XCTAssertTrue(coordinatorTools.contains("edit_image"))

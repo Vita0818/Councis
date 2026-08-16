@@ -40,6 +40,41 @@ public struct PermissionReviewGateSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// Legacy v0.40-v0.47 agent-authored authorization report. It remains Codable
+/// so existing EventLog records can be replayed, but new live reviews use the
+/// request-local same-generation sidecar instead.
+public struct PermissionAuthorizationReport: Codable, Equatable, Sendable {
+    public var authorizationGoal: String
+    public var currentProgress: String
+    public var latestInstructionInterpretation: String
+    public var currentActionJustification: String
+    public var scopeAssessment: String
+
+    public init(authorizationGoal: String,
+                currentProgress: String,
+                latestInstructionInterpretation: String,
+                currentActionJustification: String,
+                scopeAssessment: String) {
+        self.authorizationGoal = authorizationGoal
+        self.currentProgress = currentProgress
+        self.latestInstructionInterpretation = latestInstructionInterpretation
+        self.currentActionJustification = currentActionJustification
+        self.scopeAssessment = scopeAssessment
+    }
+}
+
+/// Legacy v0.40-v0.47 host-bound report context retained for decode/replay.
+public struct PermissionAuthorizationContext: Codable, Equatable, Sendable {
+    public var report: PermissionAuthorizationReport
+    public var supportingUserEventSequences: [Int]
+
+    public init(report: PermissionAuthorizationReport,
+                supportingUserEventSequences: [Int]) {
+        self.report = report
+        self.supportingUserEventSequences = supportingUserEventSequences
+    }
+}
+
 /// Bounded causal evidence attached to the current execution. The sequence
 /// numbers refer back to the append-only EventLog instead of duplicating raw
 /// transcript or tool output in the review task.
@@ -50,19 +85,53 @@ public struct PermissionReviewCausalContext: Codable, Equatable, Sendable {
     public var taskLineage: [TaskID]
     public var relatedAgents: [AgentID]
     public var eventSequenceNumbers: [Int]
+    /// Decode-only legacy Reporter evidence. New live automatic reviews keep
+    /// this nil and persist only `PermissionReviewInvocationEvidenceMetadata`.
+    public var authorizationContext: PermissionAuthorizationContext?
 
     public init(userGoal: String? = nil,
                 issuer: AgentID? = nil,
                 assignee: AgentID? = nil,
                 taskLineage: [TaskID] = [],
                 relatedAgents: [AgentID] = [],
-                eventSequenceNumbers: [Int] = []) {
+                eventSequenceNumbers: [Int] = [],
+                authorizationContext: PermissionAuthorizationContext? = nil) {
         self.userGoal = userGoal
         self.issuer = issuer
         self.assignee = assignee
         self.taskLineage = taskLineage
         self.relatedAgents = relatedAgents
         self.eventSequenceNumbers = eventSequenceNumbers
+        self.authorizationContext = authorizationContext
+    }
+}
+
+/// Non-sensitive durable receipt for the request-local invocation evidence
+/// used by a live automatic review. The complete business arguments and model
+/// context remain transient; only their binding metadata is persisted.
+public struct PermissionReviewInvocationEvidenceMetadata:
+    Codable, Equatable, Sendable {
+    public enum Status: String, Codable, Equatable, Sendable {
+        case valid
+    }
+
+    public var schemaVersion: Int
+    public var status: Status
+    public var sourceGenerationID: String
+    public var toolSnapshotID: String
+    public var modelAuthorizationContextDigest: String
+
+    public init(schemaVersion: Int = 1,
+                status: Status = .valid,
+                sourceGenerationID: String,
+                toolSnapshotID: String,
+                modelAuthorizationContextDigest: String) {
+        self.schemaVersion = schemaVersion
+        self.status = status
+        self.sourceGenerationID = sourceGenerationID
+        self.toolSnapshotID = toolSnapshotID
+        self.modelAuthorizationContextDigest =
+            modelAuthorizationContextDigest
     }
 }
 
@@ -86,6 +155,10 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
     public var workspaceLease: WorkspaceLease?
     public var taskContract: TaskContract?
     public var causalContext: PermissionReviewCausalContext?
+    /// Durable digest/status receipt for transient exact review input. Raw
+    /// sidecar and business arguments are never stored here.
+    public var reviewInvocationEvidence:
+        PermissionReviewInvocationEvidenceMetadata?
     /// Host-resolved concrete tool/capability facts. Reviewers consume this
     /// snapshot instead of inferring tool membership from capability names.
     public var authorization: ResolvedToolAuthorization?
@@ -111,6 +184,8 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
                 workspaceLease: WorkspaceLease? = nil,
                 taskContract: TaskContract? = nil,
                 causalContext: PermissionReviewCausalContext? = nil,
+                reviewInvocationEvidence:
+                    PermissionReviewInvocationEvidenceMetadata? = nil,
                 authorization: ResolvedToolAuthorization? = nil,
                 executionID: String? = nil,
                 replayPolicy: String? = nil) {
@@ -130,6 +205,7 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         self.workspaceLease = workspaceLease
         self.taskContract = taskContract
         self.causalContext = causalContext
+        self.reviewInvocationEvidence = reviewInvocationEvidence
         self.authorization = authorization
         self.executionID = executionID
         self.replayPolicy = replayPolicy
@@ -138,7 +214,8 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case turnID, taskID, rootTaskID, parentTaskID, attempt, toolCallID, normalizedArgs
         case touchedPaths, risksNetwork, sideEffect, intent, gate, capabilityLease
-        case workspaceLease, taskContract, causalContext, authorization, executionID, replayPolicy
+        case workspaceLease, taskContract, causalContext
+        case reviewInvocationEvidence, authorization, executionID, replayPolicy
     }
 
     public init(from decoder: Decoder) throws {
@@ -159,6 +236,9 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         workspaceLease = try container.decodeIfPresent(WorkspaceLease.self, forKey: .workspaceLease)
         taskContract = try container.decodeIfPresent(TaskContract.self, forKey: .taskContract)
         causalContext = try container.decodeIfPresent(PermissionReviewCausalContext.self, forKey: .causalContext)
+        reviewInvocationEvidence = try container.decodeIfPresent(
+            PermissionReviewInvocationEvidenceMetadata.self,
+            forKey: .reviewInvocationEvidence)
         authorization = try container.decodeIfPresent(ResolvedToolAuthorization.self, forKey: .authorization)
         executionID = try container.decodeIfPresent(String.self, forKey: .executionID)
         replayPolicy = try container.decodeIfPresent(String.self, forKey: .replayPolicy)
@@ -182,6 +262,9 @@ public struct PermissionRequestContext: Codable, Equatable, Sendable {
         try container.encodeIfPresent(workspaceLease, forKey: .workspaceLease)
         try container.encodeIfPresent(taskContract, forKey: .taskContract)
         try container.encodeIfPresent(causalContext, forKey: .causalContext)
+        try container.encodeIfPresent(
+            reviewInvocationEvidence,
+            forKey: .reviewInvocationEvidence)
         try container.encodeIfPresent(authorization, forKey: .authorization)
         try container.encodeIfPresent(executionID, forKey: .executionID)
         try container.encodeIfPresent(replayPolicy, forKey: .replayPolicy)

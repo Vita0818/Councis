@@ -16,7 +16,7 @@ func runSettings() throws {
     while true {
         out("""
 
-        \(bold)Councis settings\(reset)  \(dim)\(ConfigFile.url.path)\(reset)
+        \(bold)Intatis settings\(reset)  \(dim)\(ConfigFile.url.path)\(reset)
 
           1) Endpoint (base URL) : \(display("baseURL", default: CLIConfig.defaultBaseURL))
           2) API key             : \(cfg["apiKey"]?.isEmpty == false ? "\(green)(set)\(reset)" : "\(dim)(not set)\(reset)")

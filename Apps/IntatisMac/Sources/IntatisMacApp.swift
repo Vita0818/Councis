@@ -8,10 +8,12 @@ import IntatisProviders
 import IntatisConversation
 import IntatisAgentKernel
 import IntatisArtifacts
+import IntatisTools
 import IntatisMCP
-import IntatisMultimodal
 import IntatisSharedUI
-import UniformTypeIdentifiers
+#if !INTATIS_MAC_APP_STORE
+import IntatisKnowledge
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -255,7 +257,11 @@ final class AppEnvironment: ObservableObject {
                         log: codeLog,
                         workspacePaths: [
                             workspace.canonicalPath,
-                        ]))
+                        ]),
+                internalToolRegistryAugmenter:
+                    makeKnowledgeToolAugmenter(),
+                initialConfigurationNotice:
+                    knowledgeToolsConfigurationNotice())
             return try runtimeManager.registerCodeRuntime(runtime)
         } catch {
             if !hadRememberedAccess {
@@ -284,14 +290,18 @@ final class AppEnvironment: ObservableObject {
             throw IntatisError.config(IntatisLocalization.string(
                 "Choose a resolvable default inference profile before creating Cowork."))
         }
-        guard let judgeBinding = AppInferenceCatalogCompiler.judgeBinding(
-            catalog: providerCatalog,
+        guard let permissionReviewerBinding =
+                configuredPermissionReviewerBinding(
+                    snapshot: inferenceCatalogSnapshot) else {
+            primaryWorkspace.release()
+            throw IntatisError.config(IntatisLocalization.string(
+                "Configure a resolvable permission_reviewer_model before creating Cowork."))
+        }
+        guard let judgeBinding = configuredJudgeBinding(
             snapshot: inferenceCatalogSnapshot) else {
             primaryWorkspace.release()
-            let message = providerCatalog.judgeModel == nil
-                ? "The default model cannot be resolved for @judge."
-                : "The configured judge_model cannot be resolved to an exact inference profile."
-            throw IntatisError.config(IntatisLocalization.string(message))
+            throw IntatisError.config(IntatisLocalization.string(
+                "Configure a resolvable judge_model before creating Cowork."))
         }
         let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
         do {
@@ -311,8 +321,10 @@ final class AppEnvironment: ObservableObject {
                     log: coworkLog,
                     projectSettings: settings,
                     launchMode: .fresh,
-                    freshJudgeInferenceBinding: judgeBinding,
-                    initialWorkspaceAccess: primaryWorkspace)
+                    initialWorkspaceAccess: primaryWorkspace,
+                    judgeInferenceBinding: judgeBinding,
+                    permissionReviewerInferenceBinding:
+                        permissionReviewerBinding)
             }
         } catch {
             try? WorkspaceAccess.forget(
@@ -330,6 +342,11 @@ final class AppEnvironment: ObservableObject {
                 inferenceCatalogError ?? IntatisLocalization.string(
                     "Inference profiles are still loading. Try again in a moment."))
         }
+        let permissionReviewerBinding =
+            configuredPermissionReviewerBinding(
+                snapshot: inferenceCatalogSnapshot)
+        let judgeBinding = configuredJudgeBinding(
+            snapshot: inferenceCatalogSnapshot)
         return try await runtimeManager.coworkRuntime(sessionID: session) { [self] in
         let coworkLog = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
         let legacyOwnedWorkspacePaths = CoworkProjectSettingsStore
@@ -397,7 +414,10 @@ final class AppEnvironment: ObservableObject {
             log: coworkLog,
             projectSettings: projectSettings,
             launchMode: .restored,
-            sessionStorageWarning: warning)
+            sessionStorageWarning: warning,
+            judgeInferenceBinding: judgeBinding,
+            permissionReviewerInferenceBinding:
+                permissionReviewerBinding)
         }
     }
 
@@ -428,10 +448,25 @@ final class AppEnvironment: ObservableObject {
         projectSettings: CoworkProjectSettings,
         launchMode: CoworkSessionLaunchMode,
         sessionStorageWarning: String? = nil,
-        freshJudgeInferenceBinding: AgentInferenceBinding? = nil,
-        initialWorkspaceAccess: WorkspaceAccessLease? = nil
+        initialWorkspaceAccess: WorkspaceAccessLease? = nil,
+        judgeInferenceBinding: AgentInferenceBinding?,
+        permissionReviewerInferenceBinding:
+            AgentInferenceBinding?
     ) throws -> CoworkViewModel {
         let artifactStore = try ArtifactStore(root: AppConfig.artifactsDir(session))
+        let permissionReviewerConfigurationError =
+            permissionReviewerInferenceBinding == nil
+            ? IntatisLocalization.string(
+                "The configured permission_reviewer_model is missing, invalid, or unavailable in the current inference catalog.")
+            : nil
+        let judgeConfigurationError = judgeInferenceBinding == nil
+            ? IntatisLocalization.string(
+                "The configured judge_model is missing, invalid, or unavailable in the current inference catalog.")
+            : nil
+        let combinedStorageWarning = [
+            sessionStorageWarning,
+            knowledgeToolsConfigurationNotice(),
+        ].compactMap { $0 }.joined(separator: " ")
         return CoworkViewModel(
             sessionID: session,
             log: coworkLog,
@@ -439,10 +474,18 @@ final class AppEnvironment: ObservableObject {
             sessionNaming: makeSessionNamingService(log: coworkLog, kind: .cowork),
             registry: registry,
             inferenceProfileOptions: inferenceProfileOptions,
+            judgeInferenceBinding: judgeInferenceBinding,
+            judgeConfigurationError: judgeConfigurationError,
+            permissionReviewerInferenceBinding:
+                permissionReviewerInferenceBinding,
+            permissionReviewerConfigurationError:
+                permissionReviewerConfigurationError,
             projectSettings: projectSettings,
             launchMode: launchMode,
-            freshJudgeInferenceBinding: freshJudgeInferenceBinding,
-            sessionStorageWarning: sessionStorageWarning,
+            sessionStorageWarning:
+                combinedStorageWarning.isEmpty
+                    ? nil
+                    : combinedStorageWarning,
             initialWorkspaceAccess: initialWorkspaceAccess,
             mcpSnapshots:
                 makeMCPSnapshotFactory(
@@ -451,7 +494,84 @@ final class AppEnvironment: ObservableObject {
                     log: coworkLog,
                     workspacePaths:
                         projectSettings.workspaces
-                            .map(\.path)))
+                            .map(\.path)),
+            internalToolRegistryAugmenter:
+                makeKnowledgeToolAugmenter())
+    }
+
+    private func configuredPermissionReviewerBinding(
+        snapshot: InferenceCatalogSnapshot
+    ) -> AgentInferenceBinding? {
+        guard let reviewer = providerCatalog.permissionReviewerModel else {
+            return nil
+        }
+        // The top-level role names a base provider/model profile. It never
+        // borrows the mutable UI-selected variant or the current @main route.
+        return AppInferenceCatalogCompiler.binding(
+            providerID: reviewer.endpoint,
+            modelID: reviewer.model.rawValue,
+            variantID: nil,
+            snapshot: snapshot)
+    }
+
+    private func configuredJudgeBinding(
+        snapshot: InferenceCatalogSnapshot
+    ) -> AgentInferenceBinding? {
+        guard let judge = providerCatalog.judgeModel else {
+            return nil
+        }
+        // Judge is a fixed data-plane identity whose base route comes only from
+        // config parsing. It never borrows the mutable UI-selected variant or
+        // a live/historical @main binding.
+        return AppInferenceCatalogCompiler.binding(
+            providerID: judge.endpoint,
+            modelID: judge.model.rawValue,
+            variantID: nil,
+            snapshot: snapshot)
+    }
+
+    private func makeKnowledgeToolAugmenter()
+        -> HostToolRegistryAugmenter? {
+        #if !INTATIS_MAC_APP_STORE
+        let configured = AppConfig.providerConfig()
+        guard (try? ProviderRegistry.validateKnowledgeConfiguration(
+            configured)) != nil else { return nil }
+        let providerRegistry = registry
+        let external = KnowledgeAccess.externalAuthorityProvider()
+        return HostToolRegistryAugmenter(
+            additionalCapabilities: [.buildKnowledge, .searchKnowledge]) { input in
+                let models = try await providerRegistry.configuredKnowledgeModels()
+                let embedding = try ProviderKnowledgeEmbeddingAdapter(
+                    provider: models.embedding)
+                let reranker = try ProviderKnowledgeRerankerAdapter(
+                    provider: models.reranker)
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                let host = try ModelDrivenKnowledgeToolHost(
+                    embeddingProvider: embedding,
+                    rerankerProvider: reranker,
+                    authorityResolver: KnowledgeStoreAuthorityResolver(
+                        externalProvider: external),
+                    policy: KnowledgeSearchPolicy(
+                        evaluationDate: formatter.string(from: Date())))
+                return try await host.augment(input)
+            }
+        #else
+        return nil
+        #endif
+    }
+
+    private func knowledgeToolsConfigurationNotice() -> String? {
+        #if !INTATIS_MAC_APP_STORE
+        do {
+            try ProviderRegistry.validateKnowledgeConfiguration(
+                AppConfig.providerConfig())
+        } catch {
+            return error.localizedDescription
+        }
+        #endif
+        return nil
     }
 
     private func makeMCPSnapshotFactory(
@@ -864,6 +984,7 @@ struct CodeSessionView: View {
     @State private var showMCPProjectSettings =
         false
     @State private var showMCPContent = false
+    @State private var showAttachmentImporter = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -879,8 +1000,10 @@ struct CodeSessionView: View {
                   isWorking: vm.isWorking,
                   workspaceName: vm.workspaceName,
                   agentState: vm.agentState,
-                  composerError: vm.voiceInput.errorText
-                    ?? vm.composerError,
+                  errorTexts: [
+                    vm.voiceInput.errorText,
+                    vm.composerError,
+                  ].compactMap { $0 },
                   threadStyle: .intatisMac(scheme),
                   onShowSessions: onShowSessions,
                   onNewSession: onNewSession,
@@ -897,6 +1020,16 @@ struct CodeSessionView: View {
                             vm.pendingMCPExternalContextCount,
                         onCancel: {
                             vm.cancelPendingMCPExternalContexts()
+                        })
+                    IntatisMacComposerAttachmentAccessory(
+                        attachments: vm.draftAttachments,
+                        accessibilityPrefix: "code",
+                        isDisabled: vm.isWorking,
+                        onAttach: {
+                            showAttachmentImporter = true
+                        },
+                        onRemove: {
+                            vm.removeDraftAttachment($0)
                         })
                   }),
                   composerTrailingAction:
@@ -950,6 +1083,10 @@ struct CodeSessionView: View {
                     minWidth: 980,
                     minHeight: 680)
             }
+            .intatisComposerAttachmentImport(
+                isPresented: $showAttachmentImporter,
+                onImport: { vm.importDraftAttachments($0) },
+                onFailure: { vm.reportAttachmentImportFailure($0) })
     }
 
 }
@@ -1042,11 +1179,13 @@ struct CoworkSessionView: View {
                         project: vm.project,
                         goal: vm.goal,
                         workTasks: vm.workTasks,
-                        composerError: vm.voiceInput.errorText
-                            ?? vm.composerError
-                            ?? vm.inferenceComposerError
-                            ?? vm.projectionError
-                            ?? vm.sessionStorageWarning,
+                        errorTexts: [
+                            vm.voiceInput.errorText,
+                            vm.composerError,
+                            vm.inferenceComposerError,
+                            vm.projectionError,
+                            vm.sessionStorageWarning,
+                        ].compactMap { $0 },
                         isWorking: isCoworkBusy,
                         isAcceptingSubmission: vm.isAcceptingSubmission,
                         hasDraftAttachments: !vm.draftAttachments.isEmpty,
@@ -1072,42 +1211,16 @@ struct CoworkSessionView: View {
                                     vm.cancelPendingMCPExternalContexts()
                                 })
                         }),
-                        composerInputAccessory: AnyView(HStack(
-                            alignment: .center,
-                            spacing: IntatisComposerControlMetrics.rowSpacing
-                        ) {
-                            Button {
-                                showAttachmentImporter = true
-                            } label: {
-                                Label(
-                                    IntatisLocalization.string("Attach files"),
-                                    systemImage: "paperclip")
-                                    .intatisComposerIconLabel()
-                            }
-                            .intatisCompactIconButton()
-                            .help(IntatisLocalization.string("Attach files"))
-                            .accessibilityLabel(IntatisLocalization.string("Attach files"))
-                            .accessibilityIdentifier("cowork.composer.attach")
-                            if !vm.draftAttachments.isEmpty {
-                                Menu(IntatisLocalization.format(
-                                    "%lld attached",
-                                    Int64(vm.draftAttachments.count))) {
-                                    ForEach(vm.draftAttachments) { attachment in
-                                        Button(IntatisLocalization.format(
-                                            "Remove %@",
-                                            attachment.name)) {
-                                            vm.removeDraftAttachment(attachment.id)
-                                        }
-                                    }
-                                }
-                                .controlSize(.regular)
-                                .menuStyle(.borderlessButton)
-                                .accessibilityIdentifier("cowork.composer.attachments")
-                            }
-                        }
-                        .frame(
-                            minHeight: IntatisComposerControlMetrics.controlHeight,
-                            alignment: .center)),
+                        composerInputAccessory: AnyView(
+                            IntatisMacComposerAttachmentAccessory(
+                                attachments: vm.draftAttachments,
+                                accessibilityPrefix: "cowork",
+                                onAttach: {
+                                    showAttachmentImporter = true
+                                },
+                                onRemove: {
+                                    vm.removeDraftAttachment($0)
+                                })),
                         composerTrailingAction:
                             IntatisThreadComposerSecondaryAction(
                                 systemImage:
@@ -1180,23 +1293,10 @@ struct CoworkSessionView: View {
         }
         .sheet(isPresented: $showProjectSettings) { projectSettingsSheet }
         .sheet(isPresented: $showGoalEditor) { goalEditorSheet }
-        .fileImporter(
+        .intatisComposerAttachmentImport(
             isPresented: $showAttachmentImporter,
-            allowedContentTypes: [.data, .content],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                vm.importDraftAttachments(urls)
-            case .failure(let error):
-                vm.reportAttachmentImportFailure(error)
-            }
-        }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !urls.isEmpty else { return false }
-            vm.importDraftAttachments(urls)
-            return true
-        }
+            onImport: { vm.importDraftAttachments($0) },
+            onFailure: { vm.reportAttachmentImportFailure($0) })
         .alert("Clear this Goal?", isPresented: $showGoalClearConfirmation) {
             Button("Clear", role: .destructive) { vm.clearGoal() }
             Button("Cancel", role: .cancel) {}

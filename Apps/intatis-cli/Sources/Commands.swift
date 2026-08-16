@@ -10,14 +10,14 @@ func printConfig(_ config: CLIConfig) {
     mode     : \(config.mode.rawValue)
     api key  : \(config.hasConfiguredCredential ? "(configured, hidden)" : "(unset)")
     routes   : \(config.providerRoutes.count)
-    config   : \(config.configurationFileURL == nil ? ConfigFile.url.path : "(advanced Councis config, path hidden)")
+    config   : \(config.configurationFileURL == nil ? ConfigFile.url.path : "(advanced Intatis config, path hidden)")
 
     """)
 }
 
 func printHelp() {
     out("""
-    Councis CLI — a local AI agent for ANY OpenAI-compatible endpoint.
+    Intatis CLI — a local AI agent for ANY OpenAI-compatible endpoint.
 
     USAGE
       intatis                 Start your default mode (set via `intatis settings`)
@@ -31,10 +31,10 @@ func printHelp() {
       intatis exec --session <id> --agent <id> [--task <id>] --prompt <text> [--yes]
                               Run one exact durable Code/MCP turn
       intatis diagnose-hang --pid <pid> [--output <directory>]
-                              Capture a 10s sample and 5m Councis logs into an owner-only bundle
+                              Capture a 10s sample and 5m Intatis logs into an owner-only bundle
       intatis help
 
-    CONFIG  (env var > advanced Councis config > legacy config > default)
+    CONFIG  (env var > advanced Intatis config > legacy config > default)
       INTATIS_CONFIG     optional intatis.json/jsonc using model + enabled_providers + provider map
       INTATIS_BASE_URL   default https://api.openai.com/v1
       INTATIS_API_KEY    required (any non-empty for local servers)
