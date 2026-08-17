@@ -34,8 +34,7 @@ build_number="$(yaml_quoted_value CURRENT_PROJECT_VERSION)"
     || fail "project.yml has a non-numeric CURRENT_PROJECT_VERSION"
 
 for plist in \
-    "$project_root/Apps/IntatisMac/Info.plist" \
-    "$project_root/Apps/IntatisiOS/Info.plist"; do
+    "$project_root/Apps/CouncisMac/Info.plist"; do
     plist_marketing="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$plist")"
     plist_build="$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$plist")"
     [[ "$plist_marketing" == "$marketing_version" ]] \
@@ -43,6 +42,14 @@ for plist in \
     [[ "$plist_build" == "$build_number" ]] \
         || fail "$plist has CFBundleVersion=$plist_build, expected $build_number"
 done
+
+mac_plist="$project_root/Apps/CouncisMac/Info.plist"
+mac_bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$mac_plist")"
+[[ "$mac_bundle_identifier" == "com.Vita0818.Councis" ]] \
+    || fail "$mac_plist has CFBundleIdentifier=$mac_bundle_identifier, expected com.Vita0818.Councis"
+require_marker "$project_file" \
+    "PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Councis"
+require_marker "$project_file" "productName: Councis"
 
 require_marker "$project_root/README.md" \
     "当前版本：**v${marketing_version}**（build ${build_number}）"
@@ -77,12 +84,14 @@ if [[ -f "$project_root/docs/NEXT_TARGET.md" ]]; then
         "产品基线：v${marketing_version}（build ${build_number}）"
 fi
 
-generated_project="$project_root/Intatis.xcodeproj/project.pbxproj"
+generated_project="$project_root/Councis.xcodeproj/project.pbxproj"
 if [[ -f "$generated_project" ]]; then
     /usr/bin/grep -Fq -- "MARKETING_VERSION = $marketing_version;" "$generated_project" \
         || fail "generated Xcode project has a stale MARKETING_VERSION; run xcodegen generate"
     /usr/bin/grep -Fq -- "CURRENT_PROJECT_VERSION = $build_number;" "$generated_project" \
         || fail "generated Xcode project has a stale CURRENT_PROJECT_VERSION; run xcodegen generate"
+    /usr/bin/grep -Fq -- "PRODUCT_BUNDLE_IDENTIFIER = com.Vita0818.Councis;" "$generated_project" \
+        || fail "generated Xcode project has a stale Councis bundle identifier; run xcodegen generate"
 fi
 
-print -- "Intatis version is consistent: ${marketing_version} (build ${build_number})"
+print -- "Councis version is consistent: ${marketing_version} (build ${build_number})"

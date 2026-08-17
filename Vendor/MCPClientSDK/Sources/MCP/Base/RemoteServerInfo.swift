@@ -28,7 +28,7 @@ public struct RemoteServerInfo: Hashable, Codable, Sendable {
 /// Capabilities reported by the remote MCP server. This type contains only
 /// negotiated wire values and cannot host or handle MCP requests.
 ///
-/// Intatis adds the 2025-11-25 experimental Tasks capability shape because it
+/// Councis adds the 2025-11-25 experimental Tasks capability shape because it
 /// is absent from the pinned upstream 0.12.1 source.
 public struct RemoteServerCapabilities: Hashable, Codable, Sendable {
     public struct Resources: Hashable, Codable, Sendable {

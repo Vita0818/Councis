@@ -1,4 +1,4 @@
-# Intatis Cowork v0.10 Status
+# Councis Cowork v0.10 Status
 
 > **历史文档：冻结于 v0.10 迁移阶段。** 本文只保留设计/迁移 provenance，不是当前
 > 状态、测试或实现事实源。产品基线与当前规则见 `docs/VERSIONING.md`、
@@ -83,17 +83,17 @@ Minimum closure commands:
 
 ```bash
 swift test --quiet
-swift run intatis --help
+swift run councis --help
 xcodegen generate
 ```
 
 Manual CLI cowork flow:
 
 ```text
-1. swift run intatis
+1. swift run councis
 2. /mode cowork
 3. approve @main workspace attach
-4. ask @main to create macOS and iOS Swift counters
+4. ask @main to create macOS App and CLI Swift counters
 5. confirm worker agents do not spawn, self-call, or re-run global decomposition
 6. confirm results return to @main
 7. confirm semantic replay preserves task and mailbox state

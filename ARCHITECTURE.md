@@ -1,10 +1,10 @@
-# Intatis Architecture
+# Councis Architecture
 
 当前产品基线：v0.48（build 48）
 
 此根文件只保留兼容入口。早期 draft-0 架构在 v0.1–v0.3 阶段编写，已经不能描述当前
 AgentKernel、durable permission、MCP、Skills、managed terminal、per-agent inference、
-AppSessionRuntimeManager 和 iOS 产品边界。
+AppSessionRuntimeManager 和当前 macOS-only 产品边界。
 
 当前架构正文唯一维护在 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。同时参阅：
 

@@ -1,4 +1,4 @@
-// Intatis modification: remote initialization metadata uses client-only wire
+// Councis modification: remote initialization metadata uses client-only wire
 // values instead of the upstream MCP Server actor namespace. See PATCHES.md.
 
 /// The initialization phase MUST be the first interaction between client and server.

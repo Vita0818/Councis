@@ -1995,19 +1995,19 @@
         }
       }
     },
-    "Add the exact executable and launch closure, then run intatis mcp test before attaching it." : {
+    "Add the exact executable and launch closure, then run councis mcp test before attaching it." : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Add the exact executable and launch closure, then run intatis mcp test before attaching it."
+            "value" : "Add the exact executable and launch closure, then run councis mcp test before attaching it."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "添加精确的可执行文件和启动闭包，然后在挂载前运行 intatis mcp test。"
+            "value" : "添加精确的可执行文件和启动闭包，然后在挂载前运行 councis mcp test。"
           }
         }
       }
@@ -7812,36 +7812,19 @@
         }
       }
     },
-    "Managed stdio is not linked into this App Store build. Use an HTTPS Streamable HTTP endpoint or install the Developer ID build." : {
+    "Managed stdio remains inside the permission, workspace, sandbox, and durable execution boundaries." : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Managed stdio is not linked into this App Store build. Use an HTTPS Streamable HTTP endpoint or install the Developer ID build."
+            "value" : "Managed stdio remains inside the permission, workspace, sandbox, and durable execution boundaries."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 App Store 构建未链接受管 stdio。请使用 HTTPS Streamable HTTP 端点，或安装 Developer ID 构建。"
-          }
-        }
-      }
-    },
-    "Managed stdio remains inside the permission, workspace, sandbox, and durable execution boundaries. It is not linked into the App Store build." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Managed stdio remains inside the permission, workspace, sandbox, and durable execution boundaries. It is not linked into the App Store build."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "受管 stdio 始终位于权限、工作区、沙箱和持久执行边界内。App Store 构建不会链接该能力。"
+            "value" : "受管 stdio 始终位于权限、工作区、沙箱和持久执行边界内。"
           }
         }
       }
@@ -11783,19 +11766,19 @@
         }
       }
     },
-    "Run intatis mcp doctor and resolve every bwrap or launch-artifact error." : {
+    "Run councis mcp doctor and resolve every bwrap or launch-artifact error." : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Run intatis mcp doctor and resolve every bwrap or launch-artifact error."
+            "value" : "Run councis mcp doctor and resolve every bwrap or launch-artifact error."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "运行 intatis mcp doctor，并解决所有 bwrap 或启动产物错误。"
+            "value" : "运行 councis mcp doctor，并解决所有 bwrap 或启动产物错误。"
           }
         }
       }
@@ -13109,23 +13092,6 @@
         }
       }
     },
-    "Streamable HTTP only; this App Store build does not link the stdio transport" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Streamable HTTP only; this App Store build does not link the stdio transport"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仅支持 Streamable HTTP；此 App Store 构建不链接 stdio 传输"
-          }
-        }
-      }
-    },
     "Streaming" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14244,23 +14210,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此构建缺少第三方声明。"
-          }
-        }
-      }
-    },
-    "This App Store build is remote-only by linkage and cannot launch a local MCP executable." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This App Store build is remote-only by linkage and cannot launch a local MCP executable."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此 App Store 构建在链接层面仅支持远程连接，无法启动本地 MCP 可执行文件。"
           }
         }
       }

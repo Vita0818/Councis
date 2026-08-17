@@ -1,4 +1,4 @@
-// Intatis client-only patch: 2025-11-25 experimental Tasks wire surface.
+// Councis client-only patch: 2025-11-25 experimental Tasks wire surface.
 //
 // The upstream 0.12.1 source contains no Tasks types. These definitions mirror
 // the frozen 2025-11-25 schema and do not implement or expose an MCP Server.

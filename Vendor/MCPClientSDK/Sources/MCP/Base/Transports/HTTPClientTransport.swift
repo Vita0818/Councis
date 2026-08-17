@@ -1,5 +1,5 @@
-// Intatis modification: initialize starts without a negotiated protocol header.
-// Additional host safety is implemented in IntatisMCP. See PATCHES.md.
+// Councis modification: initialize starts without a negotiated protocol header.
+// Additional host safety is implemented in CouncisMCP. See PATCHES.md.
 
 import Foundation
 import Logging

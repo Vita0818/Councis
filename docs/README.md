@@ -1,15 +1,16 @@
-# Councis 文档索引（Intatis v0.54 快照基线）
+# Councis 文档索引（固定 Intatis v0.54 来源基线）
 
 当前产品基线：**v0.48**（build 48）
-最近核对：2026-08-15
+最近核对：2026-08-17
 
 这个索引区分“当前规范”和“历史证据”。版本、产品状态或下一步判断只允许从当前规范
 读取；带旧版本号的历史文件保留用于解释迁移和兼容性，不能覆盖当前源码。
 
 Councis 根工作树当前直接来自 Intatis 提交 `120eda64fcb098f1bdc4852fee886450e80b3722`
-（标题 `v0.54`，产品版本仍由 `project.yml` 定义为 `0.48 (48)`）。当前已重新实现用户 UI
-控制面的 Councis 品牌覆盖、macOS Cowork-only 可见入口、fresh Cowork 固定 `@judge`、
-`judge_model`、Main/Judge prompt 与 Cowork Skill；Chat/Code 实现与历史兼容仍保留。
+（标题 `v0.54`，产品版本仍由 `project.yml` 定义为 `0.48 (48)`）。当前已完成 Councis
+SwiftPM/Xcode/App/CLI/config/storage/log/protocol canonical identity；唯一 App 为 macOS
+`Councis.app` / `CouncisMac` / `com.Vita0818.Councis`，iOS 与 legacy Mac App Store 产品面已删除。
+macOS 继续只显示 Cowork，fresh Cowork 固定 `@judge`，Chat/Code 实现与历史兼容仍保留。
 当前事实与目标边界见 `COUNcis_IDENTITY.md`，精确来源、保留文档和排除项见
 `INTATIS_BASELINE.md`。
 
@@ -17,10 +18,11 @@ Councis 根工作树当前直接来自 Intatis 提交 `120eda64fcb098f1bdc4852fe
 
 | 文档 | 权威范围 |
 |---|---|
-| `COUNcis_IDENTITY.md` | Councis 已实现身份、固定 `@judge`、提示词/Skill 修饰、范围与非目标 |
+| `COUNcis_IDENTITY.md` | Councis 完整产品身份、固定 `@judge`、canonical namespace、legacy/provenance 边界 |
+| `COUNcis_DECOUPLING_CHECKLIST.md` | 2026-08-17 底层脱钩决策、批次、legacy 白名单与验收矩阵 |
 | `INTATIS_BASELINE.md` | Intatis 快照来源、tree、复制边界、排除项与核验方式 |
 | `VERSIONING.md` | 产品版本与 build number 的唯一治理规则 |
-| `CURRENT_STATE.md` | Intatis 基线能力、验证状态，以及 Councis 当前实现差异 |
+| `CURRENT_STATE.md` | 当前 Councis 产品图、canonical/legacy identity、验证与风险 |
 | `PROJECT_MAP.md` | 当前目录、target、入口、关键文件和脚本 |
 | `ARCHITECTURE.md` | 当前运行时链路、数据模型、安全与平台边界 |
 | `CHAT_HOSTED_SEARCH.md` | 当前模型自主托管搜索、接入点适配、静默不搜索与实现边界 |
@@ -31,11 +33,11 @@ Councis 根工作树当前直接来自 Intatis 提交 `120eda64fcb098f1bdc4852fe
 | `COWORK_PRINCIPLES.md` | 当前 Cowork/AgentKernel 编排原则 |
 | `PER_AGENT_INFERENCE_PROFILES.md` | per-agent exact inference binding 契约 |
 | `CURRENT_UI_COLOR_SYSTEM.md` | 当前 Apple 原生表面与 Liquid Glass 规范 |
-| `NEXT_TARGET.md` | Councis 已完成目标与等待用户指定的下一边界；不自动继承 Intatis 临时发行目标 |
+| `NEXT_TARGET.md` | 已完成的底层品牌脱钩边界与等待用户指定的下一目标 |
 
-根 `README.md` 是当前 Intatis 基线的产品入口；根 `ARCHITECTURE.md` 仅为兼容链接，架构正文
+根 `README.md` 是当前 Councis 产品入口；根 `ARCHITECTURE.md` 仅为兼容链接，架构正文
 只维护在 `docs/ARCHITECTURE.md`。根 `AGENTS.md` 是 Councis 操作入口；它与上述两份 Councis
-专属文档定义项目边界。Claude/Gemini shims 仍按 Intatis 基线保留。
+专属文档定义项目边界。
 
 ## 操作政策与供应链资料
 
@@ -73,4 +75,5 @@ Councis 根工作树当前直接来自 Intatis 提交 `120eda64fcb098f1bdc4852fe
 - `NEXT_TARGET.md` 只保留一个经用户确认的 Councis 目标，完成后删除或替换。
 - `TESTING.md` 保存当前命令和最新证据；旧性能数字或事故细节留在报告中。
 - 不批量替换依赖、协议、schema、历史里程碑中的版本号。
-- 修改产品版本后必须运行 `scripts/check-version-consistency.sh`。
+- 修改产品版本后必须运行 `scripts/check-version-consistency.sh`；任何活跃 identity 变更还必须运行
+  `scripts/check-brand-boundary.sh`。

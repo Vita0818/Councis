@@ -1,26 +1,24 @@
 # XcodeGen spec — generates the Xcode project that builds the real .app bundles.
 #
 #   brew install xcodegen      # one-time
-#   xcodegen generate          # creates Intatis.xcodeproj
-#   open Intatis.xcodeproj     # pick the IntatisMac or IntatisiOS scheme, then Run
+#   xcodegen generate          # creates Councis.xcodeproj
+#   open Councis.xcodeproj     # pick the CouncisMac scheme, then Run
 #
-# The App targets link the Swift Package products in this repo. The iOS app links
-# ONLY the chat subset (no Tools / Permission / AgentKernel / Cowork).
+# The macOS App target links the Swift Package products in this repo.
 
-name: Intatis
+name: Councis
 
 options:
   bundleIdPrefix: com.Vita0818
   developmentLanguage: en
   deploymentTarget:
     macOS: "26.0"
-    iOS: "26.0"
   createIntermediateGroups: true
   localPackagesGroup: "Internal Modules"
   postGenCommand: "sh scripts/hide-xcode-package-schemes.sh"
 
 packages:
-  Intatis:
+  Councis:
     path: .
 
 settings:
@@ -36,13 +34,14 @@ settings:
 targets:
 
   # ---- macOS DeveloperID app: Chat / Code / Cowork + stdio/HTTP MCP client ----
-  IntatisMac:
+  CouncisMac:
     type: application
     platform: macOS
+    productName: Councis
     sources:
-      - Apps/IntatisMac/Sources
-      - Apps/IntatisMac/Resources
-      - path: Intatis.icon
+      - Apps/CouncisMac/Sources
+      - Apps/CouncisMac/Resources
+      - path: Councis.icon
         buildPhase: resources
       - path: Apps/SharedResources
         buildPhase: resources
@@ -53,7 +52,8 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.IntatisMac
+        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Councis
+        PRODUCT_NAME: Councis
         # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_CFBundleName: Councis
@@ -61,170 +61,50 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Councis contributors. See NOTICE.md."
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Councis uses the microphone to turn voice into editable message drafts."
-        ASSETCATALOG_COMPILER_APPICON_NAME: Intatis
-        CODE_SIGN_ENTITLEMENTS: Apps/IntatisMac/IntatisMac.DeveloperID.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: Councis
+        CODE_SIGN_ENTITLEMENTS: Apps/CouncisMac/CouncisMac.DeveloperID.entitlements
         ENABLE_HARDENED_RUNTIME: "YES"
         ENABLE_RESOURCE_ACCESS_AUDIO_INPUT: "YES"
-        # The separately declared IntatisMacAppStore target is the only
-        # App-Store profile; do not turn this stdio-capable target into one by
-        # swapping entitlements.
     dependencies:
-      - package: Intatis
-        product: IntatisCore
-      - package: Intatis
-        product: IntatisProtocol
-      - package: Intatis
-        product: IntatisProviders
-      - package: Intatis
-        product: IntatisConversation
-      - package: Intatis
-        product: IntatisArtifacts
-      - package: Intatis
-        product: IntatisMultimodal
-      - package: Intatis
-        product: IntatisSharedUI
-      - package: Intatis
-        product: IntatisTools
-      - package: Intatis
-        product: IntatisKnowledge
-      - package: Intatis
-        product: IntatisPermission
-      - package: Intatis
-        product: IntatisAgentKernel
-      - package: Intatis
-        product: IntatisSkills
-      - package: Intatis
-        product: IntatisCowork
-      - package: Intatis
-        product: IntatisMCP
-      - package: Intatis
-        product: IntatisMCPStdio
-
-  # ---- macOS App Store: full UI, remote MCP HTTP only, no stdio linkage ----
-  IntatisMacAppStore:
-    type: application
-    platform: macOS
-    sources:
-      - Apps/IntatisMac/Sources
-      - path: Apps/SharedResources
-        buildPhase: resources
-      - path: NOTICE.md
-        buildPhase: resources
-      - path: ThirdPartyNotices
-        type: folder
-        buildPhase: resources
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.IntatisMac
-        PRODUCT_NAME: Intatis
-        GENERATE_INFOPLIST_FILE: "YES"
-        INFOPLIST_KEY_CFBundleName: Councis
-        INFOPLIST_KEY_CFBundleDisplayName: Councis
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Councis contributors. See NOTICE.md."
-        CODE_SIGN_ENTITLEMENTS: Apps/IntatisMac/IntatisMac.AppStore.entitlements
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) INTATIS_MAC_APP_STORE"
-    dependencies:
-      - package: Intatis
-        product: IntatisCore
-      - package: Intatis
-        product: IntatisProtocol
-      - package: Intatis
-        product: IntatisProviders
-      - package: Intatis
-        product: IntatisConversation
-      - package: Intatis
-        product: IntatisArtifacts
-      - package: Intatis
-        product: IntatisMultimodal
-      - package: Intatis
-        product: IntatisSharedUI
-      - package: Intatis
-        product: IntatisTools
-      - package: Intatis
-        product: IntatisPermission
-      - package: Intatis
-        product: IntatisAgentKernel
-      - package: Intatis
-        product: IntatisSkills
-      - package: Intatis
-        product: IntatisCowork
-      - package: Intatis
-        product: IntatisMCP
-
-  # ---- iOS app: chat-only SUBSET (deliberately no workspace stack) ----
-  IntatisiOS:
-    type: application
-    platform: iOS
-    sources:
-      - Apps/IntatisiOS/Sources
-      - Apps/IntatisiOS/Resources
-      - path: Intatis.icon
-        buildPhase: resources
-      - path: Apps/SharedResources
-        buildPhase: resources
-      - path: NOTICE.md
-        buildPhase: resources
-      - path: ThirdPartyNotices
-        type: folder
-        buildPhase: resources
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Intatis
-        TARGETED_DEVICE_FAMILY: "1,2"
-        # Let Xcode synthesize Info.plist (injects CFBundleExecutable etc.).
-        GENERATE_INFOPLIST_FILE: "YES"
-        INFOPLIST_KEY_CFBundleName: Councis
-        INFOPLIST_KEY_CFBundleDisplayName: Councis
-        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Councis uses the microphone for voice input transcription."
-        ASSETCATALOG_COMPILER_APPICON_NAME: Intatis
-    dependencies:
-      - package: Intatis
-        product: IntatisCore
-      - package: Intatis
-        product: IntatisProtocol
-      - package: Intatis
-        product: IntatisProviders
-      - package: Intatis
-        product: IntatisConversation
-      - package: Intatis
-        product: IntatisArtifacts
-      - package: Intatis
-        product: IntatisMultimodal
-      - package: Intatis
-        product: IntatisSharedUI
+      - package: Councis
+        product: CouncisCore
+      - package: Councis
+        product: CouncisProtocol
+      - package: Councis
+        product: CouncisProviders
+      - package: Councis
+        product: CouncisConversation
+      - package: Councis
+        product: CouncisArtifacts
+      - package: Councis
+        product: CouncisMultimodal
+      - package: Councis
+        product: CouncisSharedUI
+      - package: Councis
+        product: CouncisTools
+      - package: Councis
+        product: CouncisKnowledge
+      - package: Councis
+        product: CouncisPermission
+      - package: Councis
+        product: CouncisAgentKernel
+      - package: Councis
+        product: CouncisSkills
+      - package: Councis
+        product: CouncisCowork
+      - package: Councis
+        product: CouncisMCP
+      - package: Councis
+        product: CouncisMCPStdio
 
 schemes:
-  IntatisMac:
+  CouncisMac:
     build:
       targets:
-        IntatisMac: all
+        CouncisMac: all
     run:
       config: Debug
     management:
       shared: true
       orderHint: 0
-      isShown: true
-
-  IntatisMacAppStore:
-    build:
-      targets:
-        IntatisMacAppStore: all
-    run:
-      config: Debug
-    management:
-      shared: true
-      orderHint: 1
-      isShown: true
-
-  IntatisiOS:
-    build:
-      targets:
-        IntatisiOS: all
-    run:
-      config: Debug
-    management:
-      shared: true
-      orderHint: 2
       isShown: true

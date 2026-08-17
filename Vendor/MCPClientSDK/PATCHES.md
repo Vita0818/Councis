@@ -13,7 +13,7 @@ Every entry is relative to upstream `0.12.1` commit
   SwiftNIO, and docc plugin.
   The small HTTP header/content-type constant subset used by the client is
   isolated in `HTTPClientWireConstants.swift`.
-- Reason: Intatis is solely an external MCP Server client and must expose no
+- Reason: Councis is solely an external MCP Server client and must expose no
   server target, API, binary, protocol handler, or future hosting seam.
 - Verification: package graph audit and a source/API deny-list test.
 
@@ -36,7 +36,7 @@ Every entry is relative to upstream `0.12.1` commit
   allowedProtocolVersions:)`; reject a requested version outside the supplied
   set and reject an initialization response outside that set before sending
   `notifications/initialized`.
-- Reason: each Intatis server has an exact protocol profile and maximum version;
+- Reason: each Councis server has an exact protocol profile and maximum version;
   the upstream client always requested `Version.latest`.
 - Verification: codex-compat and standard-extended negotiation fixtures,
   including out-of-bound server responses.
@@ -48,7 +48,7 @@ Every entry is relative to upstream `0.12.1` commit
   `validateInitializeResult` hook. It runs immediately after the initialize
   response arrives and before the SDK allow-set fence, negotiated-state write,
   HTTP protocol-header update, or `notifications/initialized`.
-- Reason: Intatis must validate the selected profile version, required
+- Reason: Councis must validate the selected profile version, required
   capabilities, bounded instructions, and host policy with stable typed errors
   before acknowledging initialization. A thrown validator error disconnects
   the exact transport generation.
@@ -78,7 +78,7 @@ Every entry is relative to upstream `0.12.1` commit
   hosting API.
 - Verification: `MCPTaskWireTests`, including
   `testTaskAugmentedMethodResultsUseExactCreateTaskShape`, exact JSON wire
-  fixtures, exhaustive capability negotiation, separate Intatis
+  fixtures, exhaustive capability negotiation, separate Councis
   remote-server/client-hosted state-machine tests, TTL and cancellation tests,
   and pinned 2025-11-25 conformance.
 
@@ -105,14 +105,14 @@ Every entry is relative to upstream `0.12.1` commit
   negotiation, not to the initialize request.
 - Verification: request-capture tests for initialize and subsequent POST/GET.
 
-## HOST-HTTP-002 — replace unsafe transport behavior at the Intatis boundary
+## HOST-HTTP-002 — replace unsafe transport behavior at the Councis boundary
 
 - Upstream input:
   `Sources/MCP/Base/Transports/HTTPClientTransport.swift`.
-- Local action: production Intatis connections use
-  `Packages/IntatisMCP/Sources/MCPStreamableHTTPTransport.swift`. The SDK
-  transport remains only an upstream comparison surface. The Intatis transport
-  calls the Intatis-owned `Packages/IntatisCurlTransport` boundary for
+- Local action: production Councis connections use
+  `Packages/CouncisMCP/Sources/MCPStreamableHTTPTransport.swift`. The SDK
+  transport remains only an upstream comparison surface. The Councis transport
+  calls the Councis-owned `Packages/CouncisCurlTransport` boundary for
   production HTTP/OAuth I/O; there is no URLSession or SDK-transport fallback
   on a production path. On macOS that target links Apple system libcurl. The
   fully static Linux CLI links the official Swift 6.3.3 Static Linux SDK
@@ -124,7 +124,7 @@ Every entry is relative to upstream `0.12.1` commit
   `51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf`), their license obligations,
   and the remaining artifact/source-attestation boundary are in
   `ThirdPartyNotices/MCPHTTPTransport.md`.
-  The Intatis transport
+  The Councis transport
   implements POST JSON/SSE, 202, optional GET SSE, a distinct resumability and
   deduplication state per stream, generation-bound `MCP-Session-Id`, 404
   retirement, DELETE termination, bounded owned drain, strict origin/redirect,
@@ -133,7 +133,7 @@ Every entry is relative to upstream `0.12.1` commit
 - Reason: upstream 0.12.1 has one global event ID, incomplete Linux SSE, no
   DELETE, no hard caps, logs complete session identifiers, and can
   automatically repeat a request after authorization/session recovery.
-  Intatis must never replay a dispatched `tools/call`; an ambiguous dispatched
+  Councis must never replay a dispatched `tools/call`; an ambiguous dispatched
   operation returns a typed execution-uncertain result.
 - Verification: `MCPStreamableHTTPTests`, including JSON/SSE/202,
   independent GET and POST-associated per-stream resume/dedup, session 404,
@@ -148,8 +148,8 @@ Every entry is relative to upstream `0.12.1` commit
 - Upstream inputs:
   `Sources/MCP/Base/Authorization/OAuthAuthorizer.swift`,
   `OAuthModels.swift`, and `TokenStorage.swift`.
-- Local action: production Intatis OAuth uses
-  `Packages/IntatisMCP/Sources/MCPOAuth.swift` with RFC 9728 path/root/header
+- Local action: production Councis OAuth uses
+  `Packages/CouncisMCP/Sources/MCPOAuth.swift` with RFC 9728 path/root/header
   discovery, RFC 8414 then OIDC discovery, OAuth 2.1 authorization code + PKCE,
   state/login-generation fencing, exact loopback callback validation, Client
   ID Metadata Documents before explicitly enabled DCR, RFC 8707 resource
@@ -183,7 +183,7 @@ Every entry is relative to upstream `0.12.1` commit
   closed if neither module is available.
 - Reason: upstream gates these paths solely on `canImport(CryptoKit)`, which
   makes OAuth authorization-code PKCE unavailable on the shipped Linux CLI.
-  Intatis does not permit a plaintext, SHA-256 placeholder, or home-grown
+  Councis does not permit a plaintext, SHA-256 placeholder, or home-grown
   cryptographic fallback.
 - Verification: `MCPPortableCryptoTests` known-answer vectors for SHA-256,
   HMAC-SHA256, AES-GCM authentication, and RFC 7636 PKCE S256; Linux static SDK
@@ -193,7 +193,7 @@ Every entry is relative to upstream `0.12.1` commit
 
 ## Tracked adapter/conformance work
 
-Intatis-owned `Packages/IntatisMCP/Sources/SDKPatchCompatibility.swift` records
+Councis-owned `Packages/CouncisMCP/Sources/SDKPatchCompatibility.swift` records
 features implemented above or around this source derivative, including managed
 stdio ownership, HTTP generation fencing, OAuth replay prevention, sampling
 with tools, provider-neutral URL elicitation, and experimental 2025-11-25

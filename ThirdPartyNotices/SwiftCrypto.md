@@ -1,6 +1,6 @@
 # Swift Crypto portable backend
 
-Intatis uses the official Apple `swift-crypto` package only on Linux targets
+Councis uses the official Apple `swift-crypto` package only on Linux targets
 that need the CryptoKit-compatible `Crypto` module. Darwin targets continue to
 compile against the operating-system CryptoKit framework; the Linux-only target
 conditions prevent the swift-crypto/BoringSSL implementation from entering the
@@ -25,7 +25,7 @@ preserves the SwiftNIO and Swift OpenAPI Generator derivation attributions.
   full commit above.
 - The vendored client-only MCP SDK declares the same exact version and uses
   `Crypto` only on Linux.
-- Intatis sources select `CryptoKit` when available, otherwise `Crypto`, and
+- Councis sources select `CryptoKit` when available, otherwise `Crypto`, and
   fail compilation when neither reviewed backend exists. No plaintext or
   home-grown cryptographic fallback is present.
 - Known-answer tests cover SHA-256, HMAC-SHA256, AES-GCM authentication, and

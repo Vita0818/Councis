@@ -1,38 +1,39 @@
 // swift-tools-version:5.9
 import PackageDescription
 
-// Intatis root SwiftPM manifest. Product versioning is owned by project.yml;
+// Councis root SwiftPM manifest. Product versioning is owned by project.yml;
 // package comments below that mention early v0.x milestones describe when a
 // subsystem was introduced, not the current product version. See
 // docs/VERSIONING.md.
 
 let package = Package(
-    name: "Intatis",
+    name: "Councis",
     platforms: [
         .macOS("26.0"),
+        // Source-portability declaration for shared Apple libraries. Councis
+        // ships no iOS App target, scheme, resources, or release artifact.
         .iOS("26.0"),
     ],
     products: [
-        .library(name: "IntatisCore", targets: ["IntatisCore"]),
-        .library(name: "IntatisProtocol", targets: ["IntatisProtocol"]),
-        .library(name: "IntatisProviders", targets: ["IntatisProviders"]),
-        .library(name: "IntatisArtifacts", targets: ["IntatisArtifacts"]),
-        .library(name: "IntatisConversation", targets: ["IntatisConversation"]),
-        .library(name: "IntatisTools", targets: ["IntatisTools"]),
-        .library(name: "IntatisKnowledge", targets: ["IntatisKnowledge"]),
-        .library(name: "IntatisSkills", targets: ["IntatisSkills"]),
-        .library(name: "IntatisPermission", targets: ["IntatisPermission"]),
-        .library(name: "IntatisMCP", targets: ["IntatisMCP"]),
-        .library(name: "IntatisMCPStdio", targets: ["IntatisMCPStdio"]),
-        .library(name: "IntatisAgentKernel", targets: ["IntatisAgentKernel"]),
-        .library(name: "IntatisCowork", targets: ["IntatisCowork"]),
-        .library(name: "IntatisMultimodal", targets: ["IntatisMultimodal"]),
-        .library(name: "IntatisSharedUI", targets: ["IntatisSharedUI"]),
-        // The CLI IS a SwiftPM executable (no Xcode needed): `swift run intatis chat`.
-        .executable(name: "intatis", targets: ["IntatisCLI"]),
-        // The GUI apps (IntatisMac, IntatisiOS) are Xcode App targets, not SPM
-        // products — SwiftPM cannot build a .app bundle, and iOS apps cannot be
-        // built from SPM at all. See project.yml (XcodeGen) + README.
+        .library(name: "CouncisCore", targets: ["CouncisCore"]),
+        .library(name: "CouncisProtocol", targets: ["CouncisProtocol"]),
+        .library(name: "CouncisProviders", targets: ["CouncisProviders"]),
+        .library(name: "CouncisArtifacts", targets: ["CouncisArtifacts"]),
+        .library(name: "CouncisConversation", targets: ["CouncisConversation"]),
+        .library(name: "CouncisTools", targets: ["CouncisTools"]),
+        .library(name: "CouncisKnowledge", targets: ["CouncisKnowledge"]),
+        .library(name: "CouncisSkills", targets: ["CouncisSkills"]),
+        .library(name: "CouncisPermission", targets: ["CouncisPermission"]),
+        .library(name: "CouncisMCP", targets: ["CouncisMCP"]),
+        .library(name: "CouncisMCPStdio", targets: ["CouncisMCPStdio"]),
+        .library(name: "CouncisAgentKernel", targets: ["CouncisAgentKernel"]),
+        .library(name: "CouncisCowork", targets: ["CouncisCowork"]),
+        .library(name: "CouncisMultimodal", targets: ["CouncisMultimodal"]),
+        .library(name: "CouncisSharedUI", targets: ["CouncisSharedUI"]),
+        // The CLI IS a SwiftPM executable (no Xcode needed): `swift run councis chat`.
+        .executable(name: "councis", targets: ["CouncisCLI"]),
+        // The CouncisMac GUI is an Xcode App target, not an SPM product —
+        // SwiftPM cannot build a .app bundle. See project.yml + README.
     ],
     dependencies: [
         // Audited in-tree thin derivative of Microsoft SwiftStreamingMarkdown
@@ -49,8 +50,8 @@ let package = Package(
             url: "https://github.com/apple/swift-crypto.git",
             exact: "4.5.1"
         ),
-        // Safe YAML parser for bounded OKF frontmatter in the non-iOS
-        // knowledge target. Exact commit/license provenance is recorded in
+        // Safe YAML parser for bounded OKF frontmatter in CouncisKnowledge.
+        // Exact commit/license provenance is recorded in
         // ThirdPartyNotices/KnowledgeRetrieval.md.
         .package(
             url: "https://github.com/jpsim/Yams.git",
@@ -60,64 +61,64 @@ let package = Package(
     targets: [
         // MARK: Library targets (module == target)
         .target(
-            name: "IntatisCore",
-            path: "Packages/IntatisCore/Sources"
+            name: "CouncisCore",
+            path: "Packages/CouncisCore/Sources"
         ),
         .target(
-            name: "IntatisProtocol",
-            dependencies: ["IntatisCore"],
-            path: "Packages/IntatisProtocol/Sources"
+            name: "CouncisProtocol",
+            dependencies: ["CouncisCore"],
+            path: "Packages/CouncisProtocol/Sources"
         ),
         .target(
-            name: "IntatisProviders",
+            name: "CouncisProviders",
             dependencies: [
-                "IntatisCore", "IntatisProtocol",
+                "CouncisCore", "CouncisProtocol",
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisProviders/Sources"
+            path: "Packages/CouncisProviders/Sources"
         ),
         .target(
-            name: "IntatisArtifacts",
-            dependencies: ["IntatisCore", "IntatisProtocol"],
-            path: "Packages/IntatisArtifacts/Sources"
+            name: "CouncisArtifacts",
+            dependencies: ["CouncisCore", "CouncisProtocol"],
+            path: "Packages/CouncisArtifacts/Sources"
         ),
         .target(
-            name: "IntatisConversation",
-            // ChatLoop drives a ChatProvider, so Conversation depends on Providers
-            // (still tool-free — see ARCHITECTURE.md §3.4 / §4: iOS links this, not the kernel).
-            dependencies: ["IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisArtifacts"],
-            path: "Packages/IntatisConversation/Sources"
+            name: "CouncisConversation",
+            // ChatLoop drives a ChatProvider, so Conversation depends on
+            // Providers while remaining tool-free.
+            dependencies: ["CouncisCore", "CouncisProtocol", "CouncisProviders", "CouncisArtifacts"],
+            path: "Packages/CouncisConversation/Sources"
         ),
         // v0.2 — Code: tools, deterministic permission gate, single-agent kernel.
         .target(
-            name: "IntatisPTYLauncher",
-            path: "Packages/IntatisPTYLauncher",
+            name: "CouncisPTYLauncher",
+            path: "Packages/CouncisPTYLauncher",
             publicHeadersPath: "include"
         ),
         .target(
-            name: "IntatisTools",
+            name: "CouncisTools",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisPTYLauncher",
+                "CouncisCore", "CouncisProtocol", "CouncisPTYLauncher",
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisTools/Sources"
+            path: "Packages/CouncisTools/Sources"
         ),
         // OKF/Profile snapshots, deterministic validation, local embedding,
         // derived indexes, and the snapshot-bound search_knowledge tool.
-        // No iOS app target links this product.
+        // Only the current macOS/CLI compositions link this product.
         .target(
-            name: "IntatisKnowledge",
+            name: "CouncisKnowledge",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisTools",
-                "IntatisProviders", "IntatisPermission",
+                "CouncisCore", "CouncisProtocol", "CouncisTools",
+                "CouncisProviders", "CouncisPermission",
                 .product(name: "Yams", package: "Yams"),
                 .product(
                     name: "Crypto",
@@ -125,7 +126,7 @@ let package = Package(
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisKnowledge",
+            path: "Packages/CouncisKnowledge",
             exclude: ["Tests"],
             sources: ["Sources"],
             resources: [
@@ -133,12 +134,12 @@ let package = Package(
             ]
         ),
         .target(
-            name: "IntatisSkills",
+            name: "CouncisSkills",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisTools",
-                "IntatisPermission",
+                "CouncisCore", "CouncisProtocol", "CouncisTools",
+                "CouncisPermission",
             ],
-            path: "Packages/IntatisSkills",
+            path: "Packages/CouncisSkills",
             exclude: ["Tests"],
             sources: ["Sources"],
             resources: [
@@ -146,17 +147,17 @@ let package = Package(
             ]
         ),
         .target(
-            name: "IntatisPermission",
+            name: "CouncisPermission",
             // Providers added in v0.3 for the model-backed reviewer (layer B).
-            dependencies: ["IntatisCore", "IntatisProtocol", "IntatisProviders"],
-            path: "Packages/IntatisPermission/Sources"
+            dependencies: ["CouncisCore", "CouncisProtocol", "CouncisProviders"],
+            path: "Packages/CouncisPermission/Sources"
         ),
         // Production remote MCP HTTP/OAuth requests use libcurl's
-        // CURLOPT_RESOLVE socket binding on macOS and Linux. The iOS product
-        // does not link IntatisMCP.
+        // CURLOPT_RESOLVE socket binding on macOS and Linux. Councis ships no
+        // iOS MCP product.
         .target(
-            name: "IntatisCurlTransport",
-            path: "Packages/IntatisCurlTransport",
+            name: "CouncisCurlTransport",
+            path: "Packages/CouncisCurlTransport",
             publicHeadersPath: "include",
             linkerSettings: [
                 .linkedLibrary("curl"),
@@ -169,11 +170,11 @@ let package = Package(
         // app target; those layers inject event/artifact/inference services
         // through narrow interfaces.
         .target(
-            name: "IntatisMCP",
+            name: "CouncisMCP",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisTools",
+                "CouncisCore", "CouncisProtocol", "CouncisTools",
                 .target(
-                    name: "IntatisCurlTransport",
+                    name: "CouncisCurlTransport",
                     condition: .when(platforms: [.macOS, .linux])
                 ),
                 .product(name: "MCP", package: "MCPClientSDK"),
@@ -183,23 +184,23 @@ let package = Package(
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisMCP/Sources"
+            path: "Packages/CouncisMCP/Sources"
         ),
         // Linux-only kernel execution guard support for local MCP stdio.
         // The C shim is inert on Apple platforms; keeping it separate avoids
         // placing fork/ptrace/seccomp code in the portable client core.
         .target(
-            name: "IntatisMCPStdioGuard",
-            path: "Packages/IntatisMCPStdio/ExecutionGuard",
+            name: "CouncisMCPStdioGuard",
+            path: "Packages/CouncisMCPStdio/ExecutionGuard",
             publicHeadersPath: "include"
         ),
-        // Local stdio process ownership is a separate linkage boundary so the
-        // App Store target can remain remote-HTTP-only.
+        // Local stdio process ownership is a separate linkage boundary from
+        // the portable MCP client core.
         .target(
-            name: "IntatisMCPStdio",
+            name: "CouncisMCPStdio",
             dependencies: [
-                "IntatisMCP", "IntatisMCPStdioGuard",
-                "IntatisCore", "IntatisProtocol", "IntatisTools",
+                "CouncisMCP", "CouncisMCPStdioGuard",
+                "CouncisCore", "CouncisProtocol", "CouncisTools",
                 .product(name: "MCP", package: "MCPClientSDK"),
                 .product(
                     name: "Crypto",
@@ -207,145 +208,144 @@ let package = Package(
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisMCPStdio/Sources"
+            path: "Packages/CouncisMCPStdio/Sources"
         ),
         .target(
-            name: "IntatisAgentKernel",
+            name: "CouncisAgentKernel",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisTools", "IntatisPermission", "IntatisConversation",
-                "IntatisArtifacts", "IntatisMCP", "IntatisSkills",
+                "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisTools", "CouncisPermission", "CouncisConversation",
+                "CouncisArtifacts", "CouncisMCP", "CouncisSkills",
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisAgentKernel/Sources"
+            path: "Packages/CouncisAgentKernel/Sources"
         ),
         // v0.3 — Cowork: multi-agent orchestration over a mediated message bus.
         .target(
-            name: "IntatisCowork",
+            name: "CouncisCowork",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisTools",
-                "IntatisPermission", "IntatisConversation", "IntatisAgentKernel",
-                "IntatisSkills",
+                "CouncisCore", "CouncisProtocol", "CouncisProviders", "CouncisTools",
+                "CouncisPermission", "CouncisConversation", "CouncisAgentKernel",
+                "CouncisSkills",
             ],
-            path: "Packages/IntatisCowork/Sources"
+            path: "Packages/CouncisCowork/Sources"
         ),
         // v0.4 — Multimodal: image/video generation + transcription → artifacts.
         .target(
-            name: "IntatisMultimodal",
+            name: "CouncisMultimodal",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisArtifacts", "IntatisConversation",
+                "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisArtifacts", "CouncisConversation",
             ],
-            path: "Packages/IntatisMultimodal/Sources"
+            path: "Packages/CouncisMultimodal/Sources"
         ),
         .target(
-            name: "IntatisSharedUI",
+            name: "CouncisSharedUI",
             // Providers is needed because ChatViewModel drives ProviderRegistry.
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisConversation", "IntatisArtifacts",
+                "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisConversation", "CouncisArtifacts",
                 .product(
                     name: "SwiftStreamingMarkdown",
                     package: "SwiftStreamingMarkdown",
                     condition: .when(platforms: [.macOS, .iOS])
                 ),
             ],
-            path: "Packages/IntatisSharedUI/Sources"
+            path: "Packages/CouncisSharedUI/Sources"
         ),
-        // v0.6 — CLI: Swift-native `intatis` command (chat + code agent), talks to
+        // v0.6 — CLI: Swift-native `councis` command (chat + code agent), talks to
         // any OpenAI-compatible endpoint via env vars.
         .executableTarget(
-            name: "IntatisCLI",
+            name: "CouncisCLI",
             dependencies: [
-                "IntatisCore", "IntatisProtocol", "IntatisProviders", "IntatisConversation",
-                "IntatisArtifacts", "IntatisTools", "IntatisPermission", "IntatisAgentKernel", "IntatisCowork",
-                "IntatisMCP", "IntatisMCPStdio", "IntatisSkills", "IntatisKnowledge",
+                "CouncisCore", "CouncisProtocol", "CouncisProviders", "CouncisConversation",
+                "CouncisArtifacts", "CouncisTools", "CouncisPermission", "CouncisAgentKernel", "CouncisCowork",
+                "CouncisMCP", "CouncisMCPStdio", "CouncisSkills", "CouncisKnowledge",
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Apps/intatis-cli/Sources"
+            path: "Apps/councis-cli/Sources"
         ),
         // Development-only executable exercised by the pinned official MCP
         // client conformance runner. It is not a shipped product and contains
         // no MCP server implementation or server-facing API.
         .executableTarget(
-            name: "IntatisMCPConformanceClient",
+            name: "CouncisMCPConformanceClient",
             dependencies: [
-                "IntatisMCP", "IntatisCore", "IntatisProtocol",
+                "CouncisMCP", "CouncisCore", "CouncisProtocol",
                 .product(name: "MCP", package: "MCPClientSDK"),
             ],
-            path: "Packages/IntatisMCPConformanceClient/Sources"
+            path: "Packages/CouncisMCPConformanceClient/Sources"
         ),
-        // GUI app targets (IntatisMac macOS app, IntatisiOS iOS app) are defined in
-        // the Xcode project generated from project.yml — they link these library
-        // products. The iOS app intentionally links only the subset.
+        // The CouncisMac app target is defined in the Xcode project generated
+        // from project.yml and links these library products.
 
         // MARK: Test targets (none depend on app targets; SharedUI tests run headlessly on macOS)
         .testTarget(
-            name: "IntatisCoreTests",
-            dependencies: ["IntatisCore"],
-            path: "Packages/IntatisCore/Tests"
+            name: "CouncisCoreTests",
+            dependencies: ["CouncisCore"],
+            path: "Packages/CouncisCore/Tests"
         ),
         .testTarget(
-            name: "IntatisProtocolTests",
-            dependencies: ["IntatisProtocol", "IntatisCore"],
-            path: "Packages/IntatisProtocol/Tests"
+            name: "CouncisProtocolTests",
+            dependencies: ["CouncisProtocol", "CouncisCore"],
+            path: "Packages/CouncisProtocol/Tests"
         ),
         .testTarget(
-            name: "IntatisProvidersTests",
-            dependencies: ["IntatisProviders", "IntatisCore", "IntatisProtocol"],
-            path: "Packages/IntatisProviders/Tests"
+            name: "CouncisProvidersTests",
+            dependencies: ["CouncisProviders", "CouncisCore", "CouncisProtocol"],
+            path: "Packages/CouncisProviders/Tests"
         ),
         .testTarget(
-            name: "IntatisArtifactsTests",
-            dependencies: ["IntatisArtifacts", "IntatisCore"],
-            path: "Packages/IntatisArtifacts/Tests"
+            name: "CouncisArtifactsTests",
+            dependencies: ["CouncisArtifacts", "CouncisCore"],
+            path: "Packages/CouncisArtifacts/Tests"
         ),
         .testTarget(
-            name: "IntatisConversationTests",
-            dependencies: ["IntatisConversation", "IntatisCore", "IntatisProtocol", "IntatisProviders"],
-            path: "Packages/IntatisConversation/Tests"
+            name: "CouncisConversationTests",
+            dependencies: ["CouncisConversation", "CouncisCore", "CouncisProtocol", "CouncisProviders"],
+            path: "Packages/CouncisConversation/Tests"
         ),
         .testTarget(
-            name: "IntatisToolsTests",
-            dependencies: ["IntatisTools", "IntatisCore"],
-            path: "Packages/IntatisTools/Tests"
+            name: "CouncisToolsTests",
+            dependencies: ["CouncisTools", "CouncisCore"],
+            path: "Packages/CouncisTools/Tests"
         ),
         .testTarget(
-            name: "IntatisKnowledgeTests",
+            name: "CouncisKnowledgeTests",
             dependencies: [
-                "IntatisKnowledge", "IntatisCore", "IntatisProtocol",
-                "IntatisTools",
+                "CouncisKnowledge", "CouncisCore", "CouncisProtocol",
+                "CouncisTools",
             ],
-            path: "Packages/IntatisKnowledge/Tests",
+            path: "Packages/CouncisKnowledge/Tests",
             resources: [
                 .copy("Fixtures"),
             ]
         ),
         .testTarget(
-            name: "IntatisSkillsTests",
+            name: "CouncisSkillsTests",
             dependencies: [
-                "IntatisSkills", "IntatisCore", "IntatisProtocol", "IntatisTools",
+                "CouncisSkills", "CouncisCore", "CouncisProtocol", "CouncisTools",
             ],
-            path: "Packages/IntatisSkills/Tests"
+            path: "Packages/CouncisSkills/Tests"
         ),
         .testTarget(
-            name: "IntatisPermissionTests",
-            dependencies: ["IntatisPermission", "IntatisCore", "IntatisProtocol", "IntatisProviders"],
-            path: "Packages/IntatisPermission/Tests"
+            name: "CouncisPermissionTests",
+            dependencies: ["CouncisPermission", "CouncisCore", "CouncisProtocol", "CouncisProviders"],
+            path: "Packages/CouncisPermission/Tests"
         ),
         .testTarget(
-            name: "IntatisMCPTests",
+            name: "CouncisMCPTests",
             dependencies: [
-                "IntatisMCP", "IntatisMCPStdio", "IntatisCore",
-                "IntatisProtocol", "IntatisTools",
+                "CouncisMCP", "CouncisMCPStdio", "CouncisCore",
+                "CouncisProtocol", "CouncisTools",
                 .product(name: "MCP", package: "MCPClientSDK"),
                 .product(
                     name: "Crypto",
@@ -353,55 +353,55 @@ let package = Package(
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisMCP/Tests"
+            path: "Packages/CouncisMCP/Tests"
         ),
         .testTarget(
-            name: "IntatisCLITests",
+            name: "CouncisCLITests",
             dependencies: [
-                "IntatisCLI", "IntatisAgentKernel",
-                "IntatisConversation", "IntatisCore",
-                "IntatisMCP", "IntatisProtocol",
+                "CouncisCLI", "CouncisAgentKernel",
+                "CouncisConversation", "CouncisCore",
+                "CouncisMCP", "CouncisProtocol",
             ],
-            path: "Apps/intatis-cli/Tests",
+            path: "Apps/councis-cli/Tests",
             resources: [
                 .copy("Fixtures"),
             ]
         ),
         .testTarget(
-            name: "IntatisAgentKernelTests",
+            name: "CouncisAgentKernelTests",
             dependencies: [
-                "IntatisAgentKernel", "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisTools", "IntatisPermission", "IntatisConversation",
-                "IntatisArtifacts", "IntatisMCP", "IntatisSkills", "IntatisKnowledge",
+                "CouncisAgentKernel", "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisTools", "CouncisPermission", "CouncisConversation",
+                "CouncisArtifacts", "CouncisMCP", "CouncisSkills", "CouncisKnowledge",
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
                     condition: .when(platforms: [.linux])
                 ),
             ],
-            path: "Packages/IntatisAgentKernel/Tests"
+            path: "Packages/CouncisAgentKernel/Tests"
         ),
         .testTarget(
-            name: "IntatisCoworkTests",
+            name: "CouncisCoworkTests",
             dependencies: [
-                "IntatisCowork", "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisTools", "IntatisPermission", "IntatisConversation", "IntatisAgentKernel",
-                "IntatisSkills",
+                "CouncisCowork", "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisTools", "CouncisPermission", "CouncisConversation", "CouncisAgentKernel",
+                "CouncisSkills",
             ],
-            path: "Packages/IntatisCowork/Tests"
+            path: "Packages/CouncisCowork/Tests"
         ),
         .testTarget(
-            name: "IntatisMultimodalTests",
+            name: "CouncisMultimodalTests",
             dependencies: [
-                "IntatisMultimodal", "IntatisCore", "IntatisProtocol", "IntatisProviders",
-                "IntatisArtifacts", "IntatisConversation",
+                "CouncisMultimodal", "CouncisCore", "CouncisProtocol", "CouncisProviders",
+                "CouncisArtifacts", "CouncisConversation",
             ],
-            path: "Packages/IntatisMultimodal/Tests"
+            path: "Packages/CouncisMultimodal/Tests"
         ),
         .testTarget(
-            name: "IntatisSharedUITests",
-            dependencies: ["IntatisSharedUI"],
-            path: "Packages/IntatisSharedUI/Tests",
+            name: "CouncisSharedUITests",
+            dependencies: ["CouncisSharedUI"],
+            path: "Packages/CouncisSharedUI/Tests",
             resources: [
                 .copy("Fixtures"),
             ]

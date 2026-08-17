@@ -181,7 +181,7 @@ Goal 生命周期必须由 host 串行化：start、ordinary turn、Goal mutatio
 
 ContinuationRun 还必须有模型可表达、宿主可强制执行的终止边界。只有 exact `@main` root 可见 `finish_run` / `stop_run`，且模型只能提供 completed/stopped 意图与有界 reason；所有 session/run/Goal/submission/root identity 和 source 必须从当前 invocation 注入。close installation 在 EventLog await 前先形成 actor-local admission/authorization tombstone；EventLog 再在完整已知历史与跨进程锁内对 exact RunID 安装 first-write durable close claim，且 claim 必须先于等待既有 admission、provider/tool cleanup 与 exact-run drain 落盘。Orchestrator 随后只 drain 同 run 的其余 task/message，恢复也不得复活。该 claim 不替代 run checkpoint/completed/cancelled 状态机，也不影响其他 run。普通 final 文本不能被 host 猜测成显式 claim；root failure/timeout 使用 runtime source，用户取消使用 user source，session lifecycle shutdown 使用 hostLifecycle source。
 
-模型可见的 agent/task/message/goal/run/session 操作与文件、网络、文档工具遵循同一个 ToolCall 协议。WorkTask CRUD、Goal create/update、run close 与 session rename 都必须先过 schema、lease（Cowork）与 PermissionEngine；`task_get/update` 使用当前 Session 的 durable WorkTask ID（正常为 `wt_…`）和最新 authoritative revision，不能把 AgentInvocation `task_…` ID 或聊天历史快照当成 WorkTask authority，也不能重复 settle 已 terminal 的 WorkTask。WorkTask permission preview 只提供 bounded、脱敏的语义字段，完整执行参数继续由 digest/count 和 immutable authorization 绑定。worker 默认只能读取和更新自己当前 AgentInvocation 绑定的 WorkTask，不能改 DAG/priority/retry/cancel、提交 Goal verdict、关闭 run 或改 session 名称。一个外部 ToolCall 只能有一个权限决定；`spawn_agent` 是独立显式动作，`delegate_task` 只选择已 attached worker。获准后的内部 message、lease、AgentInvocation、WorkTask linkage 与 scheduler admission 必须在一个 EventLog batch 中提交，commit 后才更新内存，不能再次递归进入 PermissionEngine。Code 与 Cowork agent 共用 headless `AgentRuntime`；首个 system message 必须稳定声明对应产品模式（Code 为 Intatis、Cowork 为 Councis）、API tools 权威性、严格 JSON Schema 与 ToolResult 完成语义，动态 workspace/task/lease/goal/run 数据仍放在 user-role untrusted context。
+模型可见的 agent/task/message/goal/run/session 操作与文件、网络、文档工具遵循同一个 ToolCall 协议。WorkTask CRUD、Goal create/update、run close 与 session rename 都必须先过 schema、lease（Cowork）与 PermissionEngine；`task_get/update` 使用当前 Session 的 durable WorkTask ID（正常为 `wt_…`）和最新 authoritative revision，不能把 AgentInvocation `task_…` ID 或聊天历史快照当成 WorkTask authority，也不能重复 settle 已 terminal 的 WorkTask。WorkTask permission preview 只提供 bounded、脱敏的语义字段，完整执行参数继续由 digest/count 和 immutable authorization 绑定。worker 默认只能读取和更新自己当前 AgentInvocation 绑定的 WorkTask，不能改 DAG/priority/retry/cancel、提交 Goal verdict、关闭 run 或改 session 名称。一个外部 ToolCall 只能有一个权限决定；`spawn_agent` 是独立显式动作，`delegate_task` 只选择已 attached worker。获准后的内部 message、lease、AgentInvocation、WorkTask linkage 与 scheduler admission 必须在一个 EventLog batch 中提交，commit 后才更新内存，不能再次递归进入 PermissionEngine。Code 与 Cowork agent 共用 headless `AgentRuntime`；首个 system message 必须稳定声明对应产品模式（Code 为 Councis、Cowork 为 Councis）、API tools 权威性、严格 JSON Schema 与 ToolResult 完成语义，动态 workspace/task/lease/goal/run 数据仍放在 user-role untrusted context。
 
 ### 2.3b Coordinator routing Skill
 
@@ -518,21 +518,20 @@ unknown future events do not cause EventLog sequence reuse
 
 ## 9. 平台边界
 
-macOS 是全量 Intatis 产品。iOS 是 macOS 的真子集：
-```text
-iOS supports Chat, multimodal, providers, artifacts, session history.
-iOS must not include local workspace Agent execution.
-iOS must not link shell/git/patch/local-agent workspace modules.
-```
-**不得**弱化此边界。
+Councis 当前唯一 Apple App 产品是 macOS Developer ID 直分发的
+`Councis.app`。仓库不提供 iOS App，也不提供 Mac App Store target。SwiftPM
+共享库可以保留必要的 Apple 条件编译和最小权限 portability profile，但它们不能
+被解释为另一个 shipping 产品。未知 host 必须使用 `.restricted`，不能因 iOS
+App 删除而默认获得 workspace、shell、Git、patch 或 agent orchestration 能力。
+**不得**弱化此边界或借共享源码重新引入已删除产品面。
 
 ## 10. 开源复用与产品身份规则
 
-Intatis 允许按 `docs/OPEN_SOURCE_REUSE.md` 选择性复制、翻译、修改或运行兼容许可证的公开 agent/runtime 实现，包括 OpenCode 等项目中经过文件级许可证和 provenance 核对的源码、公开 model-facing prompt 与测试。复用不能改变本原则定义的 TaskContract、Scoped Context、CapabilityLease、WorkspaceLease、TaskGraph/Scheduler、MessageBus 和无嵌套 `AgentLoop` 边界；上游实现若与这些原则冲突，必须适配后再进入 Intatis，不能因“来自成熟项目”而直接放行。
+Councis 允许按 `docs/OPEN_SOURCE_REUSE.md` 选择性复制、翻译、修改或运行兼容许可证的公开 agent/runtime 实现，包括 OpenCode 等项目中经过文件级许可证和 provenance 核对的源码、公开 model-facing prompt 与测试。复用不能改变本原则定义的 TaskContract、Scoped Context、CapabilityLease、WorkspaceLease、TaskGraph/Scheduler、MessageBus 和无嵌套 `AgentLoop` 边界；上游实现若与这些原则冲突，必须适配后再进入 Councis，不能因“来自成熟项目”而直接放行。
 
-永久禁止使用泄露/私有源码或 prompt，也不复制第三方产品名称、Logo、图标、截图、UI 资产、商标性外观或品牌文案作为 Intatis 产品身份。直接复制或逐行翻译必须记录上游 URL、固定 commit、许可证和本地修改，并更新 `NOTICE.md`。Apple 平台继续 Swift-native 优先；非 Swift runtime 只能作为受控、可审计的 macOS 隔离组件评估，不得进入 iOS workspace Agent target。
+永久禁止使用泄露/私有源码或 prompt，也不复制第三方产品名称、Logo、图标、截图、UI 资产、商标性外观或品牌文案作为 Councis 产品身份。直接复制或逐行翻译必须记录上游 URL、固定 commit、许可证和本地修改，并更新 `NOTICE.md`。Apple 平台继续 Swift-native 优先；非 Swift runtime 只能作为受控、可审计的 macOS 隔离组件评估。若未来重新评估其他 Apple App，必须另行获得产品授权并重新完成依赖、权限、签名与发行审查。
 
-产品与协议继续使用 Intatis 自己的通用术语：
+产品与协议继续使用 Councis 自己的通用术语：
 ```text
 local agent workspace
 native agent kernel

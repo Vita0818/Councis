@@ -4,13 +4,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 project_root="$(cd "$script_dir/.." && pwd -P)"
-output_dir="${INTATIS_OUTPUT_DIR:-$project_root/dist}"
-notary_profile="${INTATIS_NOTARY_PROFILE:-}"
-requested_identity="${INTATIS_DEVELOPER_IDENTITY:-}"
-pause_before_notarization="${INTATIS_PAUSE_BEFORE_NOTARIZATION:-0}"
-notary_timeout="${INTATIS_NOTARY_TIMEOUT:-30m}"
-resume_release_dir="${INTATIS_RESUME_RELEASE_DIR:-}"
-recovery_parent="$project_root/.intatis/release-recovery"
+output_dir="${COUNCIS_OUTPUT_DIR:-$project_root/dist}"
+notary_profile="${COUNCIS_NOTARY_PROFILE:-}"
+requested_identity="${COUNCIS_DEVELOPER_IDENTITY:-}"
+pause_before_notarization="${COUNCIS_PAUSE_BEFORE_NOTARIZATION:-0}"
+notary_timeout="${COUNCIS_NOTARY_TIMEOUT:-30m}"
+resume_release_dir="${COUNCIS_RESUME_RELEASE_DIR:-}"
+recovery_parent="$project_root/.councis/release-recovery"
 work_root=""
 recovery_dir=""
 state_file=""
@@ -31,7 +31,7 @@ print_resume_instructions() {
     fi
     print -u2 -- "Resume the same Apple submissions on an Apple-reachable network with:"
     print -u2 -- \
-        "  INTATIS_NOTARY_PROFILE=\"$notary_profile\" INTATIS_RESUME_RELEASE_DIR=\"$recovery_dir\" scripts/package-macos-release.sh"
+        "  COUNCIS_NOTARY_PROFILE=\"$notary_profile\" COUNCIS_RESUME_RELEASE_DIR=\"$recovery_dir\" scripts/package-macos-release.sh"
 }
 
 fail() {
@@ -110,15 +110,15 @@ initialize_state() {
 }
 
 prepare_recovery_parent() {
-    local metadata_root="$project_root/.intatis"
+    local metadata_root="$project_root/.councis"
     [[ ! -L "$metadata_root" ]] \
-        || fail "the Intatis metadata directory must not be a symlink"
+        || fail "the Councis metadata directory must not be a symlink"
     /bin/mkdir -p "$recovery_parent"
     [[ ! -L "$recovery_parent" ]] || fail "release recovery root must not be a symlink"
     local canonical_recovery_parent
     canonical_recovery_parent="$(cd "$recovery_parent" && pwd -P)"
-    [[ "$canonical_recovery_parent" == "$project_root/.intatis/release-recovery" ]] \
-        || fail "release recovery root must remain inside the canonical Intatis project root"
+    [[ "$canonical_recovery_parent" == "$project_root/.councis/release-recovery" ]] \
+        || fail "release recovery root must remain inside the canonical Councis project root"
     /bin/chmod 0700 "$canonical_recovery_parent"
     recovery_parent="$canonical_recovery_parent"
 }
@@ -126,7 +126,7 @@ prepare_recovery_parent() {
 load_recovery_directory() {
     prepare_recovery_parent
     [[ "$resume_release_dir" == /* ]] \
-        || fail "INTATIS_RESUME_RELEASE_DIR must be an absolute path"
+        || fail "COUNCIS_RESUME_RELEASE_DIR must be an absolute path"
     [[ -d "$resume_release_dir" && ! -L "$resume_release_dir" ]] \
         || fail "release recovery directory is missing or is a symlink"
 
@@ -136,7 +136,7 @@ load_recovery_directory() {
         "$recovery_parent"/*)
             ;;
         *)
-            fail "release recovery directory is outside the Intatis recovery root"
+            fail "release recovery directory is outside the Councis recovery root"
             ;;
     esac
 
@@ -149,12 +149,12 @@ load_recovery_directory() {
 
     recovery_dir="$canonical_resume"
     state_file="$recovery_dir/state.plist"
-    staged_app="$recovery_dir/Intatis.app"
+    staged_app="$recovery_dir/Councis.app"
     preserve_recovery=1
     [[ -f "$state_file" && ! -L "$state_file" ]] \
         || fail "release recovery state is missing or unsafe"
     [[ -d "$staged_app" && ! -L "$staged_app" ]] \
-        || fail "recovery directory does not contain a safe staged Intatis.app"
+        || fail "recovery directory does not contain a safe staged Councis.app"
     state_owner="$(/usr/bin/stat -f '%u' "$state_file")"
     state_mode="$(/usr/bin/stat -f '%Lp' "$state_file")"
     state_links="$(/usr/bin/stat -f '%l' "$state_file")"
@@ -163,7 +163,7 @@ load_recovery_directory() {
         && "$state_links" == "1" ]] \
         || fail "release recovery state must be owner-only, single-link, and mode 0600"
     [[ "$app_owner" == "$(/usr/bin/id -u)" ]] \
-        || fail "staged Intatis.app is not owned by the current user"
+        || fail "staged Councis.app is not owned by the current user"
     /usr/bin/plutil -lint "$state_file" >/dev/null
     [[ "$(state_get schemaVersion)" == "1" ]] \
         || fail "unsupported release recovery state schema"
@@ -173,10 +173,10 @@ create_recovery_directory() {
     local source_app="$1"
     prepare_recovery_parent
     recovery_dir="$(/usr/bin/mktemp -d \
-        "$recovery_parent/Intatis-${version}-${build_number}.XXXXXX")"
+        "$recovery_parent/Councis-${version}-${build_number}.XXXXXX")"
     /bin/chmod 0700 "$recovery_dir"
     state_file="$recovery_dir/state.plist"
-    staged_app="$recovery_dir/Intatis.app"
+    staged_app="$recovery_dir/Councis.app"
     /usr/bin/ditto "$source_app" "$staged_app"
     initialize_state
     preserve_recovery=1
@@ -187,8 +187,14 @@ create_recovery_directory() {
 inspect_release_app() {
     local app="$1"
     [[ -d "$app" ]] || fail "Release App is missing: $app"
-    local executable="$app/Contents/MacOS/IntatisMac"
+    local executable="$app/Contents/MacOS/Councis"
     [[ -f "$executable" ]] || fail "Release executable is missing"
+
+    local bundle_identifier
+    bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - \
+        "$app/Contents/Info.plist")"
+    [[ "$bundle_identifier" == "com.Vita0818.Councis" ]] \
+        || fail "Release bundle identifier is not com.Vita0818.Councis"
 
     local architectures
     architectures="$(/usr/bin/lipo -archs "$executable")"
@@ -412,25 +418,25 @@ create_app_zip_if_missing() {
 }
 
 [[ -n "$notary_profile" ]] || fail \
-    "INTATIS_NOTARY_PROFILE is required and must name a notarytool Keychain profile"
+    "COUNCIS_NOTARY_PROFILE is required and must name a notarytool Keychain profile"
 
 case "$pause_before_notarization" in
     0|1)
         ;;
     *)
-        fail "INTATIS_PAUSE_BEFORE_NOTARIZATION must be 0 or 1"
+        fail "COUNCIS_PAUSE_BEFORE_NOTARIZATION must be 0 or 1"
         ;;
 esac
 
 if ! print -r -- "$notary_timeout" | /usr/bin/grep -Eq '^[1-9][0-9]*(s|m|h)?$'; then
-    fail "INTATIS_NOTARY_TIMEOUT must be a positive duration such as 30m or 2h"
+    fail "COUNCIS_NOTARY_TIMEOUT must be a positive duration such as 30m or 2h"
 fi
 
 if [[ -z "$resume_release_dir" && "$pause_before_notarization" == "1" && ! -t 0 ]]; then
-    fail "INTATIS_PAUSE_BEFORE_NOTARIZATION=1 requires an interactive terminal"
+    fail "COUNCIS_PAUSE_BEFORE_NOTARIZATION=1 requires an interactive terminal"
 fi
 
-entitlements="$project_root/Apps/IntatisMac/IntatisMac.DeveloperID.entitlements"
+entitlements="$project_root/Apps/CouncisMac/CouncisMac.DeveloperID.entitlements"
 /usr/bin/plutil -lint "$entitlements" >/dev/null
 if /usr/bin/plutil -extract com.apple.security.app-sandbox raw -o - "$entitlements" \
     >/dev/null 2>&1; then
@@ -450,7 +456,7 @@ done <<< "$identity_lines"
 
 if [[ -n "$requested_identity" ]]; then
     if ! print -r -- "$identity_lines" | /usr/bin/grep -Fqx -- "$requested_identity"; then
-        fail "INTATIS_DEVELOPER_IDENTITY is not an available Developer ID Application identity"
+        fail "COUNCIS_DEVELOPER_IDENTITY is not an available Developer ID Application identity"
     fi
     signing_identity="$requested_identity"
 else
@@ -462,12 +468,12 @@ else
             signing_identity="${identities[1]}"
             ;;
         *)
-            fail "multiple Developer ID Application identities are available; set INTATIS_DEVELOPER_IDENTITY to one exact common name"
+            fail "multiple Developer ID Application identities are available; set COUNCIS_DEVELOPER_IDENTITY to one exact common name"
             ;;
     esac
 fi
 
-work_root="$(/usr/bin/mktemp -d /private/tmp/intatis-direct-release.XXXXXX)"
+work_root="$(/usr/bin/mktemp -d /private/tmp/councis-direct-release.XXXXXX)"
 
 if [[ -n "$resume_release_dir" ]]; then
     load_recovery_directory
@@ -477,6 +483,7 @@ if [[ -n "$resume_release_dir" ]]; then
         || fail "release recovery state has no version metadata"
 
     "$project_root/scripts/check-version-consistency.sh"
+    "$project_root/scripts/check-brand-boundary.sh"
     inspect_release_app "$staged_app"
     [[ "$version" == "$expected_version" ]] \
         || fail "recovery App version does not match its state"
@@ -484,27 +491,28 @@ if [[ -n "$resume_release_dir" ]]; then
         || fail "recovery App build number does not match its state"
     require_current_project_version
     verify_signed_release_app "$staged_app"
-    print -- "Resuming preserved Intatis $version (build $build_number) release state."
+    print -- "Resuming preserved Councis $version (build $build_number) release state."
 else
     xcodegen_path="$(command -v xcodegen || true)"
     [[ -n "$xcodegen_path" ]] || fail "xcodegen is required"
 
     derived_data="$work_root/DerivedData"
     build_staging_root="$work_root/build-staging"
-    build_staged_app="$build_staging_root/Intatis.app"
+    build_staged_app="$build_staging_root/Councis.app"
     /bin/mkdir -p "$build_staging_root"
 
-    print -- "Generating Intatis.xcodeproj..."
+    print -- "Generating Councis.xcodeproj..."
     (
         cd "$project_root"
         "$xcodegen_path" generate
     )
     "$project_root/scripts/check-version-consistency.sh"
+    "$project_root/scripts/check-brand-boundary.sh"
 
-    print -- "Building the IntatisMac universal Release target..."
+    print -- "Building the CouncisMac universal Release target..."
     /usr/bin/xcodebuild -quiet \
-        -project "$project_root/Intatis.xcodeproj" \
-        -scheme IntatisMac \
+        -project "$project_root/Councis.xcodeproj" \
+        -scheme CouncisMac \
         -configuration Release \
         -destination 'platform=macOS' \
         -derivedDataPath "$derived_data" \
@@ -514,13 +522,13 @@ else
         CODE_SIGNING_ALLOWED=NO \
         build
 
-    source_app="$derived_data/Build/Products/Release/IntatisMac.app"
-    [[ -d "$source_app" ]] || fail "Release build did not produce IntatisMac.app"
+    source_app="$derived_data/Build/Products/Release/Councis.app"
+    [[ -d "$source_app" ]] || fail "Release build did not produce Councis.app"
     /usr/bin/ditto "$source_app" "$build_staged_app"
     inspect_release_app "$build_staged_app"
     require_current_project_version
 
-    print -- "Signing Intatis.app with Developer ID and Hardened Runtime..."
+    print -- "Signing Councis.app with Developer ID and Hardened Runtime..."
     /usr/bin/codesign \
         --force \
         --sign "$signing_identity" \
@@ -537,14 +545,14 @@ else
     pause_for_notarization_network_if_requested
 fi
 
-zip_name="Intatis-${version}-${build_number}-macOS-universal.zip"
-dmg_name="Intatis-${version}-${build_number}-macOS-universal.dmg"
-manifest_name="Intatis-${version}-${build_number}-SHA256SUMS.txt"
+zip_name="Councis-${version}-${build_number}-macOS-universal.zip"
+dmg_name="Councis-${version}-${build_number}-macOS-universal.dmg"
+manifest_name="Councis-${version}-${build_number}-SHA256SUMS.txt"
 zip_path="$recovery_dir/$zip_name"
 dmg_path="$recovery_dir/$dmg_name"
 manifest_path="$recovery_dir/$manifest_name"
 
-pre_notary_zip="$recovery_dir/Intatis-notary-upload.zip"
+pre_notary_zip="$recovery_dir/Councis-notary-upload.zip"
 create_app_zip_if_missing "$staged_app" "$pre_notary_zip" "pre-notarization ZIP"
 
 submit_artifact_if_needed \
@@ -569,7 +577,7 @@ if [[ -e "$dmg_path" || -L "$dmg_path" ]]; then
 else
     dmg_staging_root="$work_root/dmg-staging"
     /bin/mkdir -p "$dmg_staging_root"
-    /usr/bin/ditto "$staged_app" "$dmg_staging_root/Intatis.app"
+    /usr/bin/ditto "$staged_app" "$dmg_staging_root/Councis.app"
     /bin/ln -s /Applications "$dmg_staging_root/Applications"
 
     dmg_recovery_staging="$(/usr/bin/mktemp -d "$recovery_dir/.dmg.XXXXXX")"
@@ -577,7 +585,7 @@ else
     staged_dmg="$dmg_recovery_staging/$dmg_name"
     /usr/sbin/diskutil image create from \
         --format UDZO \
-        --volumeName "Intatis $version" \
+        --volumeName "Councis $version" \
         "$dmg_staging_root" \
         "$staged_dmg" >/dev/null
 

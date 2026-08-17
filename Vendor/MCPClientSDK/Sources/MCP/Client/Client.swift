@@ -1,4 +1,4 @@
-// Intatis modification: adds bounded per-server version negotiation, a
+// Councis modification: adds bounded per-server version negotiation, a
 // pre-initialized validation hook, and removes dependence on the upstream MCP
 // Server actor namespace. See PATCHES.md.
 
@@ -704,7 +704,7 @@ public actor Client {
 
         let result = try await sendAndAwait(request)
 
-        // Give the Intatis host the first opportunity to classify an invalid
+        // Give the Councis host the first opportunity to classify an invalid
         // selected version and all other initialize-response policy failures
         // with its stable typed error vocabulary. The SDK allow-set check
         // remains immediately afterward as an independent defensive fence.
@@ -722,7 +722,7 @@ public actor Client {
 
         // Give every host-supplied version-aware client transport the
         // negotiated lifecycle version before notifications/initialized.
-        // Intatis uses its own hardened Streamable HTTP transport rather than
+        // Councis uses its own hardened Streamable HTTP transport rather than
         // the SDK concrete type.
         if let versionedTransport =
             connection as? any NegotiatedProtocolVersionTransport

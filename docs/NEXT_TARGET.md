@@ -1,41 +1,61 @@
 # NEXT_TARGET
 
-文档状态：上一项用户确认目标已完成；等待用户指定下一目标
+文档状态：当前目标完成；等待用户指定下一目标
 
-最近核对：2026-08-15
+最近核对：2026-08-17
 
 产品基线：v0.48（build 48）；来源提交标题：v0.54
 
-## 已完成目标：Councis 最小产品差异
+## 当前目标：Councis 底层产品身份脱钩
 
-在固定 Intatis source tree
-`120eda64fcb098f1bdc4852fee886450e80b3722` 上，已经按用户确认的精确范围完成：
+用户已确认：
 
-- 保留并重新验证 Councis 品牌覆盖；
-- macOS 初始产品面固定为 Cowork，Chat/Code/模式切换仅隐藏，源码、runtime 与历史数据未删除；
-- fresh Cowork 以同一 settings-first 十事件 batch 原子登记 `@main`、固定 ordinary read-only
-  `@judge` 与 `@permission-reviewer` 的独立 identity/workspace/capability lease；
-- macOS 与 modern CLI 支持 canonical 顶层 `judge_model`，字段缺失只继承同一 JSON 文档的顶层
-  `model`，显式非法或不可证明配置 fail closed；未新增 Judge UI 或 session setting；
-- `@judge` 不可 spawn/remove/rebind，不进入省略目标/auto delegation，不获得 coordinator、
-  run-control、权限审查或 Goal verification authority；Main 只能通过既有显式 data-plane 路径使用它；
-- Main/Judge system prompt 与 bundled `cowork-agent-orchestration` Skill 已加入可选的多候选 + Judge
-  比较建议；这只是调度建议，不是强制运行时仪式；
-- 已补充配置继承/非法值、三身份原子 bootstrap、独立 exact binding、Judge 固定边界、显式路由与
-  prompt 的直接回归。
+- 唯一 Apple App 为 macOS `Councis`；target/scheme 为 `CouncisMac`；Bundle ID 为
+  `com.Vita0818.Councis`；
+- 不再提供 iOS App；
+- 新建或继续写出的活跃身份不得采用 Intatis；旧名只可用于固定来源、只读 legacy
+  bridge/decode、安全保护和回归 fixture；
+- 删除遗留 Mac App Store target，而不是继续保留或验证它；
+- 旧安装数据不是 release blocker，允许尽力而为且不删除旧数据的桥接。
 
-对应当前事实见 `docs/COUNcis_IDENTITY.md`、`docs/CURRENT_STATE.md`、`docs/ARCHITECTURE.md`、
-`docs/DO_NOT_BREAK.md` 与 `docs/COWORK_PRINCIPLES.md`。
+完整实施与验收清单见 `docs/COUNcis_DECOUPLING_CHECKLIST.md`。
 
-## 当前边界
+## 已完成到当前工作树的内容
 
-- 不回到 `/Users/vita/Vitemis/Intatis` 修改源码，也不恢复 `Upstream/Intatis` 双树结构。
-- 不更名 Swift target/module/type、bundle ID、可执行文件、CLI、配置或持久化命名空间。
-- 不删除被隐藏的 Chat/Code 实现，不改变 iOS Chat-only 产品边界。
-- 不给 Judge 新增 UI、设置页、权限审查、Goal verdict、run control、自动 delegation 或递归协调能力。
-- 不自动继承 Intatis 的 Developer ID 公证/发行任务，也不默认构建 legacy Mac App Store target。
+- SwiftPM package、15 个 public library products、3 个内部 C/guard targets、CLI、开发期
+  conformance executable 与 15 个 test targets 已改为 Councis；
+- `Apps/CouncisMac`、`Apps/councis-cli`、`Packages/Councis*`、`Councis.icon` 与
+  `.agents/skills/councis-skill-creator` 已成为 canonical source paths；
+- iOS App source/target/scheme 与 Mac App Store target/entitlements/条件 composition 已删除；
+- XcodeGen 只生成 `Councis.xcodeproj` / `CouncisMac` / `Councis.app`；最终 Debug 与 universal
+  Release unsigned bundles 已读回 `CFBundleIdentifier=com.Vita0818.Councis`、executable/icon
+  `Councis`、版本 `0.48 (48)`，Release executable 含 `x86_64 arm64`；
+- CLI product/help 使用 `councis`，不新增 `intatis` alias；
+- Application Support、配置、auth、UserDefaults、workspace metadata、Knowledge、diagnostic、
+  registry/policy/sidecar/MCP 等 canonical writer identity 已切到 Councis；
+- 旧 config/auth/UserDefaults/bundle domain、CLI config root/AAD、MCP Keychain service、provider
+  adapter/source kind 与 sidecar 只以受控 legacy bridge/decode 方式保留；新写入仍只使用 Councis；
+- 新旧敏感 config/Knowledge 路径同时保留在 PathConfinement、SecretScanner 和 terminal deny floor；
+- `scripts/check-brand-boundary.sh` 已建立活跃 identity 与 legacy 白名单门。
+- 当前权威文档、NOTICE、ThirdPartyNotices 与 vendored local-adoption/patch ledger 已收口为 Councis；
+  固定来源 commit/tree/license/copyright 没有伪造或删除。
+- SwiftPM build、15-bundle full test（2,116 tests executed、41 opt-in skipped、0 failures）、CLI
+  product/help/selftest、vendored renderer package 90 tests、Skill validator、品牌/版本/脚本/plist/
+  JSON/diff 静态门均通过。
 
-## 等待下一指令
+## 本目标不包含、仍需独立授权/环境的发行验证
 
-当前没有自动延伸的业务源码目标。下一步只能由用户明确指定；在此之前不要继续增加 Judge 功能、
-恢复 Chat/Code 可见入口、改内部 Intatis 命名，或启动发行/提交工作。
+- Linux CLI 双架构 gate；
+- Developer ID 正式签名、公证、staple、Gatekeeper、ZIP/DMG/manifest；
+- 真实 provider/credential/network、真实旧 Keychain/session bridge、GUI/VoiceOver/长时性能 smoke。
+
+这些未执行项不改变本轮“底层身份脱钩代码与本地 unsigned 验证完成”的结论，但在实际
+发布前仍须按 `docs/TESTING.md` 和 `docs/MACOS_DISTRIBUTION.md` 独立完成。
+
+## 当前不自动延伸的事项
+
+- 不重新引入 iOS 或 Mac App Store 产品面；
+- 不改变 Chat/Code 隐藏但保留的 runtime/history compatibility；
+- 不扩大 Judge、Permission Reviewer、GoalVerifier 或普通 worker authority；
+- 不自动安装、签名、公证、提交或发布 App；
+- 不删除用户旧 Application Support、配置、Keychain、CLI store、browser 或 Knowledge 数据。

@@ -83,17 +83,27 @@ source tree 的 26 个 `OpenSource/*` 条目是 `160000` gitlink，但仓库没�
 - fresh Cowork 固定 `@judge`、macOS/modern CLI 顶层 `judge_model` exact binding、独立 read-only
   lease/identity、Main/Judge system prompt、Cowork orchestration Skill 与直接回归测试。
 
+2026-08-17 用户进一步明确授权 Councis 底层产品身份脱钩：
+
+- SwiftPM package、public/internal targets、test targets、Apps/Packages/source symbol、Xcode project、
+  App、CLI、配置/存储/日志/协议 canonical namespace 改为 Councis；
+- 唯一 App 为 macOS Developer ID `Councis.app`，target `CouncisMac`，Bundle ID
+  `com.Vita0818.Councis`；
+- iOS App 与遗留 Mac App Store target/source/entitlements 删除；
+- 旧 Intatis 名称只保留在本文等来源证明、只读 legacy bridge/decode、安全保护和对应 fixture；
+  新 writer 不再产生旧 identity。精确清单见 `docs/COUNcis_DECOUPLING_CHECKLIST.md`。
+
 因此当前边界是：
 
-- 未受上述有限差异影响的产品行为与运行时仍是 Intatis `v0.54` source tree；用户可见 UI 品牌是
-  Councis；
-- Swift target/module/type、bundle ID、可执行文件、App 图标资源名、CLI、配置、存储、日志和
-  协议命名空间继续保持 Intatis 基线；
+- 业务能力继续源自上述固定 Intatis `v0.54` source tree，但当前活跃产品/工程/runtime identity 已是
+  Councis；这项派生关系必须由本文与 NOTICE 保留，不得改写成无来源原创；
+- Swift target/module/type、Bundle ID、可执行文件、App 图标资源名、CLI、配置、存储、日志和
+  协议 canonical namespace 均使用 Councis；
 - fresh Cowork 现在用既有 EventLog event types 以十事件 batch 原子登记 `@main`、`@judge` 和
   `@permission-reviewer`；没有新增 Envelope、EventLog event type 或 session schema；
 - Judge 是固定 ordinary read-only data-plane identity，不是权限审查者、Goal Verifier、run authority
   或自动 worker；既有非空历史 session 不会自动补写 Judge；
-- Chat/Code 源码、session 数据和 runtime 仍保留，iOS 仍是 Chat 子集；
+- Chat/Code 源码、session 历史兼容和 runtime 仍保留；项目不再提供 iOS App；
 - 后续实现只能直接修改本根工作树，并针对 `v0.54` 当前架构逐项审查和验证；不得机械恢复旧
   blob、旧补丁或旧测试数量，也不得修改来源仓库。
 
@@ -104,12 +114,14 @@ source tree 的 26 个 `OpenSource/*` 条目是 `160000` gitlink，但仓库没�
 `docs/NEXT_TARGET.md`）；其余 873 个 blob 必须与来源工作树逐文件字节和实际权限一致。另有
 2 份只存在于 Councis 的控制文档。旧基线的 3 个 source-deleted 文件必须不存在。文档修改后
 还必须运行 `git diff --check` 与 `git status --short`。2026-08-15 之后，当前工作树与固定 source
-tree 的额外差异仅允许来自本文记录的 Councis UI 品牌覆盖及后续用户明确授权的实现。
+tree 的额外差异仅允许来自本文记录的 Councis UI/Judge 差异和 2026-08-17 用户明确授权的底层
+identity 脱钩及后续明确实现。
 
 本次没有复制或信任旧构建缓存，也没有把 Intatis 源仓已有的历史测试/发行证据解释为 Councis
 新根工作树的验证。2026-08-15 已从 `project.yml` 重新生成 Xcode 工程，并在 Councis 根工作树
-重新运行 SwiftPM build、Judge/配置/prompt 定向测试与 `IntatisMac` unsigned Debug build；精确
-命令、通过数量和未运行项以 `docs/CURRENT_STATE.md` 与 `docs/TESTING.md` 为准。
+重新运行 SwiftPM build、Judge/配置/prompt 定向测试与当时的 `IntatisMac` unsigned Debug build；
+该结果只是脱钩前历史。2026-08-17 起必须以当前 `CouncisMac` / `Councis.app` 构建和新命名测试结果
+为准；精确命令、通过数量和未运行项见 `docs/CURRENT_STATE.md` 与 `docs/TESTING.md`。
 
 未来若再次刷新来源，必须作为新的显式整体基线替换：先核对两边 Git 状态，固定 source
 HEAD/tree/archive digest，重新记录 tracked 条目、gitlink、排除项和 Councis 保留层，并同步更新

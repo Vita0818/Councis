@@ -2,20 +2,20 @@
 
 ## Project origin and source-reuse policy
 
-Intatis is an Apple-first, Swift-native-first local AI workbench. Project-owned
+Councis is an Apple-first, Swift-native-first local AI workbench. Project-owned
 code and assets are original unless an upstream source is identified here.
 Compatible open-source work may be linked, vendored, or modified only after
 its provenance and licenses have been reviewed under
 `docs/OPEN_SOURCE_REUSE.md`.
 
-Intatis does not use leaked or private source code or prompts, and does not use
+Councis does not use leaked or private source code or prompts, and does not use
 third-party names, logos, icons, screenshots, UI assets, trademarks, or brand
-copy as its product identity. Open-source reuse does not bypass Intatis'
+copy as its product identity. Open-source reuse does not bypass Councis'
 permission, workspace, event-log, secret, or Apple-platform boundaries.
 
 ## Open Knowledge Format v0.2 standard
 
-Intatis pins the unmodified, self-contained Open Knowledge Format v0.2
+Councis pins the unmodified, self-contained Open Knowledge Format v0.2
 specification from `GoogleCloudPlatform/knowledge-catalog` at commit
 `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96`. The adopted documentation is
 Apache License 2.0. The exact specification, license, upstream identities, and
@@ -27,7 +27,7 @@ not copied, linked, or executed.
 
 ## Knowledge retrieval parser dependency
 
-The non-iOS `IntatisKnowledge` target uses **Yams 6.2.2**
+The `CouncisKnowledge` target uses **Yams 6.2.2**
 (`jpsim/Yams`, commit `a27b21e0c81c5bf42049b897a62aaf387e80f279`),
 including its in-package CYaml/libYAML sources, under the MIT License. It is an
 exact SwiftPM dependency with no external package dependencies. Provenance,
@@ -38,12 +38,12 @@ runtime scope, parser-hardening boundaries, and the complete license are in
 ## EPUB document helper dependency
 
 The macOS/Linux document-tool source tree contains a separately built,
-fixed-protocol Rust helper at `Packages/IntatisTools/Runtime/rbook-helper`.
+fixed-protocol Rust helper at `Packages/CouncisTools/Runtime/rbook-helper`.
 It uses **rbook 0.7.10** (`DevinSterling/rbook`) under the Apache License 2.0
 to implement the declared EPUB metadata/resource/spine/ToC write subset.
-The helper is an `external-runtime` component: it remains behind Intatis'
+The helper is an `external-runtime` component: it remains behind Councis'
 typed invocation, workspace lease, sandbox, staging, validation, and atomic
-commit boundaries, and is not linked into iOS.
+commit boundaries. Councis currently ships no iOS App product.
 
 The exact Cargo manifest, lockfile SHA-256 values, crates.io checksums,
 complete resolved dependency/license inventory, audit checkout identity,
@@ -54,15 +54,15 @@ helper binary or its release license bundle is already shipped in the App.
 
 ## OpenAI Codex Skill Creator derivative
 
-The project-local `.agents/skills/intatis-skill-creator/` Skill is a modified
+The project-local `.agents/skills/councis-skill-creator/` Skill is a modified
 derivative of the public `skill-creator` sample in OpenAI Codex release
 `rust-v0.145.0`, fixed at commit
 `25af12f7e61572b0bc18ddb1008be543b91519b0`.
 
 - **OpenAI Codex `skill-creator` sample** (`openai/codex`): Apache License
   2.0, Copyright 2025 OpenAI. Reuse type: `vendored` + `derived`.
-- Intatis renamed and adapted the instructions, references, initializer,
-  validator, and metadata generator for project-local roots, Intatis
+- Councis renamed and adapted the instructions, references, initializer,
+  validator, and metadata generator for project-local roots, Councis
   invocation and permission semantics, secret scanning, resource bounds, and
   a Python-standard-library-only runtime.
 - The upstream `agents/openai.yaml`, icons, images, branded assets, other
@@ -80,14 +80,14 @@ preserved at
 The current working tree replaces the former MarkdownUI/highlight.js renderer
 stack with an in-tree, thin derivative of Microsoft's
 SwiftStreamingMarkdown. The complete buildable derivative is vendored at
-`Vendor/SwiftStreamingMarkdown`; the containing Intatis Git revision versions
+`Vendor/SwiftStreamingMarkdown`; the containing Councis Git revision versions
 the source, tests, Microsoft MIT license, and adjacent patch/provenance ledger
-together. No separately published Intatis fork is required for reproducible
+together. No separately published Councis fork is required for reproducible
 resolution of this package.
 
 - **SwiftStreamingMarkdown 0.6.0**
   (`microsoft/SwiftStreamingMarkdown`), upstream tag `v0.6.0`, commit
-  `c7b12f7b3d77caa188fd1fc056d0f7ce305ef5cd`: MIT. The Intatis candidate is a
+  `c7b12f7b3d77caa188fd1fc056d0f7ce305ef5cd`: MIT. The Councis candidate is a
   modified derivative whose initial cutover removed optional runtimes and
   branded assets, then selectively restored only exact iosMath 2.5.0 for the
   code-aware LaTeX path. It hardens the ownership/concurrency boundary
@@ -96,7 +96,7 @@ resolution of this package.
   measurement. It retains the upstream Markdown parser and
   SwiftUI/AppKit/UIKit rendering structure; the removed highlighting,
   animation, image, citation, and legacy regex-math runtimes remain absent.
-  **Derivative location: `Vendor/SwiftStreamingMarkdown` in the Intatis root
+  **Derivative location: `Vendor/SwiftStreamingMarkdown` in the Councis root
   revision being built or distributed.**
 - **swift-markdown 0.8.0** (`swiftlang/swift-markdown`), revision
   `3c6f9523da3a1ec2fd829673e472d95b8097a3b8`: Apache License 2.0 with the
@@ -119,7 +119,7 @@ Copyright, license, exact upstream/parser versions, distribution requirements,
 and the current high-level modification summary are in
 `ThirdPartyNotices/MarkdownRendering.md`. The persistent modified-file and
 patch ledger is stored beside the vendored source at
-`Vendor/SwiftStreamingMarkdown/INTATIS_PATCH_LEDGER.md`. The iosMath engine,
+`Vendor/SwiftStreamingMarkdown/COUNCIS_PATCH_LEDGER.md`. The iosMath engine,
 font inventory, attributions, shipped GUST notice, and OFL terms are in
 `ThirdPartyNotices/MathRendering.md`.
 
@@ -127,7 +127,7 @@ font inventory, attributions, shipped GUST notice, and OFL terms are in
 
 The external MCP client uses an in-tree, client-only derivative of the
 official Model Context Protocol Swift SDK. The derivative is vendored at
-`Vendor/MCPClientSDK`; the containing Intatis revision fixes the exact source,
+`Vendor/MCPClientSDK`; the containing Councis revision fixes the exact source,
 combined upstream license, exclusions, and patch ledger.
 
 - **MCP Swift SDK 0.12.1**
@@ -153,7 +153,7 @@ combined upstream license, exclusions, and patch ledger.
 - **Swift ASN.1 1.7.1**, commit
   `a9a5efd40eaf558a2bcd48d64b1d1646be686008`: Apache-2.0; transitive
   Linux-only dependency of Swift Crypto.
-- **Native MCP HTTP transport.** `IntatisCurlTransport` links the libcurl
+- **Native MCP HTTP transport.** `CouncisCurlTransport` links the libcurl
   supplied by the Apple SDK/operating system in macOS products; no Darwin
   libcurl archive is vendored or copied into the App bundle. The Linux CLI is
   fully static and therefore incorporates the corresponding object code from
@@ -171,7 +171,7 @@ combined upstream license, exclusions, and patch ledger.
   full distribution obligations are in
   `ThirdPartyNotices/MCPHTTPTransport.md`.
 
-Intatis keeps only the client protocol/runtime closure. It does not ship the
+Councis keeps only the client protocol/runtime closure. It does not ship the
 upstream Server actor, HTTP Server transports, paired in-memory/custom network
 transports, conformance server/client executables, server-side OAuth
 publishing/validation API, SwiftNIO, or the documentation plugin. Protocol
@@ -209,7 +209,8 @@ as provenance for the other.
   `ThirdPartyNotices/SyntaxHighlighting.md`.
 - The Microsoft renderer supports code-aware TeX delimited by `$...$` or
   `\(...\)` for inline math and `$$...$$` or `\[...\]` for display math
-  through iosMath on macOS and iOS. The derivative adds no formula-count,
+  through iosMath in the macOS product; the package keeps conditional iOS
+  source portability but Councis ships no iOS App. The derivative adds no formula-count,
   per-formula UTF-8, or fixed attachment-size cap. Fenced and inline code
   remain byte-exact literal text; currency, escaped delimiters, and malformed
   formulas remain literal. The permanent `.plainSafe` mode bypasses Markdown
@@ -222,7 +223,7 @@ as provenance for the other.
 
 ## Integration and distribution boundary
 
-- Markdown rendering is linked only through `IntatisSharedUI` on Apple
+- Markdown rendering is linked only through `CouncisSharedUI` on Apple
   platforms. It does not add shell, Git, workspace-agent, or Cowork execution
   capabilities to iOS or to the CLI/headless graph.
 - Rendering operates on projected message text and does not own or mutate
@@ -234,15 +235,15 @@ as provenance for the other.
 - iosMath uses AppKit/UIKit/Core Text and its bundled OpenType math data. It
   does not add a WebView, JavaScript runtime, network request, shell, Git,
   workspace-agent, or Cowork capability. The bundled math fonts are
-  typesetting resources and do not change Intatis' separately selected
-  product-interface font. Intatis hosts formulas as live TextKit 2 attachment
+  typesetting resources and do not change Councis' separately selected
+  product-interface font. Councis hosts formulas as live TextKit 2 attachment
   views using iosMath intrinsic layout, semantic appearance, and Dynamic Type,
   without a derivative formula-count, source-size, or fixed attachment-size
   cap; it does not retain a formula raster cache.
 - Distributed macOS and iOS artifacts must make this file and the referenced
   detailed notices readable in the application. Merely keeping them in the
   source tree is not sufficient.
-- A distributed source or binary must be traceable to an Intatis root revision
+- A distributed source or binary must be traceable to an Councis root revision
   containing the vendored package, its Microsoft `LICENSE`, and the adjacent
   patch ledger. Uncommitted local edits are not a release identity.
 
@@ -262,14 +263,14 @@ as provenance for the other.
   transitive-license audit command are in
   `Experiments/WebRendererParity/THIRD_PARTY_NOTICES.md`.
 - The experiment is not referenced by SwiftPM, XcodeGen, App/CLI targets,
-  release resources, or the Intatis runtime. Its npm packages, generated
+  release resources, or the Councis runtime. Its npm packages, generated
   JavaScript, CSS, language chunks, and fonts are not included in current
-  macOS/iOS/CLI distributions. It does not copy or redistribute ChatGPT
+  macOS/CLI distributions. It does not copy or redistribute ChatGPT
   production bundles, private source, prompts, brand assets, screenshots, or
   user conversations.
 - OpenCode (`anomalyco/opencode`, MIT) remains research-only. No OpenCode
   source, public prompt, UI asset, or runtime is currently linked, vendored, or
-  copied into Intatis.
+  copied into Councis.
 - `CodeEditor` (`mchakravarty/CodeEditor`) was evaluated but is not adopted,
   linked, vendored, or copied.
 - libgit2 / SwiftGit2 remain planned candidates only and require a separate

@@ -8,10 +8,10 @@
 - Local product: `MCP` from package `MCPClientSDK`
 
 This directory is an auditable, client-only source derivative. The copied
-source bytes originated at the commit above. Intatis excludes every upstream
+source bytes originated at the commit above. Councis excludes every upstream
 server runtime, server transport, server executable, conformance executable,
 test target, and documentation plugin so that no MCP hosting surface or NIO
-server dependency enters an Intatis product.
+server dependency enters an Councis product.
 
 Included upstream source groups:
 
@@ -22,7 +22,7 @@ Included upstream source groups:
 - Protocol-domain message types from `Sources/MCP/Server/Completion.swift`,
   `Logging.swift`, `Prompts.swift`, `Resources.swift`, and `Tools.swift`, moved
   locally to `Sources/MCP/ProtocolDomain`
-- Intatis-authored `Sources/MCP/ProtocolDomain/Tasks.swift`, supplying the
+- Councis-authored `Sources/MCP/ProtocolDomain/Tasks.swift`, supplying the
   experimental 2025-11-25 client wire gap documented in `PATCHES.md`
 - Local Tasks result-union patches in `ProtocolDomain/Tools.swift`,
   `Client/Sampling.swift`, and `Client/Elicitation.swift`, which preserve

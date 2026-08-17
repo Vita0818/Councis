@@ -2,7 +2,7 @@
 set -eu
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-project_dir="$repo_root/Intatis.xcodeproj"
+project_dir="$repo_root/Councis.xcodeproj"
 user_name="${USER:-$(id -un)}"
 scheme_dir="$project_dir/xcuserdata/$user_name.xcuserdatad/xcschemes"
 plist="$scheme_dir/xcschememanagement.plist"
@@ -16,48 +16,41 @@ cat > "$plist" <<'PLIST_HEADER'
 <dict>
 	<key>SchemeUserState</key>
 	<dict>
-		<key>IntatisMac.xcscheme_^#shared#^_</key>
+		<key>CouncisMac.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>isShown</key>
 			<true/>
 			<key>orderHint</key>
 			<integer>0</integer>
 		</dict>
-		<key>IntatisiOS.xcscheme_^#shared#^_</key>
+		<key>councis.xcscheme</key>
 		<dict>
 			<key>isShown</key>
 			<true/>
 			<key>orderHint</key>
 			<integer>1</integer>
 		</dict>
-		<key>intatis.xcscheme</key>
+		<key>councis.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>isShown</key>
 			<true/>
 			<key>orderHint</key>
-			<integer>2</integer>
-		</dict>
-		<key>intatis.xcscheme_^#shared#^_</key>
-		<dict>
-			<key>isShown</key>
-			<true/>
-			<key>orderHint</key>
-			<integer>2</integer>
+			<integer>1</integer>
 		</dict>
 PLIST_HEADER
 
 for scheme in \
-	IntatisCore \
-	IntatisProtocol \
-	IntatisProviders \
-	IntatisConversation \
-	IntatisArtifacts \
-	IntatisMultimodal \
-	IntatisSharedUI \
-	IntatisTools \
-	IntatisPermission \
-	IntatisAgentKernel \
-	IntatisCowork
+	CouncisCore \
+	CouncisProtocol \
+	CouncisProviders \
+	CouncisConversation \
+	CouncisArtifacts \
+	CouncisMultimodal \
+	CouncisSharedUI \
+	CouncisTools \
+	CouncisPermission \
+	CouncisAgentKernel \
+	CouncisCowork
 do
 	cat >> "$plist" <<PLIST_SCHEME
 		<key>$scheme.xcscheme</key>

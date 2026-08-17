@@ -1,15 +1,15 @@
 # Markdown rendering third-party notices
 
 This notice covers the renderer derivative and the exact parser dependency
-versions currently resolved by the Intatis working tree. The renderer itself is
-a modified upstream work, not an independently authored Intatis renderer.
+versions currently resolved by the Councis working tree. The renderer itself is
+a modified upstream work, not an independently authored Councis renderer.
 
 ## Vendored source identity
 
 The root manifest resolves SwiftStreamingMarkdown from the relative in-tree
-path `Vendor/SwiftStreamingMarkdown`. The containing Intatis Git revision is
+path `Vendor/SwiftStreamingMarkdown`. The containing Councis Git revision is
 the immutable identity for the derivative source, tests, Microsoft MIT license,
-and patch ledger; no separate Intatis fork URL or commit is required. The exact
+and patch ledger; no separate Councis fork URL or commit is required. The exact
 Microsoft upstream basis and parser revisions below remain fixed and verified.
 
 The package is not fully offline: it still resolves the exact-pinned
@@ -32,9 +32,9 @@ the local SwiftPM cache.
 The inspected upstream-derived candidate contains the MIT `LICENSE` above and
 does not contain a separate upstream `NOTICE` file.
 
-The Intatis-maintained vendored derivative is based on the commit above. Its
+The Councis-maintained vendored derivative is based on the commit above. Its
 permanent adjacent ledger at
-`Vendor/SwiftStreamingMarkdown/INTATIS_PATCH_LEDGER.md` records
+`Vendor/SwiftStreamingMarkdown/COUNCIS_PATCH_LEDGER.md` records
 dependency/resource thinning, ownership-transfer and Swift 6 concurrency
 hardening, disabled optional features, a native code-copy control, zero native
 paragraph-view retention, the later audited code-aware LaTeX patch,
@@ -44,7 +44,7 @@ regex-based math path, syntax-highlighting implementations, and obsolete
 optional-feature tests/snapshots. The current derivative does not restore that
 old math implementation: it adds a request-local, code-aware path for common
 inline and display delimiters plus an exact iosMath 2.5.0 dependency, without
-Intatis-specific formula-count, per-formula byte, or fixed attachment-size
+Councis-specific formula-count, per-formula byte, or fixed attachment-size
 caps.
 HighlightSwift, Shimmer, SnapshotTesting, branded assets, images, citations,
 animation, and syntax highlighting remain removed or disabled. The
@@ -119,7 +119,7 @@ The relevant upstream NOTICE attribution is:
 > project authors.
 
 Upstream `NOTICE.txt` also mentions Swift Argument Parser, but it is not in the
-current Intatis `Package.resolved` graph and is not linked into the renderer
+current Councis `Package.resolved` graph and is not linked into the renderer
 product. The cmark attribution from that NOTICE applies and is reproduced in
 the swift-cmark section below.
 
@@ -337,7 +337,7 @@ otherwise be required by Sections 4(a), 4(b) and 4(d) of the License.
 
 The upstream repository also licenses its CommonMark specification test data
 under CC BY-SA 4.0. Those test/specification assets are not SwiftPM resources
-of the Intatis application products and are not copied into Intatis. The
+of the Councis application products and are not copied into Councis. The
 runtime-source notices that apply to the linked parser follow.
 
 ### Core cmark code — BSD 2-Clause License
