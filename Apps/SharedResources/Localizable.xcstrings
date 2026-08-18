@@ -3814,6 +3814,23 @@
         }
       }
     },
+    "Choose Folder…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose Folder…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择文件夹…"
+          }
+        }
+      }
+    },
     "Choose Project Workspace" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -9202,6 +9219,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "暂无工作任务"
+          }
+        }
+      }
+    },
+    "No Folder" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No Folder"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无文件夹"
           }
         }
       }

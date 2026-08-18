@@ -1,10 +1,20 @@
 # TESTING
 
+## 外部依赖与禁止兜底验证（Vitemis 强制规则）
+
+本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。涉及外部能力的变更必须验证：
+
+- exact 外部依赖可用时只调用其官方 API/扩展点，不调用第一方重复实现。
+- 依赖缺失、版本不兼容或构建/签名/许可证/平台/安全条件不成立时，产生明确、可诊断失败并停止该能力。
+- 失败路径不会切换到 legacy、另一 provider/backend、adapter/shim、cache、mock、简化实现或不完整路径。
+- 测试 double 只存在于测试 target，不进入 production selection 或 runtime fallback。
+- Review 检查新增 wrapper/adapter/facade 是否仅为官方 API 必需的最薄接线；发现核心能力复制、第二实现或静默降级即判定失败。
+
 文档状态：当前可执行验证规范
 
-最近核对：2026-08-17
+最近核对：2026-08-18
 
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 ## 1. 当前产品与验证边界
 
@@ -74,7 +84,7 @@ git diff --check
 - canonical writer/help/schema/tool/prompt 不得广告旧 namespace。
 
 版本一致性门必须验证 `project.yml`、macOS Info.plist、生成的 Xcode project 与
-最终 App metadata 一致为 `0.48 (48)`，并复核产品名与 Bundle ID。
+最终 App metadata 一致为 `0.10 (49)`，并复核产品名与 Bundle ID。
 
 ## 4. SwiftPM 构建与全量测试
 
@@ -261,7 +271,7 @@ lipo -archs /tmp/councis-brand-release/Build/Products/Release/Councis.app/Conten
 
 - `CFBundleIdentifier = com.Vita0818.Councis`；
 - `CFBundleName = Councis`，`CFBundleExecutable = Councis`；
-- `CFBundleShortVersionString = 0.48`，`CFBundleVersion = 48`；
+- `CFBundleShortVersionString = 0.10`，`CFBundleVersion = 49`；
 - icon 名/文件为 `Councis`；
 - Release executable 同时含 `arm64 x86_64`；
 - `CouncisMac.DeveloperID.entitlements` 不含
@@ -317,6 +327,10 @@ DMG 提交。正式发行还必须验证：
 在签名或合适 Debug App 中至少检查：
 
 - sidebar 只显示 Councis、Cowork Recent/New、Settings；不恢复 Chat/Code 模式行；
+- Sidebar `+` 与空白 Cowork 启动页 `New` 只显示 `Choose Folder…` / `No Folder` 两项菜单，且没有
+  说明段落或提示卡；前者打开 folder picker 并保持 user-selected workspace 链，后者创建 exact
+  `Application Support/Councis/Workspaces/<SessionID>` owner-only 工作区；两者的 settings/bookmark、
+  fresh 十事件 bootstrap 与重启恢复保持同一链路；
 - 新 session、恢复、rename/delete、窗口关闭、Command-Q drain 合同；
 - `@main`、fixed `@judge`、permission reviewer 状态与右侧 rail；
 - model/profile 选择、Send 冻结、附件、voice、usage、错误卡；

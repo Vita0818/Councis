@@ -1,8 +1,19 @@
 # DO_NOT_BREAK
 
+## 外部依赖优先与禁止功能兜底（Vitemis 强制规则）
+
+本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。本节是强制约束，不是建议。
+
+- 当用户指定、仓库已经采用，或经许可证、provenance、安全与平台审查可采用的外部依赖提供同等能力时，必须直接集成该依赖的官方 API 或官方扩展点。
+- 不得自行重写同等能力，不得新增替代 adapter、shim、compatibility layer、wrapper、proxy、facade、协议翻译层、parallel backend、preview backend、shadow implementation 或“先兜底、以后再换”的实现。
+- 本地代码只允许保留官方 API 必需的最薄生命周期、类型、权限、配置和 bundle 接线；不得重新实现、解释、扩展或替代依赖的核心能力。
+- exact 依赖因版本、构建、签名、许可证、平台、安全或官方 API 限制无法接入时，必须停止该能力、明确失败、报告 blocker 并请求用户决定；不得静默降级、切换 legacy/另一 provider/backend、使用 cache/mock/简化路径或继续交付不完整替代实现。
+- 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
+- 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
+
 文档状态：当前回归禁区
-最近核对：2026-08-17
-产品基线：v0.48（build 48）
+最近核对：2026-08-18
+产品基线：v0.10（build 49）
 
 ## macOS 分发不变量
 
@@ -506,6 +517,7 @@
   exact SessionID + revision/seq 水位处理，迟到 A 不得覆盖当前 B。
 - **Cowork project settings**：Cowork per-session project metadata 必须通过 `session_settings_updated` 保存到 EventLog；UserDefaults `councis.cowork.projectSettings.<sessionID>` 及旧 bookmark/path key 只作一次性迁移输入。settings 只能保存 sessionID、主 agent 名称、未来新 agent exact inference binding、默认权限 profile、可选 token budget 与 secret-free workspace path/agent/primary metadata；不得保存 bookmark bytes、API key、raw endpoint、完整 request options/响应/转写或秘密内容。修改 default 只影响未来 agent，不得动态重写现有 agent、queued/running task、控制面 provider 或授予 lease。Cowork composer 的模型选择器只能展示 host-approved、secret-free current profile options，并暂存“下一次 `@main`”选择；选择动作本身不得 live rebind，忙时也不得禁用。只有按下 Send 才把当时的 exact binding 冻结进该 submission，FIFO 到达空闲执行边界后才允许 host-only rebind `@main`。不得复用 Chat/Code 的 session-global provider selection，也不得连带修改既有 worker、控制面 binding、当前任务或 future-agent default。
 - **Workspace bookmark capability**：Apple security-scoped bookmark bytes 只能保存在 session-owned `<session>/workspace-access.plist` schema v1 binary plist；必须 `0600`、稳定 no-follow cross-process lock、owner-only atomic replace、file fsync + parent-directory fsync、session/path/schema/单一-primary/写后等值校验。EventLog、`session.json`、UserDefaults 和 UI projection 不得复制 bookmark bytes。macOS 必须让 `WorkspaceAccessLease` 从 bookmark 解析所得的 scoped URL start access，在完整 Code/Cowork 使用期保留并在 teardown 后 stop。共享 path 不得由最后写入的单个 agent 冒充唯一 owner；Agent/目录移除必须先 durable persist 新 settings，再只删除 settings + live roster 均零引用的非-primary capability，任何 canonical identity 无法证明时都保留。primary 必须在 UI、业务方法和 store 默认拒删；底层绕过只允许新建/重授权事务尚未成立时的显式回滚，不得供普通项目目录删除调用。
+- **Managed fresh Cowork workspace**：macOS Sidebar `+` 与空白 Cowork 启动页的既有 `New` 控件必须共享且只显示 `Choose Folder…` / `No Folder` 两项短菜单，不得增加说明段落、提示卡或独立模式页面。`Choose Folder…` 必须使用原 NSOpenPanel + user-selected workspace admission；`No Folder` 只有在 fixed-role inference binding 预检通过后，才可在 `~/Library/Application Support/Councis/Workspaces/` 下为 exact fresh SessionID 原子创建一个此前不存在的直接子目录。root 与 leaf 必须是 current-UID、真实目录、owner `rwx`、group/other 零权限，拒绝 symlink、unsafe mode、非法 SessionID、既有 leaf 与 root escape，并在发布前同步 parent directory。不得把整个 Application Support、session EventLog/artifact/capability 目录、另一个 session workspace 或 `/tmp` 当作默认根。两种 URL 都必须继续写 session-owned bookmark、持有 WorkspaceAccessLease、生成 exact WorkspaceLease/root identity，并走同一十事件 bootstrap、PermissionEngine 与 managed-terminal sandbox。删除 session 不得顺带删除工作区内容。
 - **Fresh Cowork bootstrap**：唯一无需普通模型审批的初始路径是 brand-new empty session 的严格 settings-first 十事件合同：settings；`@main` workspace/capability/agent；`@judge` workspace/capability/agent；`@permission-reviewer` workspace/capability/agent，连续 `seq 0...9`。三 agent 共享 canonical workspace，但 host 必须分别传入 Main/Judge/reviewer exact binding；bootstrap 不得从 Main/session/default 推导任一固定 role。三份 identity 与 leases 必须不同；Judge 必须是 ordinary read-only、depth 0、无 coordinator/run-control authority，reviewer 必须 read-only、空工具、无 communication/delegation、depth 0。任何事件存在、非空 roster、binding/profile mismatch、路径/sensitive-root/root-identity 问题或持久化失败都必须 fail closed；bootstrap 不得调用模型/provider，也不能被普通 attach/spawn/tool/recovery 复用。既有非空历史 session 不得自动补写 Judge。
 - **Legacy session migration**：共享旧 path→bookmark map 只有在当前 session 存在 legacy ownership evidence 时才可消费。必须先 exact-resolve binding，迁移并验证全部必需 workspace bookmark、primary 语义和 capability 文件。旧 symlink spelling 只能在 bookmark security scope 已启用后 canonicalize/比较；验证成功后先把 canonical path 作为新 settings revision 写入 EventLog，再 durable append migration marker，最后才清理旧 key。marker 前崩溃必须可重试；任一 required item 失败保留输入，marker 后不得回退全局 map 补回 plist。
 - **user_message 与 `/goal` 兼容性**：`UserMessagePayload.text` 是送入模型的清洗后文本；v0.12 追加的 `tags` / `goal`、附件 `attachments` 和 Cowork next-main 的 `mainAgentInferenceBinding` 必须保持可选、追加式演进，不得让旧 JSONL 缺字段解码失败。`attachments` 只能保存 session ArtifactID，绝不能保存文件 bytes、base64、bookmark 或路径；`mainAgentInferenceBinding` 只能保存 secret-free exact binding，Chat、legacy Cowork 和直接发给 ordinary worker 的消息必须允许为 `nil`。Chat / Code 的 `/goal` 仍只产生 Goal 标签元数据；Cowork 的 `/goal` 必须创建独立 durable Goal/ContinuationRun 事件并由宿主续跑，不能退化为 user-message 标签，也不能改写旧 Envelope shape 或 provider 线协议。

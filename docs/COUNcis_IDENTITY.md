@@ -2,9 +2,9 @@
 
 文档状态：当前产品身份合同
 
-最近核对：2026-08-17
+最近核对：2026-08-18
 
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 ## 一句话定位
 
@@ -64,7 +64,9 @@ macOS 只呈现 Cowork，但仍保留 Chat/Code runtime 与历史兼容。fresh 
 
 - fresh empty Cowork session 在任何模型请求前，以 settings-first 十事件 batch 原子登记 `@main`、
   `@judge` 与 `@permission-reviewer` 各自的 workspace lease、capability lease 和 identity。
-- 三者共享用户选择的 canonical workspace，但 identity、lease 与 exact inference binding 独立。
+- macOS fresh `New` 只提供 `Choose Folder…` 与 `No Folder` 两项：前者使用用户选择的 canonical
+  workspace，后者创建 Councis-owned、per-session owner-only canonical workspace。三者共享该
+  session canonical workspace，但 identity、lease 与 exact inference binding 独立。
 - `judge_model` 是 macOS/modern CLI 高级 JSON/JSONC 的 canonical 顶层字段，不增加 Judge UI。
 - 字段缺失只在配置解析层一次性继承同一 JSON 文档的顶层 `model`；显式 null/错误类型/空值、
   unknown/disabled route、损坏配置或不可证明来源均 fail closed，不回退 UI/session/Main/rebind。

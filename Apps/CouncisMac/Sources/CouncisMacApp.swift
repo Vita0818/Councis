@@ -273,10 +273,53 @@ final class AppEnvironment: ObservableObject {
         }
     }
 
-    /// Build a fresh multi-agent Cowork project session bound to a primary workspace.
+    /// Builds a fresh Cowork session in an app-owned, session-isolated
+    /// workspace without presenting a folder picker.
+    func makeCoworkViewModel() async throws -> CoworkViewModel {
+        let bindings = try resolvedFreshCoworkBindings()
+        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
+        let primaryWorkspace = try WorkspaceAccess
+            .createManagedWorkspace(for: session)
+        return try await makeFreshCoworkViewModel(
+            session: session,
+            primaryWorkspace: primaryWorkspace,
+            selectedBinding: bindings.selected,
+            judgeBinding: bindings.judge,
+            permissionReviewerBinding:
+                bindings.permissionReviewer)
+    }
+
+    /// Builds a fresh multi-agent Cowork project session bound to a primary
+    /// workspace selected by the user. This remains the host seam for explicit
+    /// external-workspace admission.
     func makeCoworkViewModel(primaryWorkspace: WorkspaceAccessLease) async throws -> CoworkViewModel {
-        guard let inferenceCatalogSnapshot else {
+        let bindings: (
+            selected: AgentInferenceBinding,
+            judge: AgentInferenceBinding,
+            permissionReviewer: AgentInferenceBinding
+        )
+        do {
+            bindings = try resolvedFreshCoworkBindings()
+        } catch {
             primaryWorkspace.release()
+            throw error
+        }
+        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
+        return try await makeFreshCoworkViewModel(
+            session: session,
+            primaryWorkspace: primaryWorkspace,
+            selectedBinding: bindings.selected,
+            judgeBinding: bindings.judge,
+            permissionReviewerBinding:
+                bindings.permissionReviewer)
+    }
+
+    private func resolvedFreshCoworkBindings() throws -> (
+        selected: AgentInferenceBinding,
+        judge: AgentInferenceBinding,
+        permissionReviewer: AgentInferenceBinding
+    ) {
+        guard let inferenceCatalogSnapshot else {
             throw CouncisError.config(
                 inferenceCatalogError ?? CouncisLocalization.string(
                     "Inference profiles are still loading. Try again in a moment."))
@@ -284,24 +327,33 @@ final class AppEnvironment: ObservableObject {
         guard let selectedBinding = AppInferenceCatalogCompiler.selectedBinding(
             catalog: providerCatalog,
             snapshot: inferenceCatalogSnapshot) else {
-            primaryWorkspace.release()
             throw CouncisError.config(CouncisLocalization.string(
                 "Choose a resolvable default inference profile before creating Cowork."))
         }
         guard let permissionReviewerBinding =
                 configuredPermissionReviewerBinding(
                     snapshot: inferenceCatalogSnapshot) else {
-            primaryWorkspace.release()
             throw CouncisError.config(CouncisLocalization.string(
                 "Configure a resolvable permission_reviewer_model before creating Cowork."))
         }
         guard let judgeBinding = configuredJudgeBinding(
             snapshot: inferenceCatalogSnapshot) else {
-            primaryWorkspace.release()
             throw CouncisError.config(CouncisLocalization.string(
                 "Configure a resolvable judge_model before creating Cowork."))
         }
-        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
+        return (
+            selected: selectedBinding,
+            judge: judgeBinding,
+            permissionReviewer: permissionReviewerBinding)
+    }
+
+    private func makeFreshCoworkViewModel(
+        session: SessionID,
+        primaryWorkspace: WorkspaceAccessLease,
+        selectedBinding: AgentInferenceBinding,
+        judgeBinding: AgentInferenceBinding,
+        permissionReviewerBinding: AgentInferenceBinding
+    ) async throws -> CoworkViewModel {
         do {
             try WorkspaceAccess.remember(
                 primaryWorkspace.scopedURL,
@@ -807,6 +859,7 @@ struct WorkspaceSessionHome: View {
     let primaryTitle: String
     let primarySystemImage: String
     let primaryShortcut: KeyEquivalent?
+    let primaryActions: [CouncisSessionNewAction]
     let error: String?
     let sessionsTitle: String
     let sessions: [AppSessionSummary]
@@ -821,6 +874,7 @@ struct WorkspaceSessionHome: View {
          primaryTitle: String,
          primarySystemImage: String,
          primaryShortcut: KeyEquivalent? = nil,
+         primaryActions: [CouncisSessionNewAction] = [],
          error: String?,
          sessionsTitle: String,
          sessions: [AppSessionSummary],
@@ -833,6 +887,7 @@ struct WorkspaceSessionHome: View {
         self.primaryTitle = primaryTitle
         self.primarySystemImage = primarySystemImage
         self.primaryShortcut = primaryShortcut
+        self.primaryActions = primaryActions
         self.error = error
         self.sessionsTitle = sessionsTitle
         self.sessions = sessions
@@ -890,19 +945,46 @@ struct WorkspaceSessionHome: View {
     }
 
     @ViewBuilder private var primaryButton: some View {
-        let button = Button(action: onPrimary) {
-            Label(primaryTitle, systemImage: primarySystemImage)
-                .font(CouncisType.body(14, .semibold))
-                .foregroundStyle(.primary)
-        }
-        .controlSize(.large)
-        .councisGlassButton(prominent: true)
+        if primaryActions.isEmpty {
+            let button = Button(action: onPrimary) {
+                primaryButtonLabel
+            }
+            .controlSize(.large)
+            .councisGlassButton(prominent: true)
 
-        if let primaryShortcut {
-            button.keyboardShortcut(primaryShortcut)
+            if let primaryShortcut {
+                button.keyboardShortcut(primaryShortcut)
+            } else {
+                button
+            }
         } else {
-            button
+            let menu = Menu {
+                ForEach(primaryActions.indices, id: \.self) { index in
+                    let item = primaryActions[index]
+                    Button {
+                        item.action()
+                    } label: {
+                        Label(item.title, systemImage: item.systemImage)
+                    }
+                }
+            } label: {
+                primaryButtonLabel
+            }
+            .controlSize(.large)
+            .councisGlassButton(prominent: true)
+
+            if let primaryShortcut {
+                menu.keyboardShortcut(primaryShortcut)
+            } else {
+                menu
+            }
         }
+    }
+
+    private var primaryButtonLabel: some View {
+        Label(primaryTitle, systemImage: primarySystemImage)
+            .font(CouncisType.body(14, .semibold))
+            .foregroundStyle(.primary)
     }
 }
 

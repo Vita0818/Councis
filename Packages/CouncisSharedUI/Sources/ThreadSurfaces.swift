@@ -2291,6 +2291,22 @@ public struct CouncisSessionHistoryItem: Identifiable, Hashable {
     }
 }
 
+public struct CouncisSessionNewAction {
+    public let title: String
+    public let systemImage: String
+    public let action: () -> Void
+
+    public init(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.action = action
+    }
+}
+
 public struct CouncisSessionHistoryList: View {
     private let title: String
     private let newTitle: String
@@ -2298,6 +2314,7 @@ public struct CouncisSessionHistoryList: View {
     private let items: [CouncisSessionHistoryItem]
     private let style: CouncisThreadStyle
     private let isNewDisabled: Bool
+    private let newActions: [CouncisSessionNewAction]
     private let onNew: () -> Void
     private let onSelect: (SessionID) -> Void
     private let onRename: ((SessionID) -> Void)?
@@ -2309,6 +2326,7 @@ public struct CouncisSessionHistoryList: View {
                 items: [CouncisSessionHistoryItem],
                 style: CouncisThreadStyle,
                 isNewDisabled: Bool = false,
+                newActions: [CouncisSessionNewAction] = [],
                 onNew: @escaping () -> Void,
                 onSelect: @escaping (SessionID) -> Void,
                 onRename: ((SessionID) -> Void)? = nil,
@@ -2319,6 +2337,7 @@ public struct CouncisSessionHistoryList: View {
         self.items = items
         self.style = style
         self.isNewDisabled = isNewDisabled
+        self.newActions = newActions
         self.onNew = onNew
         self.onSelect = onSelect
         self.onRename = onRename
@@ -2333,19 +2352,7 @@ public struct CouncisSessionHistoryList: View {
                     .foregroundStyle(style.secondaryText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Button(action: onNew) {
-                    Label(newTitle, systemImage: "plus")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 24, height: 24)
-                }
-                .controlSize(.small)
-                .buttonBorderShape(.circle)
-                .councisGlassButton()
-                .disabled(isNewDisabled)
-                .help(newTitle)
-                .accessibilityLabel(newTitle)
-                .accessibilityIdentifier("sidebar.session.new")
+                newControl
             }
 
             if items.isEmpty {
@@ -2393,6 +2400,49 @@ public struct CouncisSessionHistoryList: View {
                 .scrollIndicators(.automatic)
             }
         }
+    }
+
+    @ViewBuilder private var newControl: some View {
+        if newActions.isEmpty {
+            Button(action: onNew) {
+                newControlLabel
+            }
+            .controlSize(.small)
+            .buttonBorderShape(.circle)
+            .councisGlassButton()
+            .disabled(isNewDisabled)
+            .help(newTitle)
+            .accessibilityLabel(newTitle)
+            .accessibilityIdentifier("sidebar.session.new")
+        } else {
+            Menu {
+                ForEach(newActions.indices, id: \.self) { index in
+                    let item = newActions[index]
+                    Button {
+                        item.action()
+                    } label: {
+                        Label(item.title, systemImage: item.systemImage)
+                    }
+                }
+            } label: {
+                newControlLabel
+            }
+            .menuIndicator(.hidden)
+            .controlSize(.small)
+            .buttonBorderShape(.circle)
+            .councisGlassButton()
+            .disabled(isNewDisabled)
+            .help(newTitle)
+            .accessibilityLabel(newTitle)
+            .accessibilityIdentifier("sidebar.session.new")
+        }
+    }
+
+    private var newControlLabel: some View {
+        Label(newTitle, systemImage: "plus")
+            .labelStyle(.iconOnly)
+            .font(.system(size: 12, weight: .semibold))
+            .frame(width: 24, height: 24)
     }
 }
 

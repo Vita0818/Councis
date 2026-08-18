@@ -110,6 +110,9 @@ struct CouncisMacRootView: View {
                 emptyHistoryTitle: selection.emptyHistoryTitle,
                 newSessionTitle: selection.newSessionTitle,
                 isNewDisabled: newSessionDisabled,
+                newActions: selection == .cowork
+                    ? coworkNewActions
+                    : [],
                 onNewSession: startNewSelectedSession,
                 onSelectSession: resumeSelectedSession,
                 onRenameSession: beginRenameSession,
@@ -253,6 +256,7 @@ struct CouncisMacRootView: View {
                 primaryTitle: CouncisLocalization.string("New Cowork Session"),
                 primarySystemImage: "plus",
                 primaryShortcut: "n",
+                primaryActions: coworkNewActions,
                 error: coworkSessionError,
                 sessionsTitle: CouncisLocalization.string("Recent Cowork Sessions"),
                 sessions: [],
@@ -287,6 +291,19 @@ struct CouncisMacRootView: View {
         case .cowork:
             return coworkTransitionID != nil
         }
+    }
+
+    private var coworkNewActions: [CouncisSessionNewAction] {
+        [
+            CouncisSessionNewAction(
+                title: CouncisLocalization.string("Choose Folder…"),
+                systemImage: "folder",
+                action: startNewCoworkSessionChoosingFolder),
+            CouncisSessionNewAction(
+                title: CouncisLocalization.string("No Folder"),
+                systemImage: "square.dashed",
+                action: startNewCoworkSession),
+        ]
     }
 
     private func historyItem(_ session: AppSessionSummary,
@@ -610,19 +627,38 @@ struct CouncisMacRootView: View {
     }
 
     private func startNewCoworkSession() {
+        startNewCoworkSession(primaryWorkspace: nil)
+    }
+
+    private func startNewCoworkSessionChoosingFolder() {
         guard let workspace = WorkspaceAccess.choose(
-            prompt: CouncisLocalization.string("Choose Cowork Workspace")) else { return }
+            prompt: CouncisLocalization.string(
+                "Choose Cowork Workspace")) else {
+            return
+        }
+        startNewCoworkSession(primaryWorkspace: workspace)
+    }
+
+    private func startNewCoworkSession(
+        primaryWorkspace: WorkspaceAccessLease?
+    ) {
         selection = .cowork
         isSettings = false
         let transitionID = UUID()
         coworkTransitionID = transitionID
         Task { @MainActor in
             guard coworkTransitionID == transitionID else {
-                workspace.release()
+                primaryWorkspace?.release()
                 return
             }
             do {
-                let runtime = try await env.makeCoworkViewModel(primaryWorkspace: workspace)
+                let runtime: CoworkViewModel
+                if let primaryWorkspace {
+                    runtime = try await env.makeCoworkViewModel(
+                        primaryWorkspace: primaryWorkspace)
+                } else {
+                    runtime = try await env.makeCoworkViewModel()
+                }
                 guard coworkTransitionID == transitionID else { return }
                 coworkVM = runtime
                 coworkSessionError = nil
@@ -745,6 +781,7 @@ struct CouncisSidebar: View {
     let emptyHistoryTitle: String
     let newSessionTitle: String
     let isNewDisabled: Bool
+    let newActions: [CouncisSessionNewAction]
     let onNewSession: () -> Void
     let onSelectSession: (SessionID) -> Void
     let onRenameSession: (SessionID) -> Void
@@ -765,6 +802,7 @@ struct CouncisSidebar: View {
                 items: historyItems,
                 style: .councisMac(scheme),
                 isNewDisabled: isNewDisabled,
+                newActions: newActions,
                 onNew: onNewSession,
                 onSelect: onSelectSession,
                 onRename: onRenameSession,

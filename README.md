@@ -1,7 +1,7 @@
 # Councis
 
-当前版本：**v0.48**（build 48）
-状态：pre-1.0；源码与构建可验证，v0.48 Developer ID 发行候选尚待完成最终公证验收。
+当前版本：**v0.10**（build 49）
+状态：pre-1.0；源码与构建可验证，v0.10 Developer ID 发行候选尚待完成最终公证验收。
 
 Councis 是 Apple-first、Swift-native 优先的本地 AI 工作区。唯一 Apple App 是 macOS
 `Councis.app`，内部保留 Chat、Code、Cowork 三个 runtime，当前 UI 只显示 Cowork；CLI 提供

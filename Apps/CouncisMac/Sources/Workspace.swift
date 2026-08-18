@@ -4,9 +4,12 @@ import CouncisCore
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(Darwin)
+import Darwin
+#endif
 
-/// Workspace folder selection. Councis retains the user-selected
-/// security-scoped resource for the active workspace lifetime.
+/// Workspace capability retained for the active lifetime of either a
+/// user-selected directory or an app-managed Cowork workspace.
 final class WorkspaceAccessLease: @unchecked Sendable {
     let scopedURL: URL
     let canonicalURL: URL
@@ -77,6 +80,91 @@ enum WorkspaceAccess {
         return try? WorkspaceAccessLease(scopedURL: url)
         #else
         return nil
+        #endif
+    }
+
+    /// Creates one app-owned workspace for a brand-new Cowork session. The
+    /// directory is intentionally separate from the session's EventLog and
+    /// capability files, then enters the same bookmark/lease pipeline as a
+    /// user-selected workspace.
+    static func createManagedWorkspace(
+        for session: SessionID
+    ) throws -> WorkspaceAccessLease {
+        #if canImport(AppKit) && canImport(Darwin)
+        let component = session.rawValue
+        guard !component.isEmpty,
+              component.utf8.count <= 128,
+              component.utf8.allSatisfy({ byte in
+                  (byte >= 48 && byte <= 57)
+                      || (byte >= 65 && byte <= 90)
+                      || (byte >= 97 && byte <= 122)
+                      || byte == 45
+                      || byte == 95
+              }) else {
+            throw CouncisError.config("The Cowork session identity is invalid.")
+        }
+
+        let root = AppConfig.appSupportDir()
+            .appendingPathComponent("Workspaces", isDirectory: true)
+            .standardizedFileURL
+        try ensureOwnerOnlyDirectory(root)
+
+        let workspace = root
+            .appendingPathComponent(component, isDirectory: true)
+            .standardizedFileURL
+        guard workspace.deletingLastPathComponent() == root else {
+            throw CouncisError.permissionDenied(
+                "The Cowork workspace path is invalid.")
+        }
+        let rootDescriptor = try openOwnerOnlyDirectory(root)
+        defer { _ = close(rootDescriptor) }
+        let rootIdentity = try ownerOnlyDirectoryIdentity(rootDescriptor)
+
+        guard mkdirat(rootDescriptor, component, S_IRWXU) == 0 else {
+            throw CouncisError.io(
+                "Councis could not create the Cowork workspace.")
+        }
+        let workspaceDescriptor = openat(
+            rootDescriptor,
+            component,
+            O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)
+        guard workspaceDescriptor >= 0 else {
+            throw CouncisError.io(
+                "The Cowork workspace could not be verified.")
+        }
+        defer { _ = close(workspaceDescriptor) }
+        let workspaceIdentity = try ownerOnlyDirectoryIdentity(
+            workspaceDescriptor)
+        guard fsync(workspaceDescriptor) == 0,
+              fsync(rootDescriptor) == 0 else {
+            throw CouncisError.io(
+                "The Cowork workspace directory could not be persisted.")
+        }
+        try requireDirectory(root, matches: rootIdentity)
+        try requireDirectory(workspace, matches: workspaceIdentity)
+
+        let canonicalRoot = try PathConfinement
+            .canonicalExistingDirectory(root)
+        let lease = try WorkspaceAccessLease(scopedURL: workspace)
+        guard lease.canonicalURL.deletingLastPathComponent()
+                == canonicalRoot else {
+            lease.release()
+            throw CouncisError.permissionDenied(
+                "The Cowork workspace escaped its managed root.")
+        }
+        do {
+            try requireDirectory(root, matches: rootIdentity)
+            try requireDirectory(
+                lease.canonicalURL,
+                matches: workspaceIdentity)
+        } catch {
+            lease.release()
+            throw error
+        }
+        return lease
+        #else
+        throw CouncisError.io(
+            "Managed Cowork workspaces are unavailable on this platform.")
         #endif
     }
 
@@ -589,5 +677,79 @@ enum WorkspaceAccess {
             .standardizedFileURL
             .path
     }
+
+    #if canImport(Darwin)
+    private static func ensureOwnerOnlyDirectory(_ url: URL) throws {
+        do {
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: true,
+                attributes: [
+                    .posixPermissions: NSNumber(value: 0o700),
+                ])
+        } catch {
+            throw CouncisError.io(
+                "Councis could not prepare the Cowork workspace root.")
+        }
+        try validateOwnerOnlyDirectory(url)
+    }
+
+    private static func validateOwnerOnlyDirectory(_ url: URL) throws {
+        let descriptor = try openOwnerOnlyDirectory(url)
+        defer { _ = close(descriptor) }
+        _ = try ownerOnlyDirectoryIdentity(descriptor)
+    }
+
+    private struct DirectoryIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    private static func openOwnerOnlyDirectory(_ url: URL) throws -> Int32 {
+        let descriptor = open(
+            url.path,
+            O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw CouncisError.permissionDenied(
+                "The Cowork workspace directory is not owner-only.")
+        }
+        do {
+            _ = try ownerOnlyDirectoryIdentity(descriptor)
+            return descriptor
+        } catch {
+            _ = close(descriptor)
+            throw error
+        }
+    }
+
+    private static func ownerOnlyDirectoryIdentity(
+        _ descriptor: Int32
+    ) throws -> DirectoryIdentity {
+        var value = stat()
+        guard fstat(descriptor, &value) == 0,
+              (value.st_mode & S_IFMT) == S_IFDIR,
+              value.st_uid == geteuid(),
+              (value.st_mode & (S_IRWXG | S_IRWXO)) == 0,
+              (value.st_mode & S_IRWXU) == S_IRWXU else {
+            throw CouncisError.permissionDenied(
+                "The Cowork workspace directory is not owner-only.")
+        }
+        return DirectoryIdentity(
+            device: value.st_dev,
+            inode: value.st_ino)
+    }
+
+    private static func requireDirectory(
+        _ url: URL,
+        matches expected: DirectoryIdentity
+    ) throws {
+        let descriptor = try openOwnerOnlyDirectory(url)
+        defer { _ = close(descriptor) }
+        guard try ownerOnlyDirectoryIdentity(descriptor) == expected else {
+            throw CouncisError.permissionDenied(
+                "The Cowork workspace directory identity changed.")
+        }
+    }
+    #endif
 }
 #endif

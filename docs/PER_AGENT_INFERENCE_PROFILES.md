@@ -2,7 +2,7 @@
 
 文档状态：当前 durable inference binding 契约
 最后核对：2026-08-17
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 当前产品图只有 macOS `CouncisMac` 与 CLI；文末早期验证记录中的 iOS App
 构建只描述当时历史基线，不属于当前 target、scheme 或验收矩阵。

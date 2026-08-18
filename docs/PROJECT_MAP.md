@@ -2,9 +2,9 @@
 
 文档状态：当前仓库地图
 
-最近自查日期：2026-08-17
+最近自查日期：2026-08-18
 
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 本文以当前 `Package.swift`、`project.yml`、源码、测试和脚本为准。固定来源与旧路径只在
 `docs/INTATIS_BASELINE.md` 和 legacy bridge 中说明，不属于活跃工程图。
@@ -143,6 +143,11 @@ CoworkViewModel -> SubmittedIntentStore -> EventLog acceptance
   -> EventLog -> CoworkProjection -> bounded per-agent SharedUI page
 ```
 
+macOS Sidebar `+` 与空白 Cowork 启动页的既有 `New` 控件共享一个两项菜单：`Choose Folder…` 进入
+原 NSOpenPanel workspace admission，`No Folder` 在 inference binding 预检成功后创建
+`~/Library/Application Support/Councis/Workspaces/<SessionID>`。后者与 session EventLog、artifacts 和
+capability sidecars 分离；两条路径经同一 bookmark/WorkspaceLease/root-identity 链进入下述 bootstrap。
+
 fresh empty session 先原子写十事件：settings、Main/Judge/reviewer 各自 workspace/capability/identity。
 Judge 为 fixed ordinary read-only data-plane agent；Permission Reviewer/GoalVerifier 为独立 no-tools control
 planes。
@@ -169,6 +174,7 @@ Agent file/document tools -> OKF draft -> build_knowledge
 | 类型 | Canonical value |
 |---|---|
 | Application Support | `~/Library/Application Support/Councis` |
+| Fresh Cowork workspace | `~/Library/Application Support/Councis/Workspaces/<SessionID>` |
 | Config | `~/.config/councis/councis.json[c]` / `COUNCIS_CONFIG` |
 | Auth | `~/.config/councis/auth.json` / `COUNCIS_AUTH_FILE` |
 | UserDefaults | `councis.*` |

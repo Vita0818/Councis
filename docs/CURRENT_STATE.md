@@ -2,16 +2,27 @@
 
 文档状态：当前源码摘要；底层品牌脱钩代码与本地 unsigned 验证完成
 
-最近核对：2026-08-17
+最近核对：2026-08-18
 
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
+
+## 2026-08-18 v0.10（build 49）版本验证
+
+- `project.yml` 与 shipping App `Info.plist` 已统一为 marketing version `0.10`、递增 build `49`；
+  `scripts/check-version-consistency.sh` 与 `scripts/check-brand-boundary.sh` 均通过。
+- `xcodegen generate` 成功；unsigned Debug `Councis.app` 构建成功，包内读取结果为
+  `CFBundleShortVersionString=0.10`、`CFBundleVersion=49`、Bundle ID
+  `com.Vita0818.Councis`。
+- unsigned universal Release `Councis.app` 构建成功，最终可执行文件同时包含 `x86_64` 与 `arm64`，
+  包内版本仍为 `0.10 (49)`。
+- 本轮版本修改未执行 Developer ID 签名、公证或 SwiftPM/XCTest 全量测试；这些仍属于正式发布前验证。
 
 ## 来源与仓库边界
 
 - 当前业务能力来自 `/Users/vita/Vitemis/Intatis` 固定干净提交
   `120eda64fcb098f1bdc4852fee886450e80b3722`（标题 `v0.54`，tree
   `7fe2842aeec8fa08bec80e34342f971dc4226dcd`）。产品版本事实源仍是本仓库
-  `project.yml` 的 `0.48 (48)`，不是提交标题。
+  `project.yml` 的 `0.10 (49)`，不是提交标题。固定来源快照自身的 `0.48 (48)` 只属于 provenance。
 - Councis 根工作树是唯一活跃实现；没有 `Upstream/Intatis` 或并列实现树，也不回来源仓库改代码。
 - 来源、archive digest、复制边界、gitlink 和 provenance 见 `docs/INTATIS_BASELINE.md`。
 - 2026-08-15 完成 Councis UI/Cowork-only/fixed-Judge 差异；2026-08-17 用户明确授权完整底层
@@ -62,6 +73,10 @@ CouncisSharedUI
 
 - UI 只显示 Cowork history/New 与 Settings，初始 selection 固定 Cowork；Chat/Code/mode navigation
   不渲染。
+- Sidebar `+` 与空白 Cowork 启动页的原有 `New` 控件保持原布局，展开且只展开
+  `Choose Folder…` / `No Folder` 两项短菜单；不增加说明文案、提示卡或独立页面。前者继续使用原
+  folder picker，后者创建 `~/Library/Application Support/Councis/Workspaces/<SessionID>` owner-only
+  独立工作区。
 - Chat/Code views、runtime、SessionKind、EventLog replay、历史数据与工具实现仍保留；隐藏不等于删除。
 - Cowork 继续使用 `Orchestrator`、FIFO scheduler、MessageBus/Mediator、WorkTask/Goal/
   ContinuationRun、per-agent exact inference binding、独立 Permission Reviewer 与 GoalVerifier。
@@ -150,6 +165,21 @@ CouncisSharedUI
 - SecretScanner、Mediator、data-protection Keychain、Hardened Runtime、managed terminal Seatbelt、
   browser native sandbox 与 Linux bwrap/guard 不因产品面删除或品牌改名弱化。
 - `PlatformProfile.current = .restricted`；`CouncisMac` 显式选择 `.macDeveloperID`。
+
+## 2026-08-18 fresh Cowork 托管工作区验证
+
+- macOS Sidebar `+` 与空白启动页 `New` 已接为相同的两项菜单；folder-backed 与 app-owned
+  workspace 两条路径均完成代码接线，`CouncisMac` Debug unsigned Xcode build 退出 0。
+- `SessionStateProtocolTests`、`SessionProjectionStoreTests`、`AutomaticPermissionReviewTests` 与
+  `CouncisCoreTests` 合计 119 tests / 0 failures；`CoworkEndToEndTests` 与
+  `OrchestrationReliabilityTests` 合计 47 tests / 0 failures。
+- 两项 New 菜单修正后，`ThreadLayoutTests` 22 tests 与 `AutomaticPermissionReviewTests` 42 tests
+  再次通过，合计 64 tests / 0 failures。
+- `xcodegen generate`、品牌门、版本门、Icon Composer JSON 与 `git diff --check` 通过。
+- 系统沙箱外的临时 owner directory smoke 证明 `.withSecurityScope` bookmark 可生成、解析回 exact URL，
+  且 `stale=false`；没有把临时目录注册为真实 Councis session。
+- 未启动真实 GUI 创建用户 session，未执行真实 provider/network、Developer ID 签名或公证；运行态
+  folder-picker absence、目录落盘/bookmark readback 与 fresh 十事件 EventLog 仍需人工 smoke 最终确认。
 
 ## 2026-08-17 当前验证状态
 

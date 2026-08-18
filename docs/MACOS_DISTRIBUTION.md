@@ -4,7 +4,7 @@
 
 生效日期：2026-08-17
 
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 ## 产品决策
 
@@ -26,7 +26,7 @@ stdio + HTTP MCP；当前 UI 仍只显示 Cowork 入口，Chat/Code 实现与历
 
 仓库唯一正式打包入口是 `scripts/package-macos-release.sh`。它只构建 `CouncisMac`，要求：
 
-1. `project.yml`、参考 plist、当前文档与最终 App 均为 `0.48 (48)`；
+1. `project.yml`、参考 plist、当前文档与最终 App 均为 `0.10 (49)`；
 2. `scripts/check-brand-boundary.sh` 通过；
 3. 最终 App 为 `Councis.app`、executable `Councis`、Bundle ID `com.Vita0818.Councis`；
 4. universal Release 同时包含 `arm64` 与 `x86_64`；

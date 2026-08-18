@@ -1,13 +1,13 @@
 # Councis 文档索引（固定 Intatis v0.54 来源基线）
 
-当前产品基线：**v0.48**（build 48）
-最近核对：2026-08-17
+当前产品基线：**v0.10**（build 49）
+最近核对：2026-08-18
 
 这个索引区分“当前规范”和“历史证据”。版本、产品状态或下一步判断只允许从当前规范
 读取；带旧版本号的历史文件保留用于解释迁移和兼容性，不能覆盖当前源码。
 
 Councis 根工作树当前直接来自 Intatis 提交 `120eda64fcb098f1bdc4852fee886450e80b3722`
-（标题 `v0.54`，产品版本仍由 `project.yml` 定义为 `0.48 (48)`）。当前已完成 Councis
+（标题 `v0.54`，当前产品版本由 `project.yml` 定义为 `0.10 (49)`）。当前已完成 Councis
 SwiftPM/Xcode/App/CLI/config/storage/log/protocol canonical identity；唯一 App 为 macOS
 `Councis.app` / `CouncisMac` / `com.Vita0818.Councis`，iOS 与 legacy Mac App Store 产品面已删除。
 macOS 继续只显示 Cowork，fresh Cowork 固定 `@judge`，Chat/Code 实现与历史兼容仍保留。

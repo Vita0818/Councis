@@ -2,7 +2,7 @@
 
 文档状态：当前产品合同与实现说明
 最近核对：2026-08-17
-产品基线：v0.48（build 48）
+产品基线：v0.10（build 49）
 
 当前产品图只有 macOS `CouncisMac` 与 CLI；本文较早的 macOS/iOS 对照和 iOS
 构建结果是删除 iOS App 之前的历史记录，不构成当前产品或 release gate。
