@@ -4,131 +4,117 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 project_root="$(cd "$script_dir/.." && pwd -P)"
-
-if [[ -n "${RG_BIN:-}" && -x "$RG_BIN" ]]; then
-    rg_path="$RG_BIN"
-elif [[ -x "/Applications/ChatGPT.app/Contents/Resources/rg" ]]; then
-    rg_path="/Applications/ChatGPT.app/Contents/Resources/rg"
-else
-    rg_path="$(command -v rg || true)"
-fi
-[[ -n "$rg_path" && -x "$rg_path" ]] \
-    || { print -u2 -- "error: ripgrep is required"; exit 1; }
+intatis_root="$(cd "$project_root/../Intatis" && pwd -P)"
 
 fail() {
     print -u2 -- "error: $*"
     exit 1
 }
 
-[[ -d "$project_root/Apps/CouncisMac" ]] \
-    || fail "Apps/CouncisMac is missing"
-[[ -d "$project_root/Apps/councis-cli" ]] \
-    || fail "Apps/councis-cli is missing"
-[[ -d "$project_root/Councis.icon" ]] \
-    || fail "Councis.icon is missing"
-[[ ! -e "$project_root/Apps/IntatisMac" ]] \
-    || fail "legacy IntatisMac source path is still active"
-[[ ! -e "$project_root/Apps/IntatisiOS" ]] \
-    || fail "legacy iOS App source path is still active"
-[[ ! -e "$project_root/Apps/CouncisiOS" ]] \
-    || fail "iOS App source path is still active"
-[[ ! -e "$project_root/Apps/intatis-cli" ]] \
-    || fail "legacy CLI source path is still active"
-[[ ! -e "$project_root/Intatis.icon" ]] \
-    || fail "legacy icon source is still active"
-
-/usr/bin/grep -Fq 'name: "Councis"' "$project_root/Package.swift" \
-    || fail "SwiftPM package is not Councis"
-/usr/bin/grep -Fq '.executable(name: "councis"' "$project_root/Package.swift" \
-    || fail "SwiftPM does not expose the councis executable"
-/usr/bin/grep -Fq 'name: Councis' "$project_root/project.yml" \
-    || fail "Xcode project is not Councis"
-/usr/bin/grep -Fq 'PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Councis' \
-    "$project_root/project.yml" \
-    || fail "shipping Bundle ID is not com.Vita0818.Councis"
-/usr/bin/grep -Fq 'productName: Councis' "$project_root/project.yml" \
-    || fail "shipping App product is not Councis.app"
-
-if /usr/bin/grep -Eq \
-    'CouncisMacAppStore:|CouncisiOS:|COUNCIS_MAC_APP_STORE' \
-    "$project_root/project.yml"; then
-    fail "a removed App Store or iOS product target is still declared"
-fi
-
-allowed_legacy_file() {
-    case "$1" in
-        .gitignore|\
-        Apps/CouncisMac/Sources/AppConfig.swift|\
-        Apps/CouncisMac/Sources/CoworkProjectSettings.swift|\
-        Apps/CouncisMac/Sources/Keychain.swift|\
-        Apps/CouncisMac/Sources/Workspace.swift|\
-        Apps/councis-cli/Sources/CLIConfig.swift|\
-        Apps/councis-cli/Sources/CLIProviderCatalog.swift|\
-        Apps/councis-cli/Sources/MCPCLICommands.swift|\
-        Apps/councis-cli/Tests/ProductBrandCompatibilityTests.swift|\
-        Packages/CouncisAgentKernel/Sources/AuthorizationSidecar.swift|\
-        Packages/CouncisAgentKernel/Tests/AuthorizationSidecarTests.swift|\
-        Packages/CouncisCore/Sources/PathConfinement.swift|\
-        Packages/CouncisCore/Sources/ProductIdentity.swift|\
-        Packages/CouncisCore/Tests/ProductIdentityTests.swift|\
-        Packages/CouncisMCP/Sources/MCPConfiguration.swift|\
-        Packages/CouncisMCP/Sources/MCPSecretStore.swift|\
-        Packages/CouncisMCP/Tests/ProductBrandCompatibilityTests.swift|\
-        Packages/CouncisPermission/Sources/SecretScanner.swift|\
-        Packages/CouncisProtocol/Sources/Leases.swift|\
-        Packages/CouncisProviders/Sources/ProviderRequestAdapter.swift|\
-        Packages/CouncisProviders/Tests/ProductBrandCompatibilityTests.swift|\
-        Packages/CouncisSharedUI/Sources/ExecutionTracePresentation.swift|\
-        Packages/CouncisSharedUI/Sources/MessageRendering/CouncisMessageRendererMode.swift|\
-        Packages/CouncisTools/Sources/ShellGit.swift|\
-        scripts/check-brand-boundary.sh)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+require_text() {
+    local source_file="$1"
+    local expected_text="$2"
+    /usr/bin/grep -Fq -- "$expected_text" "$source_file" \
+        || fail "$source_file is missing required text: $expected_text"
 }
 
-scan_paths=(
-    Apps
-    Packages
-    Tests
-    scripts
-    Experiments
-    .agents
-    Package.swift
-    project.yml
-    Makefile
-    .gitignore
-    README.md
-    ARCHITECTURE.md
-    NOTICE.md
-)
+[[ "$intatis_root" == "/Users/vita/Vitemis/Intatis" ]] \
+    || fail "../Intatis resolved to unexpected root: $intatis_root"
+[[ -f "$intatis_root/Package.swift" ]] \
+    || fail "Intatis Package.swift is unavailable"
 
-while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
-    relative="${path#$project_root/}"
-    allowed_legacy_file "$relative" \
-        || fail "unapproved active Intatis identity remains in $relative"
-done < <(
-    cd "$project_root"
-    "$rg_path" -l -i 'intatis' "${scan_paths[@]}" \
-        --glob '!*.pdf' \
-        --glob '!*.png' \
-        --glob '!*.zip' \
-        --glob '!*.dmg' \
-        | /usr/bin/sed "s#^#$project_root/#" \
-        | /usr/bin/sort
-)
+require_text "$project_root/Package.swift" '.package(path: "../Intatis")'
+require_text "$project_root/Package.swift" 'name: "IntatisCodexRuntime"'
+require_text "$project_root/project.yml" 'path: ../Intatis'
+require_text "$project_root/project.yml" 'product: IntatisCodexRuntime'
+require_text "$project_root/project.yml" 'PRODUCT_BUNDLE_IDENTIFIER: com.Vita0818.Councis'
+require_text "$project_root/Apps/CouncisMac/Sources/AppConfig.swift" 'CouncisProductIdentity.applicationSupportDirectoryName'
+require_text "$project_root/Apps/CouncisMac/Sources/AppConfig.swift" '"COUNCIS_CONFIG"'
+require_text "$project_root/Apps/councis-cli/Sources/CLIConfig.swift" '"COUNCIS_MODEL"'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacApp.swift" 'IntatisHostApplication.configure(name: "Councis")'
+require_text "$project_root/Apps/councis-cli/Sources/CouncisCLI.swift" 'IntatisHostApplication.configure(name: "Councis")'
+require_text "$project_root/Apps/CouncisMac/Sources/CodeViewModel.swift" 'hostApplicationIdentity: hostApplicationIdentity'
+require_text "$project_root/Apps/CouncisMac/Sources/CoworkViewModel.swift" 'hostApplicationIdentity: hostApplicationIdentity'
+require_text "$project_root/Apps/councis-cli/Sources/CodexRuntimeCLI.swift" 'hostApplicationIdentity: hostApplicationIdentity'
+require_text "$project_root/Apps/CouncisMac/Sources/CodeViewModel.swift" 'CodexAppServerSession'
+require_text "$project_root/Apps/CouncisMac/Sources/CoworkViewModel.swift" 'CodexAppServerSession'
+require_text "$project_root/Apps/councis-cli/Sources/Interactive.swift" 'codexRuntimeREPL'
 
-while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
-    fail "active first-party path still contains Intatis: $path"
-done < <(
-    cd "$project_root"
-    "$rg_path" --files Apps Packages Tests scripts Experiments .agents \
-        | "$rg_path" -i '(^|/)intatis' || true
-)
+if /usr/bin/grep -Fq '.package(path: "Vendor/' "$project_root/Package.swift"; then
+    fail "Package.swift still selects a local vendored runtime dependency"
+fi
+if /usr/bin/grep -Eq 'library\(name: "Councis(Core|Protocol|Providers|AgentKernel|Cowork|Tools|MCP|Skills|Knowledge|SharedUI)' \
+    "$project_root/Package.swift"; then
+    fail "Package.swift still publishes a copied Councis runtime product"
+fi
 
-print -- "Councis brand boundary is consistent."
+legacy_source_markers=(
+    "$project_root/Packages/CouncisCore/Sources/IDs.swift"
+    "$project_root/Packages/CouncisAgentKernel/Sources/AgentLoop.swift"
+    "$project_root/Packages/CouncisCowork/Sources/Orchestrator.swift"
+    "$project_root/Packages/CouncisTools/Sources/ToolProtocol.swift"
+    "$project_root/Vendor/MCPClientSDK/Package.swift"
+    "$project_root/Vendor/SwiftStreamingMarkdown/Package.swift"
+    "$project_root/ThirdPartyStandards/OpenKnowledgeFormat/0.2/SPEC.md"
+    "$project_root/Tests/MCPBM25ParityOracle/Cargo.toml"
+    "$project_root/Tests/MCPConformance/official/run-official.sh"
+)
+for legacy_source in $legacy_source_markers; do
+    [[ ! -e "$legacy_source" && ! -L "$legacy_source" ]] \
+        || fail "copied snapshot source is still present: $legacy_source"
+done
+
+if /usr/bin/grep -R -E '^import Councis(Core|Protocol|Providers|Artifacts|Conversation|Tools|Knowledge|Skills|Permission|MCP|MCPStdio|AgentKernel|Cowork|Multimodal|SharedUI)$' \
+    "$project_root/Apps/CouncisMac/Sources" \
+    "$project_root/Apps/councis-cli/Sources"; then
+    fail "active product source still imports a copied Councis implementation module"
+fi
+
+normal_startup_configuration_sources=(
+    "$project_root/Apps/CouncisMac/Sources/AppConfig.swift"
+    "$project_root/Apps/CouncisMac/Sources/Keychain.swift"
+    "$project_root/Apps/councis-cli/Sources/CLIConfig.swift"
+    "$project_root/Apps/councis-cli/Sources/CLIProviderCatalog.swift"
+)
+if /usr/bin/grep -E 'INTATIS_[A-Z0-9_]+|\.config/intatis|Application Support/Intatis|LegacyIntatisCompatibility' \
+    $normal_startup_configuration_sources; then
+    fail "normal Councis startup still reads an Intatis-owned configuration namespace"
+fi
+if /usr/bin/grep -R -E 'WorkspaceAccess\.(migrateLegacyBookmarks|clearLegacySessionStorage)' \
+    "$project_root/Apps/CouncisMac/Sources"; then
+    fail "normal Councis App startup still invokes automatic legacy Intatis workspace migration"
+fi
+
+require_text "$project_root/Apps/CouncisMac/Sources/CodeViewModel.swift" \
+    '_ = try await runtime.runTurn('
+require_text "$project_root/Apps/CouncisMac/Sources/CoworkViewModel.swift" \
+    'runtime = try await self.codexSession('
+require_text "$project_root/Apps/councis-cli/Sources/Interactive.swift" \
+    'case .code, .cowork:'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacApp.swift" \
+    'roleName: "judge"'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacApp.swift" \
+    'permissionProfile: PermissionProfile.readOnly.rawValue'
+require_text "$project_root/Apps/councis-cli/Sources/CodexRuntimeCLI.swift" \
+    'roleName: "judge"'
+require_text "$project_root/Apps/councis-cli/Sources/CodexRuntimeCLI.swift" \
+    'sandbox: .readOnly'
+
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacRootView.swift" \
+    'Text("Councis")'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacRootView.swift" \
+    '[.cowork]'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacRootView.swift" \
+    'Choose Folder…'
+require_text "$project_root/Apps/CouncisMac/Sources/CouncisMacRootView.swift" \
+    'No Folder'
+require_text "$project_root/Apps/councis-cli/Sources/Commands.swift" \
+    'Councis CLI'
+
+if /usr/bin/grep -R -E '"(Intatis|Message Intatis|Open Intatis Config)' \
+    "$project_root/Apps/CouncisMac/Sources" \
+    "$project_root/Apps/councis-cli/Sources"; then
+    fail "active product source contains a user-visible Intatis brand literal"
+fi
+
+print -- "Councis identity is consistent: product overlay -> $intatis_root"

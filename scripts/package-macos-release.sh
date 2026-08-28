@@ -10,6 +10,12 @@ requested_identity="${COUNCIS_DEVELOPER_IDENTITY:-}"
 pause_before_notarization="${COUNCIS_PAUSE_BEFORE_NOTARIZATION:-0}"
 notary_timeout="${COUNCIS_NOTARY_TIMEOUT:-30m}"
 resume_release_dir="${COUNCIS_RESUME_RELEASE_DIR:-}"
+codex_runtime_arm64_root="${COUNCIS_CODEX_RUNTIME_ARM64_ROOT:-}"
+codex_runtime_x86_64_root="${COUNCIS_CODEX_RUNTIME_X86_64_ROOT:-}"
+document_runtime_arm64_root="${COUNCIS_DOCUMENT_RUNTIME_ARM64_ROOT:-}"
+document_runtime_x86_64_root="${COUNCIS_DOCUMENT_RUNTIME_X86_64_ROOT:-}"
+browser_runtime_arm64_root="${COUNCIS_BROWSER_RUNTIME_ARM64_ROOT:-}"
+browser_runtime_x86_64_root="${COUNCIS_BROWSER_RUNTIME_X86_64_ROOT:-}"
 recovery_parent="$project_root/.councis/release-recovery"
 work_root=""
 recovery_dir=""
@@ -110,7 +116,7 @@ initialize_state() {
 }
 
 prepare_recovery_parent() {
-    local metadata_root="$project_root/.councis"
+    local metadata_root="$project_root/.intatis"
     [[ ! -L "$metadata_root" ]] \
         || fail "the Councis metadata directory must not be a symlink"
     /bin/mkdir -p "$recovery_parent"
@@ -190,12 +196,6 @@ inspect_release_app() {
     local executable="$app/Contents/MacOS/Councis"
     [[ -f "$executable" ]] || fail "Release executable is missing"
 
-    local bundle_identifier
-    bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - \
-        "$app/Contents/Info.plist")"
-    [[ "$bundle_identifier" == "com.Vita0818.Councis" ]] \
-        || fail "Release bundle identifier is not com.Vita0818.Councis"
-
     local architectures
     architectures="$(/usr/bin/lipo -archs "$executable")"
     [[ " $architectures " == *" arm64 "* ]] || fail "Release executable is missing arm64"
@@ -210,6 +210,233 @@ inspect_release_app() {
         || fail "Release version contains unsafe filename characters"
     [[ "$build_number" != *[^A-Za-z0-9._-]* ]] \
         || fail "Release build number contains unsafe filename characters"
+
+    local runtime_name runtime_bundle
+    for runtime_name in CodexRuntime DocumentRuntime BrowserRuntime; do
+        runtime_bundle="$app/Contents/Resources/$runtime_name"
+        for architecture in arm64 x86_64; do
+            [[ -f "$runtime_bundle/$architecture/runtime-manifest.json" ]] \
+                || fail "Release App is missing $runtime_name/$architecture"
+        done
+    done
+}
+
+validate_codex_runtime() {
+    local root="$1"
+    local architecture="$2"
+    local identity="$3"
+    local validation_mode="${4:-static}"
+    "$project_root/scripts/validate-codex-runtime.sh" \
+        "$root" "$architecture" "$identity" "$validation_mode"
+}
+
+validate_document_runtime() {
+    local root="$1"
+    local architecture="$2"
+    local identity="$3"
+    local validation_mode="${4:-static}"
+    "$project_root/scripts/validate-document-runtime.sh" \
+        "$root" "$architecture" "$identity" "$validation_mode"
+}
+
+validate_browser_runtime() {
+    local root="$1"
+    local architecture="$2"
+    local identity="$3"
+    local validation_mode="${4:-static}"
+    "$project_root/scripts/validate-browser-runtime.sh" \
+        "$root" "$architecture" "$identity" "$validation_mode"
+}
+
+stage_runtime_pair() {
+    local app="$1"
+    local resource_name="$2"
+    local validator="$3"
+    local arm64_root="$4"
+    local x86_64_root="$5"
+    local arm64_variable="$6"
+    local x86_64_variable="$7"
+    [[ -n "$arm64_root" && -n "$x86_64_root" ]] \
+        || fail "$arm64_variable and $x86_64_variable are required"
+
+    "$validator" "$arm64_root" arm64 "" static
+    "$validator" "$x86_64_root" x86_64 "" static
+
+    local destination="$app/Contents/Resources/$resource_name"
+    [[ ! -e "$destination" && ! -L "$destination" ]] \
+        || fail "Release build unexpectedly already contains $resource_name"
+    /bin/mkdir -p "$destination/arm64" "$destination/x86_64"
+    /usr/bin/ditto "$arm64_root" "$destination/arm64"
+    /usr/bin/ditto "$x86_64_root" "$destination/x86_64"
+
+    "$validator" "$destination/arm64" arm64 "" static
+    "$validator" "$destination/x86_64" x86_64 "" static
+}
+
+stage_all_runtimes() {
+    local app="$1"
+    stage_runtime_pair \
+        "$app" CodexRuntime validate_codex_runtime \
+        "$codex_runtime_arm64_root" "$codex_runtime_x86_64_root" \
+        COUNCIS_CODEX_RUNTIME_ARM64_ROOT COUNCIS_CODEX_RUNTIME_X86_64_ROOT
+    stage_runtime_pair \
+        "$app" DocumentRuntime validate_document_runtime \
+        "$document_runtime_arm64_root" "$document_runtime_x86_64_root" \
+        COUNCIS_DOCUMENT_RUNTIME_ARM64_ROOT COUNCIS_DOCUMENT_RUNTIME_X86_64_ROOT
+    stage_runtime_pair \
+        "$app" BrowserRuntime validate_browser_runtime \
+        "$browser_runtime_arm64_root" "$browser_runtime_x86_64_root" \
+        COUNCIS_BROWSER_RUNTIME_ARM64_ROOT COUNCIS_BROWSER_RUNTIME_X86_64_ROOT
+}
+
+sign_staged_runtime_path() {
+    local code_path="$1"
+    typeset -a preserve entitlement_arguments
+    preserve=()
+    entitlement_arguments=()
+    case "$code_path" in
+        */Contents/Resources/BrowserRuntime/*/bin/node|\
+        */Contents/Resources/BrowserRuntime/*/chromium/Chromium.app|\
+        */Contents/Resources/BrowserRuntime/*/chromium/Chromium.app/Contents/MacOS/Chromium|\
+        */Contents/Resources/BrowserRuntime/*/chromium/Chromium.app/Contents/Frameworks/*/Helpers/Chromium\ Helper*.app|\
+        */Contents/Resources/BrowserRuntime/*/chromium/Chromium.app/Contents/Frameworks/*/Helpers/Chromium\ Helper*.app/Contents/MacOS/*)
+            entitlement_arguments=(--entitlements "$browser_runtime_entitlements")
+            ;;
+    esac
+    if /usr/bin/codesign -d "$code_path" >/dev/null 2>&1; then
+        if (( ${#entitlement_arguments[@]} > 0 )); then
+            preserve=(--preserve-metadata=requirements,identifier)
+        else
+            preserve=(--preserve-metadata=entitlements,requirements,identifier)
+        fi
+    fi
+    /usr/bin/codesign \
+        --force \
+        --sign "$signing_identity" \
+        --options runtime \
+        --timestamp \
+        $entitlement_arguments \
+        $preserve \
+        "$code_path"
+}
+
+is_bundle_main_executable() {
+    local candidate="$1"
+    local bundle=""
+    local info_plist=""
+    local executable_name=""
+
+    case "$candidate" in
+        */Contents/MacOS/*)
+            bundle="${candidate:h:h:h}"
+            case "$bundle" in
+                *.app|*.xpc|*.appex)
+                    info_plist="$bundle/Contents/Info.plist"
+                    executable_name="$(
+                        /usr/bin/plutil -extract CFBundleExecutable raw -o - \
+                            "$info_plist" 2>/dev/null || true
+                    )"
+                    [[ -n "$executable_name" \
+                        && "$candidate" == "$bundle/Contents/MacOS/$executable_name" ]] \
+                        && return 0
+                    ;;
+            esac
+            ;;
+    esac
+
+    local version_root="${candidate:h}"
+    local versions_directory="${version_root:h}"
+    local framework="${versions_directory:h}"
+    if [[ "${versions_directory:t}" == "Versions" && "$framework" == *.framework ]]; then
+        info_plist="$version_root/Resources/Info.plist"
+        executable_name="$(
+            /usr/bin/plutil -extract CFBundleExecutable raw -o - \
+                "$info_plist" 2>/dev/null || true
+        )"
+        [[ -n "$executable_name" && "${candidate:t}" == "$executable_name" ]] \
+            && return 0
+    fi
+    return 1
+}
+
+sign_staged_runtime_code() {
+    local app="$1"
+    local resources="$app/Contents/Resources"
+    local runtime_root candidate bundle
+    for runtime_root in \
+        "$resources/CodexRuntime" \
+        "$resources/DocumentRuntime" \
+        "$resources/BrowserRuntime"; do
+        while IFS= read -r candidate; do
+            file_description="$(/usr/bin/file -b "$candidate")"
+            case "$file_description" in
+                *Mach-O*executable*|*Mach-O*'dynamically linked shared library'*|*Mach-O*bundle*)
+                    is_bundle_main_executable "$candidate" && continue
+                    sign_staged_runtime_path "$candidate"
+                    ;;
+            esac
+        done < <(/usr/bin/find "$runtime_root" -type f \
+            \( -perm -111 -o -name '*.so' -o -name '*.dylib*' \
+               -o -name '*.jnilib' -o -name '*.bundle' -o -name '*.a' \
+               -o -name '*.o' \) -print)
+    done
+    for runtime_root in \
+        "$resources/CodexRuntime" \
+        "$resources/DocumentRuntime" \
+        "$resources/BrowserRuntime"; do
+        while IFS= read -r bundle; do
+            sign_staged_runtime_path "$bundle"
+        done < <(/usr/bin/find "$runtime_root" -depth -type d \
+            \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
+            -print)
+    done
+}
+
+refresh_staged_runtime_integrity() {
+    local app="$1"
+    local resources="$app/Contents/Resources"
+    local architecture codex_root next_manifest runtime_root
+    for architecture in arm64 x86_64; do
+        codex_root="$resources/CodexRuntime/$architecture"
+        next_manifest="$codex_root/.runtime-manifest.$$.json"
+        /usr/bin/jq \
+            --arg binary_sha256 "$(/usr/bin/shasum -a 256 "$codex_root/codex" | /usr/bin/awk '{print $1}')" \
+            '.binary_sha256 = $binary_sha256' \
+            "$codex_root/runtime-manifest.json" > "$next_manifest"
+        /bin/mv "$next_manifest" "$codex_root/runtime-manifest.json"
+    done
+    for runtime_root in \
+        "$resources/CodexRuntime/arm64" \
+        "$resources/CodexRuntime/x86_64" \
+        "$resources/DocumentRuntime/arm64" \
+        "$resources/DocumentRuntime/x86_64" \
+        "$resources/BrowserRuntime/arm64" \
+        "$resources/BrowserRuntime/x86_64"; do
+        (
+            cd "$runtime_root"
+            /usr/bin/find . -type f ! -path './SHA256SUMS.txt' \
+                -exec /usr/bin/shasum -a 256 {} + \
+                | LC_ALL=C /usr/bin/sort \
+                > SHA256SUMS.txt
+        )
+    done
+}
+
+validate_staged_runtimes() {
+    local app="$1"
+    local validation_mode="${2:-static}"
+    local architecture
+    for architecture in arm64 x86_64; do
+        validate_codex_runtime \
+            "$app/Contents/Resources/CodexRuntime/$architecture" \
+            "$architecture" "$signing_identity" "$validation_mode"
+        validate_document_runtime \
+            "$app/Contents/Resources/DocumentRuntime/$architecture" \
+            "$architecture" "$signing_identity" "$validation_mode"
+        validate_browser_runtime \
+            "$app/Contents/Resources/BrowserRuntime/$architecture" \
+            "$architecture" "$signing_identity" "$validation_mode"
+    done
 }
 
 require_current_project_version() {
@@ -238,8 +465,9 @@ verify_signed_release_app() {
     /usr/bin/codesign --display --entitlements "$signed_entitlements" --xml "$app" \
         >/dev/null 2>&1
     /usr/bin/plutil -lint "$signed_entitlements" >/dev/null
-    if /usr/bin/plutil -extract com.apple.security.app-sandbox raw -o - "$signed_entitlements" \
-        >/dev/null 2>&1; then
+    if /usr/bin/plutil -convert json -o - "$signed_entitlements" \
+        | /usr/bin/jq -e '.["com.apple.security.app-sandbox"] == true' \
+            >/dev/null; then
         fail "signed Developer ID bundle unexpectedly enables the App Sandbox"
     fi
 }
@@ -437,9 +665,12 @@ if [[ -z "$resume_release_dir" && "$pause_before_notarization" == "1" && ! -t 0 
 fi
 
 entitlements="$project_root/Apps/CouncisMac/CouncisMac.DeveloperID.entitlements"
+browser_runtime_entitlements="$project_root/Apps/CouncisMac/CouncisBrowserRuntime.entitlements"
 /usr/bin/plutil -lint "$entitlements" >/dev/null
-if /usr/bin/plutil -extract com.apple.security.app-sandbox raw -o - "$entitlements" \
-    >/dev/null 2>&1; then
+/usr/bin/plutil -lint "$browser_runtime_entitlements" >/dev/null
+if /usr/bin/plutil -convert json -o - "$entitlements" \
+    | /usr/bin/jq -e '.["com.apple.security.app-sandbox"] == true' \
+        >/dev/null; then
     fail "Developer ID entitlements unexpectedly enable the App Sandbox"
 fi
 
@@ -483,7 +714,6 @@ if [[ -n "$resume_release_dir" ]]; then
         || fail "release recovery state has no version metadata"
 
     "$project_root/scripts/check-version-consistency.sh"
-    "$project_root/scripts/check-brand-boundary.sh"
     inspect_release_app "$staged_app"
     [[ "$version" == "$expected_version" ]] \
         || fail "recovery App version does not match its state"
@@ -491,6 +721,7 @@ if [[ -n "$resume_release_dir" ]]; then
         || fail "recovery App build number does not match its state"
     require_current_project_version
     verify_signed_release_app "$staged_app"
+    validate_staged_runtimes "$staged_app" execute
     print -- "Resuming preserved Councis $version (build $build_number) release state."
 else
     xcodegen_path="$(command -v xcodegen || true)"
@@ -507,7 +738,6 @@ else
         "$xcodegen_path" generate
     )
     "$project_root/scripts/check-version-consistency.sh"
-    "$project_root/scripts/check-brand-boundary.sh"
 
     print -- "Building the CouncisMac universal Release target..."
     /usr/bin/xcodebuild -quiet \
@@ -525,8 +755,13 @@ else
     source_app="$derived_data/Build/Products/Release/Councis.app"
     [[ -d "$source_app" ]] || fail "Release build did not produce Councis.app"
     /usr/bin/ditto "$source_app" "$build_staged_app"
+    stage_all_runtimes "$build_staged_app"
     inspect_release_app "$build_staged_app"
     require_current_project_version
+
+    print -- "Signing fixed runtime closure with Developer ID and Hardened Runtime..."
+    sign_staged_runtime_code "$build_staged_app"
+    refresh_staged_runtime_integrity "$build_staged_app"
 
     print -- "Signing Councis.app with Developer ID and Hardened Runtime..."
     /usr/bin/codesign \
@@ -537,11 +772,13 @@ else
         --entitlements "$entitlements" \
         "$build_staged_app"
     verify_signed_release_app "$build_staged_app"
+    validate_staged_runtimes "$build_staged_app" execute
 
     create_recovery_directory "$build_staged_app"
     inspect_release_app "$staged_app"
     require_current_project_version
     verify_signed_release_app "$staged_app"
+    validate_staged_runtimes "$staged_app" execute
     pause_for_notarization_network_if_requested
 fi
 

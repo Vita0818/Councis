@@ -1,5 +1,5 @@
 import Foundation
-import CouncisCore
+import IntatisCore
 
 #if canImport(AppKit)
 import AppKit
@@ -19,7 +19,7 @@ enum CLIDiagnoseHangError: Error, LocalizedError, Equatable {
     case invalidProcessIdentifier
     case targetNotRunning
     case targetNotOwnedByCurrentUser
-    case targetIsNotCouncis
+    case targetIsNotIntatis
     case sampleFailed
 
     var errorDescription: String? {
@@ -34,7 +34,7 @@ enum CLIDiagnoseHangError: Error, LocalizedError, Equatable {
             return "the target process is not running"
         case .targetNotOwnedByCurrentUser:
             return "the target process is not owned by the current user"
-        case .targetIsNotCouncis:
+        case .targetIsNotIntatis:
             return "the target process is not the Councis macOS application"
         case .sampleFailed:
             return "the hang bundle was saved, but macOS sample capture failed"
@@ -97,28 +97,28 @@ struct CLIDiagnoseHangOptions: Equatable {
     }
 }
 
-struct CLICouncisProcessIdentity: Equatable, Sendable {
+struct CLIIntatisProcessIdentity: Equatable, Sendable {
     let processIdentifier: Int32
     let ownerUserIdentifier: UInt32
     let executableName: String
     let bundleIdentifier: String?
 }
 
-protocol CLICouncisProcessInspecting: Sendable {
-    func inspect(processIdentifier: Int32) throws -> CLICouncisProcessIdentity
+protocol CLIIntatisProcessInspecting: Sendable {
+    func inspect(processIdentifier: Int32) throws -> CLIIntatisProcessIdentity
 }
 
-enum CLICouncisProcessValidator {
+enum CLIIntatisProcessValidator {
     static func validate(
-        _ identity: CLICouncisProcessIdentity,
+        _ identity: CLIIntatisProcessIdentity,
         currentUserIdentifier: UInt32
     ) throws {
         guard identity.ownerUserIdentifier == currentUserIdentifier else {
             throw CLIDiagnoseHangError.targetNotOwnedByCurrentUser
         }
-        guard identity.executableName == "Councis",
+        guard identity.executableName == "CouncisMac",
               identity.bundleIdentifier == "com.Vita0818.Councis" else {
-            throw CLIDiagnoseHangError.targetIsNotCouncis
+            throw CLIDiagnoseHangError.targetIsNotIntatis
         }
     }
 }
@@ -153,9 +153,9 @@ func runDiagnoseHangCommand(
 ) async throws {
     let options = try CLIDiagnoseHangOptions.parse(arguments)
     #if os(macOS)
-    let report = try await captureCouncisHang(
+    let report = try await captureIntatisHang(
         options: options,
-        inspector: CLIMacCouncisProcessInspector(),
+        inspector: CLIMacIntatisProcessInspector(),
         runner: CLIProcessHangCaptureRunner())
     out("Hang bundle saved: \(report.bundleDisplayName)\n")
     out("sample: \(report.sampleSucceeded ? "captured" : "failed") · unified log: \(report.unifiedLogSucceeded ? "captured" : "failed")\n")
@@ -168,9 +168,9 @@ func runDiagnoseHangCommand(
     #endif
 }
 
-func captureCouncisHang(
+func captureIntatisHang(
     options: CLIDiagnoseHangOptions,
-    inspector: any CLICouncisProcessInspecting,
+    inspector: any CLIIntatisProcessInspecting,
     runner: any CLIHangCaptureRunning,
     now: Date = Date(),
     currentUserIdentifier: UInt32 = currentEffectiveUserIdentifier(),
@@ -178,7 +178,7 @@ func captureCouncisHang(
 ) async throws -> CLIHangCaptureReport {
     let identity = try inspector.inspect(
         processIdentifier: options.processIdentifier)
-    try CLICouncisProcessValidator.validate(
+    try CLIIntatisProcessValidator.validate(
         identity,
         currentUserIdentifier: currentUserIdentifier)
 
@@ -187,9 +187,9 @@ func captureCouncisHang(
         resolvedDefaultRoot = defaultRootURL
     } else {
         resolvedDefaultRoot =
-            try CouncisHangDiagnosticBundleStore.defaultRootURL()
+            try IntatisHangDiagnosticBundleStore.defaultRootURL()
     }
-    let recentStore = CouncisHangDiagnosticBundleStore(
+    let recentStore = IntatisHangDiagnosticBundleStore(
         rootURL: resolvedDefaultRoot)
     let recentIncident = try? await recentStore.latestManifest(
         processIdentifier: options.processIdentifier,
@@ -214,7 +214,7 @@ func captureCouncisHang(
             "--style",
             "compact",
             "--predicate",
-            "processIdentifier == \(options.processIdentifier) AND subsystem == \"\(CouncisDiagnosticConstants.subsystem)\"",
+            "processIdentifier == \(options.processIdentifier) AND subsystem == \"\(IntatisDiagnosticConstants.subsystem)\"",
         ],
         timeoutSeconds: 15)
 
@@ -226,12 +226,12 @@ func captureCouncisHang(
     } else {
         outputRoot = resolvedDefaultRoot
     }
-    let store = CouncisHangDiagnosticBundleStore(rootURL: outputRoot)
+    let store = IntatisHangDiagnosticBundleStore(rootURL: outputRoot)
     let sensitivePaths = [
         outputRoot.path,
         options.outputParentURL?.path,
     ].compactMap { $0 }
-    var attachments: [CouncisHangDiagnosticAttachment] = []
+    var attachments: [IntatisHangDiagnosticAttachment] = []
     if !sample.standardOutput.isEmpty {
         attachments.append(.sanitizedText(
             kind: .sample,
@@ -256,7 +256,7 @@ func captureCouncisHang(
             maximumBytes: 256 * 1_024))
     }
 
-    let manifest = CouncisHangDiagnosticManifest(
+    let manifest = IntatisHangDiagnosticManifest(
         source: .externalCapture,
         recordedAt: now,
         processIdentifier: options.processIdentifier,
@@ -338,10 +338,10 @@ func currentEffectiveUserIdentifier() -> UInt32 {
 }
 
 #if os(macOS)
-private struct CLIMacCouncisProcessInspector: CLICouncisProcessInspecting {
+private struct CLIMacIntatisProcessInspector: CLIIntatisProcessInspecting {
     func inspect(
         processIdentifier: Int32
-    ) throws -> CLICouncisProcessIdentity {
+    ) throws -> CLIIntatisProcessIdentity {
         guard let application = NSRunningApplication(
             processIdentifier: processIdentifier),
               !application.isTerminated else {
@@ -359,7 +359,7 @@ private struct CLIMacCouncisProcessInspector: CLICouncisProcessInspecting {
         guard result == expectedSize else {
             throw CLIDiagnoseHangError.targetNotRunning
         }
-        return CLICouncisProcessIdentity(
+        return CLIIntatisProcessIdentity(
             processIdentifier: processIdentifier,
             ownerUserIdentifier: info.pbi_uid,
             executableName:

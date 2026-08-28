@@ -1,6 +1,6 @@
 import Foundation
-import CouncisMCP
-import CouncisProtocol
+import IntatisMCP
+import IntatisProtocol
 
 typealias MCPCLIConfigurationSecretReader =
     (_ prompt: String, _ readsStandardInput: Bool) throws -> Data
@@ -626,7 +626,7 @@ func buildMCPCLIConfiguration(
                 provenance:
                     MCPConfigurationProvenance(
                         sourceKind:
-                            .councisUser,
+                            .intatisUser,
                         sourceLabel:
                             sourceLabel))
         return MCPCLIConfigurationBuildResult(

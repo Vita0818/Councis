@@ -1,12 +1,12 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisMCPStdio
-import CouncisProtocol
-import CouncisProviders
-import CouncisTools
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCore
+import IntatisMCP
+import IntatisMCPStdio
+import IntatisProtocol
+import IntatisProviders
+import IntatisTools
 
 #if canImport(Darwin)
 import Darwin
@@ -63,7 +63,7 @@ private func persistMCPCLIConnectionConsents(
             item.requirement.exactlyMatches($0)
         }
         guard matches.count <= 1 else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "More than one exact MCP connection consent is active.")
         }
         guard matches.isEmpty else { continue }
@@ -162,7 +162,7 @@ private actor MCPCLIInteractiveConsentHandler:
                 in: .whitespacesAndNewlines)
             .lowercased()
         guard answer == "y" || answer == "yes" else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The user declined the exact MCP connection consent.")
         }
         try await persistMCPCLIConnectionConsents(

@@ -1,44 +1,18 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisCore
-import CouncisProviders
+import CouncisProductSupport
+import IntatisAgentKernel
+import IntatisCore
+import IntatisProviders
 
 enum Mode: String { case chat, code, cowork }
-
-private func legacyCLIEnvironmentKey(for currentKey: String) -> String? {
-    switch currentKey {
-    case "COUNCIS_BASE_URL":
-        return LegacyIntatisCompatibility.Environment.baseURL
-    case "COUNCIS_API_KEY":
-        return LegacyIntatisCompatibility.Environment.apiKey
-    case "COUNCIS_MODEL":
-        return LegacyIntatisCompatibility.Environment.model
-    case "COUNCIS_REASONING":
-        return LegacyIntatisCompatibility.Environment.reasoning
-    case "COUNCIS_MODE":
-        return LegacyIntatisCompatibility.Environment.mode
-    case "COUNCIS_USAGE":
-        return LegacyIntatisCompatibility.Environment.usage
-    case "COUNCIS_MAX_STEPS":
-        return LegacyIntatisCompatibility.Environment.maxSteps
-    default:
-        return nil
-    }
-}
 
 private func cliEnvironmentValue(
     _ environment: [String: String],
     currentKey: String
 ) -> String? {
-    if let value = environment[currentKey], !value.isEmpty {
-        return value
+    environment[currentKey].flatMap { value in
+        value.isEmpty ? nil : value
     }
-    guard let legacyKey = legacyCLIEnvironmentKey(for: currentKey),
-          let value = environment[legacyKey],
-          !value.isEmpty else {
-        return nil
-    }
-    return value
 }
 
 /// Persistent config at `~/.config/councis/config.json` (all values are strings).
@@ -46,22 +20,14 @@ private func cliEnvironmentValue(
 enum ConfigFile {
     static var url: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/councis/config.json")
+            .appendingPathComponent(
+                CouncisProductIdentity.configurationDirectoryRelativePath,
+                isDirectory: true)
+            .appendingPathComponent("config.json")
     }
 
     static func read() -> [String: String] {
-        let source: URL
-        if FileManager.default.fileExists(atPath: url.path) {
-            source = url
-        } else {
-            source = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(
-                    LegacyIntatisCompatibility
-                        .configurationDirectoryRelativePath,
-                    isDirectory: true)
-                .appendingPathComponent("config.json")
-        }
-        guard let data = try? Data(contentsOf: source),
+        guard let data = try? Data(contentsOf: url),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else { return [:] }
         return obj
     }
@@ -184,10 +150,10 @@ struct CLIConfig {
 
         let baseString = value("COUNCIS_BASE_URL", "baseURL", fallback: defaultBaseURL)!
         guard let baseURL = CLIProviderRoute.validHTTPURL(baseString) else {
-            throw CouncisError.config("invalid CLI provider endpoint")
+            throw IntatisError.config("invalid CLI provider endpoint")
         }
         guard let apiKey = value("COUNCIS_API_KEY", "apiKey", fallback: nil), !apiKey.isEmpty else {
-            throw CouncisError.config("no API key — run `councis settings`, or set COUNCIS_API_KEY")
+            throw IntatisError.config("no API key — run `councis settings`, or set COUNCIS_API_KEY")
         }
         let model = value("COUNCIS_MODEL", "model", fallback: defaultModel)!
         let rawReasoning = value("COUNCIS_REASONING", "reasoning", fallback: nil)
@@ -259,7 +225,7 @@ struct CLIConfig {
                 selectedProviderID = only.id
             } else if matchingRoutes.count > 1,
                       !matchingRoutes.contains(where: { $0.id == selectedProviderID }) {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "ambiguous CLI model override; qualify it with a provider ID")
             }
         }
@@ -267,7 +233,7 @@ struct CLIConfig {
         guard var selectedRoute = document.routes.first(where: {
             $0.id == selectedProviderID
         }) ?? document.routes.first else {
-            throw CouncisError.config("no usable CLI provider routes")
+            throw IntatisError.config("no usable CLI provider routes")
         }
         if !selectedRoute.models.contains(where: { $0.id == selectedModelID }) {
             selectedRoute.models.append(CLIProviderModel(
@@ -280,7 +246,7 @@ struct CLIConfig {
             environment,
             currentKey: "COUNCIS_BASE_URL") {
             guard let url = CLIProviderRoute.validHTTPURL(baseOverride) else {
-                throw CouncisError.config("invalid CLI provider endpoint")
+                throw IntatisError.config("invalid CLI provider endpoint")
             }
             selectedRoute.baseURL = url
             selectedRoute.chatEndpoint = nil
@@ -325,7 +291,7 @@ struct CLIConfig {
                 providerID: selectedRoute.id,
                 modelID: selectedModelID,
                 hasReasoningEffort: reasoning) {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "selected CLI reasoning effort has no configured variant for the selected model")
         }
 
@@ -355,7 +321,7 @@ struct CLIConfig {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         guard let effort = ReasoningEffort(rawValue: normalized) else {
-            throw CouncisError.config("invalid CLI reasoning effort")
+            throw IntatisError.config("invalid CLI reasoning effort")
         }
         return effort
     }

@@ -1,15 +1,16 @@
 #if DEBUG && canImport(SwiftUI)
 import Combine
 import Foundation
-import CouncisConversation
-import CouncisCore
-import CouncisSharedUI
+import IntatisConversation
+import IntatisCore
+import IntatisSharedUI
 import SwiftUI
 
 /// Offline, production-surface fixture for the Cowork selected-agent thread.
 /// It renders the public CoworkShell with eight 1,000-row agent histories while
-/// retaining only one bounded 16-row presentation page. No AppEnvironment,
-/// EventLog, provider, permission runtime, workspace, or credential is opened.
+/// keeping one continuous scrollable timeline and at most 16 active rich rows.
+/// No AppEnvironment, EventLog, provider, permission runtime, workspace, or
+/// credential is opened.
 struct CoworkAgentConversationFixtureView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var controller =
@@ -21,8 +22,8 @@ struct CoworkAgentConversationFixtureView: View {
         VStack(spacing: 0) {
             validationBar
             CoworkShell(
-                threadPage: controller.thread.page,
-                presentationScope: CouncisThreadPresentationScope(
+                threadSnapshot: controller.thread.snapshot,
+                presentationScope: IntatisThreadPresentationScope(
                     kind: "cowork",
                     sessionID: "cowork-agent-conversation-fixture",
                     presentationID: "fixture"),
@@ -47,7 +48,7 @@ struct CoworkAgentConversationFixtureView: View {
                     defaultModel: "fixture-model",
                     defaultPermission: "offline"),
                 errorTexts: [],
-                isWorking: controller.thread.page.isAgentWorking,
+                isWorking: controller.thread.snapshot.isAgentWorking,
                 threadStyle: .councisMac(colorScheme),
                 showsInspector: $showsInspector,
                 input: $input,
@@ -57,13 +58,10 @@ struct CoworkAgentConversationFixtureView: View {
                 },
                 onResolve: { _ in },
                 selectedAgentID: controller.thread.selectedAgentID,
-                isThreadPageLoading: controller.thread.isLoading,
+                isThreadSnapshotLoading: controller.thread.isLoading,
                 isRichRenderingEligible:
                     controller.thread.isRichRenderingEligible,
-                onSelectAgent: controller.select,
-                onShowEarlier: controller.thread.showEarlier,
-                onShowNewer: controller.thread.showNewer,
-                onShowLatest: controller.thread.showLatest)
+                onSelectAgent: controller.select)
         }
         .frame(minWidth: 1_100, minHeight: 760)
         .accessibilityIdentifier("cowork.agent.fixture")
@@ -75,7 +73,7 @@ struct CoworkAgentConversationFixtureView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(controller.status)
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption, design: .monospaced))
                     .lineLimit(2)
                     .accessibilityIdentifier("cowork.agent.fixture.status")
                 Text(
@@ -83,8 +81,8 @@ struct CoworkAgentConversationFixtureView: View {
                         + "warnings \(controller.processHeartbeatWarningCount) · "
                         + "incidents \(controller.processHeartbeatIncidentCount) · "
                         + "switch requests \(controller.switchRequestCount) · "
-                        + "8 × 1,000 rows · 4-agent 500 delta/s burst · ≤16 visible")
-                    .font(.councisCaption2.monospacedDigit())
+                        + "8 × 1,000 rows · 4-agent 500 delta/s burst · ≤16 rich")
+                    .font(IntatisTypography.system(.caption2, monospacedDigits: true))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("cowork.agent.fixture.metrics")
             }
@@ -133,12 +131,12 @@ private final class CoworkAgentConversationFixtureController: ObservableObject {
     @Published private(set) var isAutomationRunning = false
 
     var processHeartbeatWarningCount: UInt64 {
-        CouncisPerformanceDiagnostics.shared.snapshot().value(
+        IntatisPerformanceDiagnostics.shared.snapshot().value(
             for: .mainThreadWarnings)
     }
 
     var processHeartbeatIncidentCount: UInt64 {
-        CouncisPerformanceDiagnostics.shared.snapshot().value(
+        IntatisPerformanceDiagnostics.shared.snapshot().value(
             for: .mainThreadIncidents)
     }
 
@@ -172,10 +170,8 @@ private final class CoworkAgentConversationFixtureController: ObservableObject {
         self.updateHub = updateHub
         thread = CoworkAgentThreadPresentationModel(
             mainAgentID: "main",
-            loadPage: { agentID, requestedUpperBound in
-                await store.page(
-                    agentID: agentID,
-                    requestedUpperBound: requestedUpperBound)
+            loadSnapshot: { agentID in
+                await store.snapshot(agentID: agentID)
             },
             updates: { agentID in
                 updateHub.stream(for: agentID)
@@ -230,7 +226,6 @@ private final class CoworkAgentConversationFixtureController: ObservableObject {
 
     func noteFixtureSend() {
         status = "Fixture composer stayed routed to @main; no runtime was invoked"
-        thread.showLatest()
     }
 
     func detachSelectedAgent() {
@@ -243,7 +238,7 @@ private final class CoworkAgentConversationFixtureController: ObservableObject {
             status: "detached",
             isAttached: false)
         // The historical identity stays selectable, so reconciliation must
-        // preserve both the current selection and its already bounded page.
+        // preserve both the current selection and its continuous transcript.
         thread.reconcile(
             mainAgentID: "main",
             selectableAgentIDs: selectableAgentIDs)
@@ -390,7 +385,6 @@ private final class CoworkAgentConversationFixtureController: ObservableObject {
 }
 
 private actor CoworkAgentConversationFixtureStore {
-    private static let pageCapacity = 16
     private let projectionGeneration = UUID()
     private var rowsByAgent: [AgentID: [CodeItem]]
     private var revisionByAgent: [AgentID: UInt64]
@@ -408,7 +402,7 @@ private actor CoworkAgentConversationFixtureStore {
                     title: isUser ? "You" : "@\(agentID.rawValue)",
                     body:
                         "**@\(agentID.rawValue)** fixture history row \(index + 1) / 1,000. "
-                        + "Only the selected agent's latest 16 rows are mounted.",
+                        + "The whole history scrolls continuously; rich rendering stays viewport-bounded.",
                     complete: true)
             }
             revisionByAgent[agentID] = 0
@@ -417,23 +411,13 @@ private actor CoworkAgentConversationFixtureStore {
         self.revisionByAgent = revisionByAgent
     }
 
-    func page(
-        agentID: AgentID,
-        requestedUpperBound: Int?
-    ) -> CoworkAgentThreadPage {
+    func snapshot(
+        agentID: AgentID
+    ) -> CoworkAgentThreadSnapshot {
         let rows = rowsByAgent[agentID] ?? []
-        let totalCount = rows.count
-        let upperBound = min(
-            max(requestedUpperBound ?? totalCount, 0),
-            totalCount)
-        let lowerBound = max(0, upperBound - Self.pageCapacity)
-        return CoworkAgentThreadPage(
+        return CoworkAgentThreadSnapshot(
             agentID: agentID,
-            items: Array(rows[lowerBound..<upperBound]),
-            lowerBound: lowerBound,
-            upperBound: upperBound,
-            totalCount: totalCount,
-            capacity: Self.pageCapacity,
+            items: rows,
             projectedThroughSeq: throughSeq,
             projectionGeneration: projectionGeneration,
             isAgentWorking: true)

@@ -1,12 +1,13 @@
 #if canImport(SwiftUI)
 import CryptoKit
 import Foundation
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
-import CouncisSharedUI
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCore
+import IntatisCodexRuntime
+import IntatisMCP
+import IntatisProtocol
+import IntatisSharedUI
 import SwiftUI
 
 struct MCPProductAgentDescriptor:
@@ -22,6 +23,10 @@ struct MCPProductAgentDescriptor:
     /// rows must be populated from the live roster and task lease.
     let capabilityLeaseID: CapabilityLeaseID
     let taskID: TaskID?
+    /// Only the exact Code root or Cowork @main session-root lease is projected
+    /// into the shipping Codex App Server. Other rows remain visible so old
+    /// grants can be revoked, but cannot receive or execute native MCP access.
+    let supportsNativeCodexMCP: Bool
     /// Exact upper bound already intersected with the live CapabilityLease
     /// and every ancestor/template ceiling by the data-plane host.
     let mcpCapabilityCeiling: Set<MCPGrantedCapability>
@@ -42,6 +47,7 @@ struct MCPProductAgentDescriptor:
         isPermissionReviewer: Bool = false,
         capabilityLeaseID: CapabilityLeaseID,
         taskID: TaskID? = nil,
+        supportsNativeCodexMCP: Bool,
         mcpCapabilityCeiling:
             Set<MCPGrantedCapability>
     ) {
@@ -54,6 +60,9 @@ struct MCPProductAgentDescriptor:
         self.capabilityLeaseID =
             capabilityLeaseID
         self.taskID = taskID
+        self.supportsNativeCodexMCP =
+            !isPermissionReviewer
+                && supportsNativeCodexMCP
         self.mcpCapabilityCeiling =
             isPermissionReviewer
                 ? [] : mcpCapabilityCeiling
@@ -111,11 +120,13 @@ struct MCPProjectGrantDraft: Sendable {
     let templateID: String?
 }
 
-/// Stable, runtime-agnostic API used by Code and Cowork project settings.
+/// Stable API used by shipping Code and Cowork native-Codex project settings.
 ///
 /// EventLog authority mutations are provided by `eventLogBacked`. Runtime
 /// actions remain injected because only the process runtime registry owns live
-/// connections. No View owns or constructs an MCP connection.
+/// connections. No View owns or constructs an MCP connection. New grants are
+/// restricted to the exact session-root Native Interactive surface; legacy
+/// child grants remain visible only so the user can revoke them.
 struct MCPProjectSettingsHost: Sendable {
     let sessionID: SessionID
     let state:
@@ -205,6 +216,8 @@ struct MCPProjectSettingsHost: Sendable {
         rootAuthorities:
             @escaping @Sendable () async throws
                 -> [MCPRootAuthoritySummary],
+        authorityChanged:
+            @escaping @Sendable () async -> Void,
         inspect:
             @escaping @Sendable () async
                 -> MCPProjectRuntimeInspection
@@ -244,6 +257,7 @@ struct MCPProjectSettingsHost: Sendable {
                     .mcpServerAttached(.init(
                         attachment: attachment,
                         actorAgentID: actor)))
+                await authorityChanged()
             },
             detach: { attachment, actor in
                 let payload = MCPServerDetachedPayload(
@@ -256,6 +270,7 @@ struct MCPProjectSettingsHost: Sendable {
                     actorAgentID: actor)
                 _ = try await log.append(
                     .mcpServerDetached(payload))
+                await authorityChanged()
                 try await disconnect(attachment)
             },
             updatePolicy: {
@@ -276,6 +291,7 @@ struct MCPProjectSettingsHost: Sendable {
                         revocationGeneration:
                             Self.newRevocation(),
                         actorAgentID: actor)))
+                await authorityChanged()
             },
             grant: { attachment, agent, draft in
                 guard !agent.isPermissionReviewer,
@@ -283,6 +299,11 @@ struct MCPProjectSettingsHost: Sendable {
                         != "permission-reviewer" else {
                     throw MCPProjectSettingsError
                         .reviewerCannotReceiveAccess
+                }
+                guard agent.supportsNativeCodexMCP,
+                      agent.taskID == nil else {
+                    throw MCPProjectSettingsError
+                        .nativeCodexRootRequired
                 }
                 let template = try await templates()
                     .first {
@@ -299,13 +320,16 @@ struct MCPProjectSettingsHost: Sendable {
                 }
                 let templateCeiling =
                     template?.capabilityCeiling
-                        ?? Set(
-                            MCPServerEditorCapabilities
-                                .all)
+                        ?? CodexRuntimeMCPProjector
+                            .requiredNativeSurfaceCapabilities
                 let effective = draft.capabilities
                     .intersection(templateCeiling)
                     .intersection(
                         agent.mcpCapabilityCeiling)
+                try CodexRuntimeMCPProjector
+                    .validateNativeSurfaceAuthority(
+                        capabilities: effective,
+                        expiresAt: draft.expiresAt)
                 guard !effective.isEmpty else {
                     throw MCPProjectSettingsError
                         .emptyEffectiveGrant
@@ -429,6 +453,7 @@ struct MCPProjectSettingsHost: Sendable {
                     .mcpGrantGranted(.init(
                         grant: grant)))
                 _ = try await log.append(events)
+                await authorityChanged()
             },
             revoke: { grant in
                 _ = try await log.append(
@@ -441,6 +466,7 @@ struct MCPProjectSettingsHost: Sendable {
                         reason: .user,
                         revocationGeneration:
                             Self.newRevocation())))
+                await authorityChanged()
             },
             explicitConnect: explicitConnect,
             disconnect: disconnect,
@@ -466,6 +492,7 @@ struct MCPProjectSettingsHost: Sendable {
                         revocationGeneration:
                             Self.newRevocation(),
                         actorAgentID: nil)))
+                await authorityChanged()
             },
             inspect: inspect)
     }
@@ -521,6 +548,7 @@ enum MCPProjectSettingsError:
     case alreadyAttached
     case stalePolicy
     case reviewerCannotReceiveAccess
+    case nativeCodexRootRequired
     case emptyEffectiveGrant
     case missingRequiredCapabilities
     case invalidAuthorityFingerprint
@@ -533,6 +561,8 @@ enum MCPProjectSettingsError:
             return "The MCP attachment policy changed; reload before saving."
         case .reviewerCannotReceiveAccess:
             return "The permission reviewer cannot receive MCP access."
+        case .nativeCodexRootRequired:
+            return "Only the exact Code root or Cowork @main session-root Agent can receive native Codex MCP access."
         case .emptyEffectiveGrant:
             return "The requested MCP access is empty after intersecting the template, parent, and CapabilityLease ceilings."
         case .missingRequiredCapabilities:
@@ -646,10 +676,10 @@ struct MCPProjectSettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("MCP Project Settings")
-                        .font(.councisTitle2.bold())
+                        .font(IntatisTypography.system(.title2, bold: true))
                     Text(
                         "Session \(model.host.sessionID.rawValue)")
-                        .font(.councisCaption)
+                        .font(IntatisTypography.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
@@ -739,10 +769,10 @@ struct MCPProjectSettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Authorized Roots")
-                        .font(.councisHeadline)
+                        .font(IntatisTypography.system(.headline))
                     Text(
                         "Publish the current exact Agent workspace leases and root identities. This sends roots/listChanged when supported, advances durable policy, and retires every old connection generation.")
-                        .font(.councisCallout)
+                        .font(IntatisTypography.system(.callout))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -768,13 +798,13 @@ struct MCPProjectSettingsView: View {
                     model.state.rootsPolicyRevision {
                 Text(
                     "Current policy revision: \(revision.rawValue)")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             } else {
                 Text(
                     "No MCP roots policy has been published for this session.")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.secondary)
             }
         }
@@ -783,7 +813,7 @@ struct MCPProjectSettingsView: View {
     private var attachedServers: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Attached Servers")
-                .font(.councisHeadline)
+                .font(IntatisTypography.system(.headline))
             if model.state.attachments.isEmpty {
                 ContentUnavailableView(
                     "No attached MCP servers",
@@ -834,14 +864,14 @@ struct MCPProjectSettingsView: View {
     private var agentAccess: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Agent Access")
-                .font(.councisHeadline)
+                .font(IntatisTypography.system(.headline))
             Text(
                 "Absence of an exact grant is denial. New workers start with zero MCP access. The permission reviewer always has zero access and cannot be targeted. Child access is the intersection of the selected template, parent ancestry, live CapabilityLease ceiling, attachment policy, and server filter.")
-                .font(.councisCallout)
+                .font(IntatisTypography.system(.callout))
                 .foregroundStyle(.secondary)
             Grid(alignment: .leading, horizontalSpacing: 12) {
                 GridRow {
-                    Text("Agent").font(.councisCaption.bold())
+                    Text("Agent").font(IntatisTypography.system(.caption, bold: true))
                     ForEach(
                         model.state.attachments.values.sorted {
                             $0.server.serverID.rawValue
@@ -850,7 +880,7 @@ struct MCPProjectSettingsView: View {
                         id: \.attachmentID
                     ) { attachment in
                         Text(serverName(attachment))
-                            .font(.councisCaption.bold())
+                            .font(IntatisTypography.system(.caption, bold: true))
                             .lineLimit(1)
                     }
                 }
@@ -860,11 +890,11 @@ struct MCPProjectSettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(agent.displayName)
                             Text(agent.agentID.rawValue)
-                                .font(.councisCaption2)
+                                .font(IntatisTypography.system(.caption2, design: .monospaced))
                                 .foregroundStyle(.secondary)
                             if agent.isWorker {
                                 Text("Worker")
-                                    .font(.councisCaption2)
+                                    .font(IntatisTypography.system(.caption2))
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -895,8 +925,42 @@ struct MCPProjectSettingsView: View {
             || agent.agentID.rawValue
                 == "permission-reviewer" {
             Label("No access", systemImage: "lock.fill")
-                .font(.councisCaption)
+                .font(IntatisTypography.system(.caption))
                 .foregroundStyle(.secondary)
+        } else if !agent.supportsNativeCodexMCP {
+            if let existing = grant(
+                agent: agent,
+                attachment: attachment)
+            {
+                Menu {
+                    Text("Not available to this Codex Agent")
+                    Button(
+                        "Revoke Old Grant",
+                        role: .destructive
+                    ) {
+                        Task {
+                            await model.perform(
+                                success:
+                                    "Revoked the old non-shipping MCP grant."
+                            ) {
+                                try await model.host.revoke(
+                                    existing)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(
+                        "Root only",
+                        systemImage: "lock.fill")
+                        .font(IntatisTypography.system(.caption))
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+            } else {
+                Label("Root only", systemImage: "lock.fill")
+                    .font(IntatisTypography.system(.caption))
+                    .foregroundStyle(.secondary)
+            }
         } else if let grant = grant(
             agent: agent,
             attachment: attachment)
@@ -923,11 +987,10 @@ struct MCPProjectSettingsView: View {
                 }
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(
-                        "\(grant.capabilities.count) capabilities")
-                        .font(.councisCaption)
+                    Text(nativeGrantLabel(grant))
+                        .font(IntatisTypography.system(.caption))
                     Text(grant.approvalModeCeiling.rawValue)
-                        .font(.councisCaption2)
+                        .font(IntatisTypography.system(.caption2))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -939,7 +1002,7 @@ struct MCPProjectSettingsView: View {
                     attachment: attachment,
                     existing: nil)
             }
-            .font(.councisCaption)
+            .font(IntatisTypography.system(.caption))
         }
     }
 
@@ -979,12 +1042,10 @@ struct MCPProjectSettingsView: View {
         -> MCPProductAgentDescriptor?
     {
         model.agents.first {
-            !$0.isPermissionReviewer
-                && !$0.isWorker
+            $0.supportsNativeCodexMCP
+                && !$0.isPermissionReviewer
+                && $0.taskID == nil
         }
-            ?? model.agents.first {
-                !$0.isPermissionReviewer
-            }
     }
 
     private func connect(
@@ -1041,6 +1102,17 @@ struct MCPProjectSettingsView: View {
                 && $0.isActive()
         }
     }
+
+    private func nativeGrantLabel(
+        _ grant: MCPGrant
+    ) -> String {
+        Set(grant.capabilities)
+                == CodexRuntimeMCPProjector
+                    .requiredNativeSurfaceCapabilities
+            && grant.expiresAt == nil
+            ? "Native Interactive"
+            : "Needs upgrade"
+    }
 }
 
 private struct MCPAttachmentTarget: Identifiable {
@@ -1072,14 +1144,14 @@ private struct MCPAttachmentRow: View {
                         : Color.green)
             VStack(alignment: .leading, spacing: 3) {
                 Text(attachment.server.serverID.rawValue)
-                    .font(.councisBody)
+                    .font(IntatisTypography.system(.body, design: .monospaced))
                 Text(
                     "\(attachment.policy.required ? "Required" : "Optional") · \(attachment.policy.approvalMode.rawValue) · \(attachment.policy.parallelCalls ? "parallel" : "serial")")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.secondary)
                 Text(
                     attachment.server.serverRevision.rawValue)
-                    .font(.councisCaption2)
+                    .font(IntatisTypography.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -1153,7 +1225,7 @@ private struct MCPAttachServerSheet: View {
                 }
                 Text(
                     "Attach records the current immutable server revision in the Session EventLog. It does not connect and it grants no Agent access.")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
@@ -1281,7 +1353,7 @@ private struct MCPAttachmentPolicySheet: View {
                     deny: $promptDeny)
                 Text(
                     "Saving publishes a fresh policy revision and revocation generation. Existing connection authority must be re-established explicitly.")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
@@ -1377,13 +1449,7 @@ private struct MCPGrantEditorSheet: View {
     @ObservedObject var model: MCPProjectSettingsModel
     let target: MCPProjectGrantTarget
     @Environment(\.dismiss) private var dismiss
-    @State private var capabilities:
-        Set<MCPGrantedCapability>
     @State private var approval: MCPApprovalMode
-    @State private var templateID: String?
-    @State private var expires = false
-    @State private var expiry = Date()
-        .addingTimeInterval(24 * 60 * 60)
 
     init(
         model: MCPProjectSettingsModel,
@@ -1391,36 +1457,23 @@ private struct MCPGrantEditorSheet: View {
     ) {
         self.model = model
         self.target = target
-        _capabilities = State(
-            initialValue: Set(
-                target.existing?.capabilities ?? []))
         _approval = State(
             initialValue:
                 target.existing?.approvalModeCeiling
                     ?? .prompt)
-        _templateID = State(initialValue: nil)
-        if let date = target.existing?.expiresAt {
-            _expires = State(initialValue: true)
-            _expiry = State(initialValue: date)
-        }
     }
 
-    private var selectedTemplate:
-        MCPProductAgentAccessTemplate?
-    {
-        model.templates.first { $0.id == templateID }
+    private var nativeCapabilities:
+        Set<MCPGrantedCapability> {
+        CodexRuntimeMCPProjector
+            .requiredNativeSurfaceCapabilities
     }
 
-    private var effective:
-        Set<MCPGrantedCapability>
-    {
-        capabilities
-            .intersection(
-                selectedTemplate?.capabilityCeiling
-                    ?? Set(
-                        MCPServerEditorCapabilities.all))
-            .intersection(
-                target.agent.mcpCapabilityCeiling)
+    private var canSave: Bool {
+        target.agent.supportsNativeCodexMCP
+            && target.agent.taskID == nil
+            && nativeCapabilities.isSubset(
+                of: target.agent.mcpCapabilityCeiling)
     }
 
     var body: some View {
@@ -1429,44 +1482,20 @@ private struct MCPGrantEditorSheet: View {
                 LabeledContent("Agent") {
                     Text(target.agent.displayName)
                 }
-                Picker("Access template", selection: $templateID) {
-                    Text("No additional template ceiling")
-                        .tag(nil as String?)
-                    ForEach(model.templates) { template in
-                        Text(template.name)
-                            .tag(Optional(template.id))
-                    }
-                }
-                Section("Requested capabilities") {
-                    ForEach(
-                        MCPServerEditorCapabilities.all,
-                        id: \.self
-                    ) { capability in
-                        Toggle(
-                            capability.rawValue,
-                            isOn: Binding(
-                                get: {
-                                    capabilities
-                                        .contains(capability)
-                                },
-                                set: { enabled in
-                                    if enabled {
-                                        capabilities.insert(
-                                            capability)
-                                    } else {
-                                        capabilities.remove(
-                                            capability)
-                                    }
-                                }))
-                            .disabled(
-                                !target.agent
-                                    .mcpCapabilityCeiling
-                                    .contains(capability)
-                                    || selectedTemplate.map {
-                                        !$0.capabilityCeiling
-                                            .contains(capability)
-                                    } ?? false)
-                    }
+                Section("Codex Native Interactive") {
+                    Label(
+                        "Complete native MCP surface",
+                        systemImage: "checkmark.shield.fill")
+                    Text(
+                        nativeCapabilities.map(\.rawValue)
+                            .sorted()
+                            .joined(separator: ", "))
+                        .font(IntatisTypography.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                    Text(
+                        "Codex owns this server as one native MCP surface. Approval policy and tool filters may narrow actions; capabilities cannot be partially granted and this authority does not expire.")
+                        .font(IntatisTypography.system(.caption))
+                        .foregroundStyle(.secondary)
                 }
                 Picker(
                     "Approval ceiling",
@@ -1477,24 +1506,15 @@ private struct MCPGrantEditorSheet: View {
                     Text("Auto").tag(MCPApprovalMode.auto)
                     Text("Approve").tag(MCPApprovalMode.approve)
                 }
-                Toggle("Set expiration", isOn: $expires)
-                if expires {
-                    DatePicker(
-                        "Expires",
-                        selection: $expiry,
-                        in: Date()...)
-                }
                 Section("Effective grant") {
                     Text(
-                        effective.isEmpty
-                            ? "No effective capabilities"
-                            : effective.map(\.rawValue)
-                                .sorted()
-                                .joined(separator: ", "))
-                        .font(.councisBody)
+                        canSave
+                            ? "Complete Interactive · session-root"
+                            : "Unavailable for this Agent authority")
+                        .font(IntatisTypography.system(.body, design: .monospaced))
                     Text(
-                        "The saved grant uses only this intersection. A template never expands the Agent CapabilityLease, parent ceiling, attachment, or server policy.")
-                        .font(.councisCaption)
+                        "The saved grant remains bound to this exact Agent, CapabilityLease, attachment revision, consent, and revocation generation.")
+                        .font(IntatisTypography.system(.caption))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1511,18 +1531,18 @@ private struct MCPGrantEditorSheet: View {
                                 rawValue: IDGen.random(
                                     prefix: "mcppolicy"))
                         let draft = MCPProjectGrantDraft(
-                            capabilities: capabilities,
+                            capabilities:
+                                nativeCapabilities,
                             approvalModeCeiling:
                                 approval,
                             filter: MCPCatalogFilter(
                                 revision: revision),
-                            expiresAt:
-                                expires ? expiry : nil,
-                            templateID: templateID)
+                            expiresAt: nil,
+                            templateID: nil)
                         Task {
                             await model.perform(
                                 success:
-                                    "Saved the exact intersected Agent MCP grant."
+                                    "Saved the exact Codex Native Interactive MCP grant."
                             ) {
                                 try await model.host.grant(
                                     target.attachment,
@@ -1534,7 +1554,7 @@ private struct MCPGrantEditorSheet: View {
                             }
                         }
                     }
-                    .disabled(effective.isEmpty)
+                    .disabled(!canSave)
                 }
             }
         }

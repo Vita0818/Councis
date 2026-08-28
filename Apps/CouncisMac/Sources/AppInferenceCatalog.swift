@@ -1,9 +1,9 @@
 #if canImport(SwiftUI)
 import CryptoKit
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
 
 /// A secret-free host projection of one current inference profile revision.
 ///

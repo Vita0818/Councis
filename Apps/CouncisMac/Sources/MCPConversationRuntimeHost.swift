@@ -2,12 +2,12 @@
 import AppKit
 import CryptoKit
 import Foundation
-import CouncisAgentKernel
-import CouncisArtifacts
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
+import IntatisAgentKernel
+import IntatisArtifacts
+import IntatisConversation
+import IntatisCore
+import IntatisMCP
+import IntatisProtocol
 
 private actor MCPConversationResourceUpdateRelay:
     MCPSubscribedResourceUpdateSink
@@ -1050,7 +1050,7 @@ actor MCPConversationRuntimeHost {
         guard let ref =
                 await artifactStore.ref(
                     for: artifactID) else {
-            throw CouncisError.notFound(
+            throw IntatisError.notFound(
                 "artifact \(artifactID.rawValue)")
         }
         let url =
@@ -1060,7 +1060,7 @@ actor MCPConversationRuntimeHost {
                 NSWorkspace.shared.open(url)
             }
         guard opened else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "macOS could not open the selected artifact.")
         }
     }
@@ -1088,7 +1088,7 @@ actor MCPConversationRuntimeHost {
                 }
         guard let descriptor =
                 descriptors.first else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "No live Agent capability lease is available for MCP content.")
         }
         let input =
@@ -1105,7 +1105,7 @@ actor MCPConversationRuntimeHost {
                     .latestPublishedSnapshot(
                         agentID:
                             descriptor.agentID) else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "No live MCP connection set is published for this Agent. Use Connect in MCP Project Settings first.")
         }
         let live =

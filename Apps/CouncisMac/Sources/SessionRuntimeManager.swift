@@ -1,13 +1,13 @@
 #if canImport(SwiftUI)
 import Foundation
 import Combine
-import CouncisCore
-import CouncisProviders
-import CouncisConversation
-import CouncisArtifacts
-import CouncisSharedUI
-import CouncisMCP
-import CouncisAgentKernel
+import IntatisCore
+import IntatisProviders
+import IntatisConversation
+import IntatisArtifacts
+import IntatisSharedUI
+import IntatisMCP
+import IntatisAgentKernel
 
 struct AppSessionRuntimeKey: Hashable, Sendable {
     let kind: SessionKind
@@ -258,7 +258,7 @@ final class AppSessionRuntimeManager: ObservableObject {
     ) async throws -> MCPShippingSessionRuntime {
         guard kind.rawValue == SessionKind.code.rawValue
                 || kind.rawValue == SessionKind.cowork.rawValue else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "MCP is available only to Code and Cowork sessions")
         }
         guard state == .running else {

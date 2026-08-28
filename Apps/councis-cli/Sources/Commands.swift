@@ -1,5 +1,5 @@
 import Foundation
-import CouncisProviders
+import IntatisProviders
 
 func printConfig(_ config: CLIConfig) {
     out("""
@@ -28,13 +28,12 @@ func printHelp() {
       councis config          Print the resolved config
       councis selftest        Offline smoke test (no key)
       councis mcp help        Manage external MCP servers and session access
-      councis exec --session <id> --agent <id> [--task <id>] --prompt <text> [--yes]
-                              Run one exact durable Code/MCP turn
+      councis exec            Disabled: legacy Swift AgentKernel path; use `councis code`
       councis diagnose-hang --pid <pid> [--output <directory>]
                               Capture a 10s sample and 5m Councis logs into an owner-only bundle
       councis help
 
-    CONFIG  (env var > advanced Councis config > legacy config > default)
+    CONFIG  (env var > advanced Councis config > saved Councis settings > default)
       COUNCIS_CONFIG     optional councis.json/jsonc using model + enabled_providers + provider map
       COUNCIS_BASE_URL   default https://api.openai.com/v1
       COUNCIS_API_KEY    required (any non-empty for local servers)

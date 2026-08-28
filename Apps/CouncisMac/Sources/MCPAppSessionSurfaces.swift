@@ -1,13 +1,13 @@
 #if canImport(SwiftUI)
 import AppKit
 import Foundation
-import CouncisAgentKernel
-import CouncisArtifacts
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
-import CouncisTools
+import IntatisAgentKernel
+import IntatisArtifacts
+import IntatisConversation
+import IntatisCore
+import IntatisMCP
+import IntatisProtocol
+import IntatisTools
 
 extension AppEnvironment {
     func mcpConversationContentHost(
@@ -24,6 +24,7 @@ extension AppEnvironment {
             },
             agents: {
                 try await viewModel.mcpProjectAgents()
+                    .filter(\.supportsNativeCodexMCP)
             },
             dispatchInput: { descriptor, reason in
                 try await viewModel.mcpDispatchInput(
@@ -41,7 +42,7 @@ extension AppEnvironment {
                         == AgentID(
                             rawValue: "Coder")
                 else {
-                    throw CouncisError
+                    throw IntatisError
                         .permissionDenied(
                             "The selected MCP instructions belong to a different agent.")
                 }
@@ -65,6 +66,7 @@ extension AppEnvironment {
             },
             agents: {
                 try await viewModel.mcpProjectAgents()
+                    .filter(\.supportsNativeCodexMCP)
             },
             dispatchInput: { descriptor, reason in
                 try await viewModel.mcpDispatchInput(
@@ -129,7 +131,7 @@ extension AppEnvironment {
                         runtimeProvider: {
                             [weak self] in
                             guard let self else {
-                                throw CouncisError.io(
+                                throw IntatisError.io(
                                     "The application MCP runtime owner is unavailable.")
                             }
                             return try await self
@@ -169,6 +171,9 @@ extension AppEnvironment {
                 try await viewModel.mcpDispatchInput(
                     for: descriptor,
                     reason: reason)
+            },
+            authorityChanged: {
+                await viewModel.nativeMCPAuthorityDidChange()
             })
     }
 
@@ -189,6 +194,9 @@ extension AppEnvironment {
                 try await viewModel.mcpDispatchInput(
                     for: descriptor,
                     reason: reason)
+            },
+            authorityChanged: {
+                await viewModel.nativeMCPAuthorityDidChange()
             })
     }
 
@@ -206,7 +214,9 @@ extension AppEnvironment {
             @escaping @MainActor @Sendable (
                 MCPProductAgentDescriptor,
                 MCPRuntimeActivationReason
-            ) async throws -> MCPAgentDispatchInput
+            ) async throws -> MCPAgentDispatchInput,
+        authorityChanged:
+            @escaping @MainActor @Sendable () async -> Void
     ) -> MCPProjectSettingsHost {
         let service = mcp
         return MCPProjectSettingsHost.eventLogBacked(
@@ -222,7 +232,7 @@ extension AppEnvironment {
             resolveAuthorityFingerprint: {
                 [weak self] attachment, descriptor, revocation in
                 guard let self else {
-                    throw CouncisError.io(
+                    throw IntatisError.io(
                         "The application MCP runtime owner is unavailable.")
                 }
                 let paths = await workspacePaths()
@@ -239,7 +249,7 @@ extension AppEnvironment {
                         from: log)
                 guard state.attachments[
                     attachment.attachmentID] == attachment else {
-                    throw CouncisError.permissionDenied(
+                    throw IntatisError.permissionDenied(
                         "The exact MCP attachment changed before the grant was saved.")
                 }
                 let catalog =
@@ -250,7 +260,7 @@ extension AppEnvironment {
                       definition.configuration.enabled,
                       !catalog.isTombstoned(
                         attachment.server) else {
-                    throw CouncisError.permissionDenied(
+                    throw IntatisError.permissionDenied(
                         "The immutable MCP server revision is no longer executable.")
                 }
                 let rootFingerprint =
@@ -349,7 +359,7 @@ extension AppEnvironment {
             explicitConnect: {
                 [weak self] attachment, descriptor in
                 guard let self else {
-                    throw CouncisError.io(
+                    throw IntatisError.io(
                         "The application MCP runtime owner is unavailable.")
                 }
                 let runtime =
@@ -373,7 +383,7 @@ extension AppEnvironment {
                             && $0.identity.server
                                 == attachment.server
                     }) else {
-                    throw CouncisError.permissionDenied(
+                    throw IntatisError.permissionDenied(
                         "The selected Agent has no exact active grant for this MCP attachment.")
                 }
                 let snapshot =
@@ -537,7 +547,7 @@ extension AppEnvironment {
                                 rootPath:
                                     lease.rootPath)
                     else {
-                        throw CouncisError
+                        throw IntatisError
                             .permissionDenied(
                                 "An active Agent workspace lease has no current exact root identity.")
                     }
@@ -556,7 +566,7 @@ extension AppEnvironment {
                     if let existing =
                             roots[lease.id],
                        existing != summary {
-                        throw CouncisError.config(
+                        throw IntatisError.config(
                             "The same MCP workspace lease ID resolved to more than one root authority.")
                     }
                     roots[lease.id] = summary
@@ -565,6 +575,9 @@ extension AppEnvironment {
                     $0.workspaceLeaseID.rawValue
                         < $1.workspaceLeaseID.rawValue
                 }
+            },
+            authorityChanged: {
+                await authorityChanged()
             },
             inspect: {
                 [weak self] in

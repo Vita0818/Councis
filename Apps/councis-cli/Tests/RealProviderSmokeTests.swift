@@ -1,14 +1,14 @@
 import Foundation
 import XCTest
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisCowork
-import CouncisKnowledge
-import CouncisPermission
-import CouncisProtocol
-import CouncisProviders
-import CouncisTools
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCore
+import IntatisCowork
+import IntatisKnowledge
+import IntatisPermission
+import IntatisProtocol
+import IntatisProviders
+import IntatisTools
 @testable import CouncisCLI
 
 final class RealProviderSmokeTests: XCTestCase {
@@ -145,7 +145,7 @@ final class RealProviderSmokeTests: XCTestCase {
         }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "councis-real-knowledge-agent-\(UUID().uuidString)",
+            "intatis-real-knowledge-agent-\(UUID().uuidString)",
             isDirectory: true)
         let workspace = root.appendingPathComponent(
             "workspace",
@@ -198,7 +198,7 @@ final class RealProviderSmokeTests: XCTestCase {
             expiresAtTaskCompletion: false)
         let baseRegistry = ToolRegistry(
             [ReadFileTool(), ListFilesTool(), WriteFileTool()],
-            registryVersion: "councis.real-knowledge-agent-e2e/1")
+            registryVersion: "intatis.real-knowledge-agent-e2e/1")
         let augmentation = try await augmenter.augment(
             HostToolRegistryAugmentationInput(
                 sessionID: sessionID,
@@ -257,7 +257,7 @@ final class RealProviderSmokeTests: XCTestCase {
         XCTAssertTrue(answer.contains("[[evidence:ev_"), answer)
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: externalStore.appendingPathComponent(
-                ".councis-rag-store.json").path))
+                ".intatis-rag-store.json").path))
         let results = events.compactMap { envelope -> ToolResultPayload? in
             guard case .toolResult(let payload) = envelope.event else { return nil }
             return payload
@@ -304,7 +304,7 @@ final class RealProviderSmokeTests: XCTestCase {
         }
 
         let root = fileManager.temporaryDirectory.appendingPathComponent(
-            "councis-real-knowledge-pdf-\(UUID().uuidString)",
+            "intatis-real-knowledge-pdf-\(UUID().uuidString)",
             isDirectory: true)
         let workspace = root.appendingPathComponent(
             "workspace",
@@ -368,7 +368,7 @@ final class RealProviderSmokeTests: XCTestCase {
                 ReadFileTool(), ListFilesTool(), WriteFileTool(),
                 ReadPDFTool(),
             ],
-            registryVersion: "councis.real-knowledge-pdf-e2e/1")
+            registryVersion: "intatis.real-knowledge-pdf-e2e/1")
         let augmentation = try await augmenter.augment(
             HostToolRegistryAugmentationInput(
                 sessionID: sessionID,
@@ -450,7 +450,7 @@ final class RealProviderSmokeTests: XCTestCase {
             answer)
         XCTAssertTrue(fileManager.fileExists(
             atPath: externalStore.appendingPathComponent(
-                ".councis-rag-store.json").path))
+                ".intatis-rag-store.json").path))
 
         let results = events.compactMap { envelope -> ToolResultPayload? in
             guard case .toolResult(let payload) = envelope.event else {
@@ -601,7 +601,7 @@ final class RealProviderSmokeTests: XCTestCase {
             guard case .object(let schema) = decorated.parameters,
                   case .object(let properties)? = schema["properties"],
                   case .array(let required)? = schema["required"] else {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "The authorization-sidecar diagnostic schema is malformed.")
             }
             XCTAssertEqual(decorated.strict, true)
@@ -615,7 +615,7 @@ final class RealProviderSmokeTests: XCTestCase {
                 model: route.model,
                 messages: [.user("""
                     Call diagnostic_noop exactly once with status OK. In the required
-                    __councis_authorization_context field, explain that this is a
+                    __intatis_authorization_context field, explain that this is a
                     user-requested provider-shape diagnostic and cite this user request.
                     """)],
                 tools: [decorated],
@@ -747,7 +747,7 @@ final class RealProviderSmokeTests: XCTestCase {
             decision: .ask,
             risk: .medium,
             reason: "write a non-sensitive file inside the workspace",
-            policyVersion: "councis.real-smoke.v1")
+            policyVersion: "intatis.real-smoke.v1")
         let intent = PermissionIntent(
             action: "filesystem.write",
             resources: [PermissionResource(
@@ -759,8 +759,8 @@ final class RealProviderSmokeTests: XCTestCase {
             replayPolicy: .doNotReplay)
         let authorization = ResolvedToolAuthorization(
             authorizationID: "real-permission-review-smoke",
-            registryVersion: "councis.real-smoke.v1",
-            concreteToolID: "councis.standard/write_file",
+            registryVersion: "intatis.real-smoke.v1",
+            concreteToolID: "intatis.standard/write_file",
             descriptorFingerprint: ToolRegistry.authorizationDigest(
                 "write_file|real-smoke"),
             toolName: "write_file",

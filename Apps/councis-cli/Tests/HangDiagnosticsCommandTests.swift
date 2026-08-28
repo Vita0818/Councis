@@ -1,11 +1,11 @@
 import Foundation
-import CouncisCore
+import IntatisCore
 import XCTest
 @testable import CouncisCLI
 
 final class HangDiagnosticsCommandTests: XCTestCase {
     func testParserRequiresExactPIDAndResolvesRelativeOutput() throws {
-        let current = URL(fileURLWithPath: "/tmp/councis-diagnostics-test")
+        let current = URL(fileURLWithPath: "/tmp/intatis-diagnostics-test")
         let options = try CLIDiagnoseHangOptions.parse(
             ["--pid", "4321", "--output", "captures"][...],
             currentDirectoryURL: current)
@@ -23,47 +23,47 @@ final class HangDiagnosticsCommandTests: XCTestCase {
     }
 
     func testProcessValidationRequiresCurrentUserExactExecutableAndBundle() {
-        let valid = CLICouncisProcessIdentity(
+        let valid = CLIIntatisProcessIdentity(
             processIdentifier: 42,
             ownerUserIdentifier: 501,
-            executableName: "Councis",
+            executableName: "CouncisMac",
             bundleIdentifier: "com.Vita0818.Councis")
-        XCTAssertNoThrow(try CLICouncisProcessValidator.validate(
+        XCTAssertNoThrow(try CLIIntatisProcessValidator.validate(
             valid,
             currentUserIdentifier: 501))
 
-        XCTAssertThrowsError(try CLICouncisProcessValidator.validate(
+        XCTAssertThrowsError(try CLIIntatisProcessValidator.validate(
             .init(
                 processIdentifier: 42,
                 ownerUserIdentifier: 502,
-                executableName: "Councis",
+                executableName: "CouncisMac",
                 bundleIdentifier: "com.Vita0818.Councis"),
             currentUserIdentifier: 501)) {
                 XCTAssertEqual(
                     $0 as? CLIDiagnoseHangError,
                     .targetNotOwnedByCurrentUser)
             }
-        XCTAssertThrowsError(try CLICouncisProcessValidator.validate(
+        XCTAssertThrowsError(try CLIIntatisProcessValidator.validate(
             .init(
                 processIdentifier: 42,
                 ownerUserIdentifier: 501,
-                executableName: "Councis-copy",
+                executableName: "CouncisMac-copy",
                 bundleIdentifier: "com.Vita0818.Councis"),
             currentUserIdentifier: 501)) {
                 XCTAssertEqual(
                     $0 as? CLIDiagnoseHangError,
-                    .targetIsNotCouncis)
+                    .targetIsNotIntatis)
             }
-        XCTAssertThrowsError(try CLICouncisProcessValidator.validate(
+        XCTAssertThrowsError(try CLIIntatisProcessValidator.validate(
             .init(
                 processIdentifier: 42,
                 ownerUserIdentifier: 501,
-                executableName: "Councis",
-                bundleIdentifier: "example.not-councis"),
+                executableName: "CouncisMac",
+                bundleIdentifier: "example.not-intatis"),
             currentUserIdentifier: 501)) {
                 XCTAssertEqual(
                     $0 as? CLIDiagnoseHangError,
-                    .targetIsNotCouncis)
+                    .targetIsNotIntatis)
             }
     }
 
@@ -75,7 +75,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
         let explicitParent = parent.appendingPathComponent("selected")
         let now = Date(timeIntervalSince1970: 10_000)
 
-        let recentStore = CouncisHangDiagnosticBundleStore(
+        let recentStore = IntatisHangDiagnosticBundleStore(
             rootURL: defaultRoot)
         _ = try await recentStore.writeBundle(
             manifest: .init(
@@ -86,11 +86,11 @@ final class HangDiagnosticsCommandTests: XCTestCase {
                 applicationVersion: "0.12",
                 buildVersion: "7",
                 metrics: .init(counters: [
-                    CouncisDiagnosticCounter.mainThreadIncidents.rawValue: 1,
+                    IntatisDiagnosticCounter.mainThreadIncidents.rawValue: 1,
                 ])))
 
         let runner = RecordingHangCaptureRunner()
-        let report = try await captureCouncisHang(
+        let report = try await captureIntatisHang(
             options: .init(
                 processIdentifier: 4321,
                 outputParentURL: explicitParent),
@@ -98,7 +98,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
                 identity: .init(
                     processIdentifier: 4321,
                     ownerUserIdentifier: 501,
-                    executableName: "Councis",
+                    executableName: "CouncisMac",
                     bundleIdentifier: "com.Vita0818.Councis")),
             runner: runner,
             now: now,
@@ -122,7 +122,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
                 "--style",
                 "compact",
                 "--predicate",
-                "processIdentifier == 4321 AND subsystem == \"com.Vita0818.Councis\"",
+                "processIdentifier == 4321 AND subsystem == \"com.Vita0818.Intatis\"",
             ])
 
         let bundle = explicitParent
@@ -141,7 +141,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let manifest = try decoder.decode(
-            CouncisHangDiagnosticManifest.self,
+            IntatisHangDiagnosticManifest.self,
             from: manifestData)
         XCTAssertEqual(manifest.source, .externalCapture)
         XCTAssertEqual(manifest.mainThreadDelayMilliseconds, 2_250)
@@ -163,7 +163,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
         let defaultRoot = parent.appendingPathComponent("default")
         let runner = RecordingHangCaptureRunner(sampleStatus: 1)
 
-        let report = try await captureCouncisHang(
+        let report = try await captureIntatisHang(
             options: .init(
                 processIdentifier: 123,
                 outputParentURL: nil),
@@ -171,7 +171,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
                 identity: .init(
                     processIdentifier: 123,
                     ownerUserIdentifier: 501,
-                    executableName: "Councis",
+                    executableName: "CouncisMac",
                     bundleIdentifier: "com.Vita0818.Councis")),
             runner: runner,
             now: Date(timeIntervalSince1970: 20_000),
@@ -194,7 +194,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
         let defaultRoot = parent.appendingPathComponent("default")
         let runner = RecordingHangCaptureRunner(throwSample: true)
 
-        let report = try await captureCouncisHang(
+        let report = try await captureIntatisHang(
             options: .init(
                 processIdentifier: 123,
                 outputParentURL: nil),
@@ -202,7 +202,7 @@ final class HangDiagnosticsCommandTests: XCTestCase {
                 identity: .init(
                     processIdentifier: 123,
                     ownerUserIdentifier: 501,
-                    executableName: "Councis",
+                    executableName: "CouncisMac",
                     bundleIdentifier: "com.Vita0818.Councis")),
             runner: runner,
             now: Date(timeIntervalSince1970: 20_001),
@@ -231,12 +231,12 @@ final class HangDiagnosticsCommandTests: XCTestCase {
     }
 }
 
-private struct FixedProcessInspector: CLICouncisProcessInspecting {
-    let identity: CLICouncisProcessIdentity
+private struct FixedProcessInspector: CLIIntatisProcessInspecting {
+    let identity: CLIIntatisProcessIdentity
 
     func inspect(
         processIdentifier: Int32
-    ) throws -> CLICouncisProcessIdentity {
+    ) throws -> CLIIntatisProcessIdentity {
         XCTAssertEqual(processIdentifier, identity.processIdentifier)
         return identity
     }

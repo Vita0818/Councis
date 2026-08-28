@@ -1,6 +1,6 @@
 import Foundation
-import CouncisProviders
-import CouncisProtocol
+import IntatisProviders
+import IntatisProtocol
 import XCTest
 @testable import CouncisCLI
 

@@ -1,9 +1,9 @@
 #if canImport(SwiftUI)
 import Foundation
 import AppKit
-import CouncisCore
-import CouncisKnowledge
-import CouncisProtocol
+import IntatisCore
+import IntatisKnowledge
+import IntatisProtocol
 
 enum KnowledgeAccess {
     /// Host seam used by session/permission ownership code to revoke one

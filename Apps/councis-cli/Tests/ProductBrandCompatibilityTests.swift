@@ -3,7 +3,7 @@ import XCTest
 @testable import CouncisCLI
 
 final class CLIProductBrandCompatibilityTests: XCTestCase {
-    func testLegacyEnvironmentCanBridgeButCurrentEnvironmentWins() throws {
+    func testIntatisEnvironmentDoesNotOverrideCouncisConfiguration() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "councis-brand-config-\(UUID().uuidString)",
@@ -33,10 +33,10 @@ final class CLIProductBrandCompatibilityTests: XCTestCase {
         """#.utf8)
         try data.write(to: file)
 
-        let legacy = try CLIConfig.load(
+        let isolated = try CLIConfig.load(
             configurationFileURL: file,
             environment: ["INTATIS_MODEL": "route/legacy"])
-        XCTAssertEqual(legacy.model, "legacy")
+        XCTAssertEqual(isolated.model, "base")
 
         let current = try CLIConfig.load(
             configurationFileURL: file,
@@ -45,5 +45,49 @@ final class CLIProductBrandCompatibilityTests: XCTestCase {
                 "COUNCIS_MODEL": "route/current",
             ])
         XCTAssertEqual(current.model, "current")
+        XCTAssertEqual(current.judgeModel.providerID, "route")
+        XCTAssertEqual(current.judgeModel.modelID, "base")
+    }
+
+    func testIntatisConfigLocationsAreNotDiscovered() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "councis-config-isolation-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent(
+            "Application Support",
+            isDirectory: true)
+        let legacyUserConfig = root
+            .appendingPathComponent(".config/intatis", isDirectory: true)
+            .appendingPathComponent("intatis.json")
+        let legacyAppConfig = support
+            .appendingPathComponent("Intatis", isDirectory: true)
+            .appendingPathComponent("intatis.json")
+        for url in [legacyUserConfig, legacyAppConfig] {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: url)
+        }
+
+        XCTAssertNil(CLIModernProviderConfig.existingURL(
+            environment: ["INTATIS_CONFIG": legacyUserConfig.path],
+            homeDirectory: root,
+            applicationSupportDirectory: support))
+
+        let current = root
+            .appendingPathComponent(".config/councis", isDirectory: true)
+            .appendingPathComponent("councis.json")
+        try FileManager.default.createDirectory(
+            at: current.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: current)
+        XCTAssertEqual(
+            CLIModernProviderConfig.existingURL(
+                environment: ["INTATIS_CONFIG": legacyUserConfig.path],
+                homeDirectory: root,
+                applicationSupportDirectory: support),
+            current.standardizedFileURL)
     }
 }

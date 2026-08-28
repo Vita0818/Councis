@@ -1,5 +1,9 @@
 # Councis 底层品牌脱钩实施清单
 
+> 历史记录：本文描述2026-08-17快照时期的品牌脱钩，不是当前共享实现架构。
+> 2026-08-28起当前事实见`COUNcis_IDENTITY.md`、`INTATIS_INTEGRATION.md`
+> 与manifest；旧`Packages/Councis*`快照已删除。
+
 文档状态：代码脱钩与本地 unsigned 验证完成；真实发行门待独立执行
 
 建立日期：2026-08-17
@@ -90,22 +94,23 @@ snapshot。
 - [x] 新写入只写 Councis canonical 路径/key；不得继续向 Intatis namespace 产生新状态。
 - [x] canonical 值优先；只有 canonical 缺失时才尝试 legacy 输入。新旧同时存在时使用
   canonical，不合并、不猜测，也不把旧值写回新值之上。
-- [x] 已实现的 legacy config/env/UserDefaults、CLI config root、MCP Keychain/AAD 与 source raw-value
-  bridge 都是 best-effort、non-destructive；失败不删除旧数据，也不阻止 clean Councis install。
-- [x] 需要真实复制/重封装的 bridge 使用现有 owner/lock/atomic 边界；纯 read fallback 不虚构
-  durable migration marker。已有 session-specific migration marker 合同不因品牌迁移被删除。
+- [x] 正常启动不再提供legacy config/env/UserDefaults、CLI config root或MCP Keychain
+  fallback；MCP namespace由最新Intatis host identity派生。旧workspace bookmark只可由
+  显式迁移读取。
+- [x] 需要真实复制/重封装的显式迁移必须使用现有owner/lock/atomic边界并写入可验证
+  durable marker；未授权启动链不得探测或认领旧产品数据。
 - [x] 不自动删除旧 Application Support、配置、UserDefaults、Keychain item、CLI store、browser profile
   或 Knowledge snapshot。
 - [x] 旧 secret/config 路径永久保留在 SecretScanner、PathConfinement、managed-terminal deny floor 与
   诊断 redaction 中；加入 Councis 新路径时不得移除旧保护。
-- [x] `COUNCIS_*` 与 legacy `INTATIS_*` 同时存在时 canonical 值胜出；任何一侧的敏感值都不得打印、
-  写入文档或进入 EventLog。
+- [x] 正常启动只读取`COUNCIS_*`；legacy `INTATIS_*`即使存在也不参与配置或
+  credential discovery。任何敏感值都不得打印、写入文档或进入EventLog。
 
 ## 4. 允许保留 `Intatis` 的白名单
 
 下列内容可以保留旧名称；除此之外，活跃源码/配置/产物不得出现旧身份：
 
-- 固定来源证明：`docs/INTATIS_BASELINE.md`、源 commit/tree/archive digest、来源路径与历史差异描述。
+- 历史固定来源证明只保留在Git历史；当前共享来源与revision见`docs/INTATIS_INTEGRATION.md`。
 - `NOTICE.md`、`ThirdPartyNotices/`、vendored patch/upstream ledger 中必须真实保留的历史 provenance、
   copyright、旧文件名或固定 upstream/local-adoption 记录。
 - Git 历史、dated `codex-report/`、历史事故样本、旧版本验证结果与 byte-exact 第三方标准。

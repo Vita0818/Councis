@@ -1,6 +1,6 @@
 //
 //  CouncisChatScreen.swift
-//  CouncisMac
+//  IntatisMac
 //
 //  The macOS Chat surface follows the native window material. Content uses
 //  semantic system Material, while the custom composer and controls adopt
@@ -14,18 +14,18 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 #endif
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisConversation
-import CouncisSharedUI
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisConversation
+import IntatisSharedUI
 
-struct CouncisMacScreenLayout {
+struct IntatisMacScreenLayout {
     let rawWidth: CGFloat
 
     private var width: CGFloat { max(rawWidth, 1) }
-    private var threadLayout: CouncisThreadContentLayout {
-        CouncisThreadContentLayout(rawWidth: rawWidth, contentMaxWidth: 900, messageMaxWidth: 560)
+    private var threadLayout: IntatisThreadContentLayout {
+        IntatisThreadContentLayout(rawWidth: rawWidth, contentMaxWidth: 900, messageMaxWidth: 560)
     }
 
     var isCompact: Bool { width < 700 }
@@ -61,7 +61,7 @@ struct CouncisChatScreen: View {
     let sessionTitle: String
 
     var body: some View {
-        CouncisChatSessionScreen(
+        IntatisChatSessionScreen(
             env: env,
             model: env.viewModel,
             sessionTitle: sessionTitle)
@@ -69,26 +69,27 @@ struct CouncisChatScreen: View {
     }
 }
 
-private struct CouncisChatSessionScreen: View {
+private struct IntatisChatSessionScreen: View {
     @ObservedObject var env: AppEnvironment
     @ObservedObject var model: ChatViewModel
     let sessionTitle: String
     @Environment(\.colorScheme) private var scheme
-    @State private var historyWindowUpperBound: Int?
+    @State private var followsLatest = true
     @State private var showAttachmentImporter = false
+    @Environment(\.intatisWindowContentWidth) private var windowContentWidth
     private static let bottomAnchorID = "councis-chat-thread-bottom"
 
     var body: some View {
         GeometryReader { proxy in
-            content(layout: CouncisMacScreenLayout(rawWidth: proxy.size.width))
+            content(layout: IntatisMacScreenLayout(rawWidth: proxy.size.width))
         }
-        .councisComposerAttachmentImport(
+        .intatisComposerAttachmentImport(
             isPresented: $showAttachmentImporter,
             onImport: { model.importDraftAttachments($0) },
             onFailure: { model.reportAttachmentImportFailure($0) })
     }
 
-    private func content(layout: CouncisMacScreenLayout) -> some View {
+    private func content(layout: IntatisMacScreenLayout) -> some View {
         VStack(spacing: 0) {
             header(layout: layout)
 
@@ -97,20 +98,20 @@ private struct CouncisChatSessionScreen: View {
             errorText(layout: layout)
 
             if !model.artifactProgress.isEmpty {
-                CouncisArtifactProgressStrip(progress: model.artifactProgress)
+                IntatisArtifactProgressStrip(progress: model.artifactProgress)
                     .frame(maxWidth: layout.contentMaxWidth)
                     .padding(.horizontal, layout.horizontalPadding)
                     .padding(.top, 8)
             }
 
-            CouncisComposer(model: model,
+            IntatisComposer(model: model,
                             catalog: env.providerCatalog,
                             onSelectModel: env.selectProviderModel(providerID:modelID:variantID:),
                             onAttach: {
                                 showAttachmentImporter = true
                             },
                             onSend: {
-                                historyWindowUpperBound = nil
+                                followsLatest = true
                                 model.send()
                             })
                 .frame(maxWidth: layout.contentMaxWidth)
@@ -121,14 +122,14 @@ private struct CouncisChatSessionScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func header(layout: CouncisMacScreenLayout) -> some View {
+    private func header(layout: IntatisMacScreenLayout) -> some View {
         CouncisPageHeader(title: sessionTitle, subtitle: nil)
         .padding(.horizontal, layout.horizontalPadding)
         .padding(.top, 24)
         .padding(.bottom, 10)
     }
 
-    @ViewBuilder private func errorText(layout: CouncisMacScreenLayout) -> some View {
+    @ViewBuilder private func errorText(layout: IntatisMacScreenLayout) -> some View {
         if let err = env.chatSessionError
             ?? model.voiceInput.errorText
             ?? model.errorText {
@@ -140,36 +141,24 @@ private struct CouncisChatSessionScreen: View {
         }
     }
 
-    @ViewBuilder private func messages(layout: CouncisMacScreenLayout) -> some View {
+    @ViewBuilder private func messages(layout: IntatisMacScreenLayout) -> some View {
         if model.messages.isEmpty {
             emptyState
         } else {
-            let historyWindow = threadHistoryWindow
+            let threadScope = IntatisThreadPresentationScope(
+                kind: .chat,
+                sessionID: env.chatSessionID)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 14) {
-                        if historyWindow.hasEarlier || historyWindow.hasLater {
-                            CouncisThreadHistoryPager(
-                                lowerBound: historyWindow.lowerBound,
-                                upperBound: historyWindow.upperBound,
-                                totalCount: historyWindow.totalCount,
-                                hasEarlier: historyWindow.hasEarlier,
-                                hasLater: historyWindow.hasLater,
-                                accessibilityPrefix: "chat.history",
-                                onEarlier: {
-                                    historyWindowUpperBound =
-                                        historyWindow.earlierRequestedUpperBound
-                                },
-                                onNewer: {
-                                    historyWindowUpperBound =
-                                        historyWindow.newerRequestedUpperBound
-                                },
-                                onLatest: {
-                                    historyWindowUpperBound = nil
-                                })
-                        }
-                        ForEach(historyWindow.items) { msg in
-                            CouncisMessageBubble(message: msg,
+                        IntatisContinuousThreadStack(
+                            items: model.messages,
+                            scope: threadScope,
+                            baseAdmission: .immediate,
+                            spacing: 14,
+                            rowID: { $0.id.rawValue }
+                        ) { msg in
+                            IntatisMessageBubble(message: msg,
                                                  rowWidth: layout.contentWidth,
                                                  maxWidth: layout.messageMaxWidth,
                                                  gutter: layout.messageGutter)
@@ -194,45 +183,50 @@ private struct CouncisChatSessionScreen: View {
                     scrollToBottom(proxy, animated: false)
                 }
                 .onChange(of: chatScrollSignature) { _ in
+                    guard followsLatest else { return }
                     scrollToBottom(proxy)
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    if historyWindow.hasLater {
-                        CouncisJumpToLatestButton(
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y
+                        + geometry.containerSize.height
+                        + geometry.contentInsets.bottom
+                        >= geometry.contentSize.height - 24
+                } action: { _, isAtBottom in
+                    followsLatest = isAtBottom
+                }
+                .overlay(alignment: .bottom) {
+                    if !followsLatest {
+                        IntatisJumpToLatestButton(
                             accessibilityIdentifier: "chat.jump-to-latest"
                         ) {
-                            historyWindowUpperBound = nil
+                            followsLatest = true
+                            scrollToBottom(proxy)
                         }
+                        .offset(x: IntatisWindowCenteredOverlayLayoutPolicy
+                            .horizontalOffset(
+                                windowWidth: windowContentWidth,
+                                detailWidth: layout.rawWidth,
+                                overlaySurfaceWidth: layout.rawWidth))
                     }
                 }
             }
-            .id(historyWindowUpperBound.map(String.init) ?? "latest")
         }
     }
 
     private var chatScrollSignature: String {
-        let historyWindow = threadHistoryWindow
-        guard let last = historyWindow.items.last else { return "0" }
+        guard let last = model.messages.last else { return "0" }
         return [
-            "\(historyWindow.lowerBound)",
-            "\(historyWindow.upperBound)",
+            "\(model.messages.count)",
             last.id.rawValue,
             "\(last.text.count)",
             "\(last.isComplete)",
-            "\(historyWindow.isLatest && model.isStreaming)"
+            last.turnStats?.id ?? "no-stats",
+            "\(model.isStreaming)"
         ].joined(separator: ":")
     }
 
-    private var threadHistoryWindow:
-        CouncisThreadHistoryWindow<ChatMessageView> {
-        .resolve(
-            allItems: model.messages,
-            requestedUpperBound: historyWindowUpperBound)
-    }
-
     private var showsVisibleThinkingIndicator: Bool {
-        threadHistoryWindow.isLatest
-            && model.isStreaming
+        model.isStreaming
             && model.messages.last?.role == .user
     }
 
@@ -259,7 +253,7 @@ private struct CouncisChatSessionScreen: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "sparkle")
-                .font(.councisFixed(size: 30, weight: .semibold))
+                .font(IntatisTypography.system(size: 30, weight: .semibold))
                 .foregroundStyle(CouncisTheme.accent(scheme))
             .frame(width: 76, height: 76)
 
@@ -268,15 +262,15 @@ private struct CouncisChatSessionScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func thinkingRow(layout: CouncisMacScreenLayout) -> some View {
-        CouncisThreadBubbleRow(isTrailing: false,
+    private func thinkingRow(layout: IntatisMacScreenLayout) -> some View {
+        IntatisThreadBubbleRow(isTrailing: false,
                                fillsAvailableWidth: true,
                                rowWidth: layout.contentWidth,
                                maxWidth: layout.messageMaxWidth,
                                gutter: layout.messageGutter) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                CouncisThinkingElapsedLabel(phaseID: chatThinkingPhaseID)
+                IntatisThinkingElapsedLabel(phaseID: chatThinkingPhaseID)
                     .font(CouncisType.caption(12))
                     .foregroundStyle(CouncisTheme.softText(scheme))
                 Spacer(minLength: 0)
@@ -286,12 +280,12 @@ private struct CouncisChatSessionScreen: View {
     }
 }
 
-struct CouncisChatModelMenu: View {
+struct IntatisChatModelMenu: View {
     let catalog: AppProviderCatalog
     let isBusy: Bool
     let isCompact: Bool
     var usesGlassButton: Bool = true
-    var help: String = CouncisLocalization.string("Switch model")
+    var help: String = IntatisLocalization.string("Switch model")
     let onSelect: (String, String, String?) -> Void
     @Environment(\.colorScheme) private var scheme
 
@@ -326,7 +320,7 @@ struct CouncisChatModelMenu: View {
     @ViewBuilder var body: some View {
         if usesGlassButton {
             selectionMenu
-                .councisComposerSelectionMenu()
+                .intatisComposerSelectionMenu()
         } else {
             selectionMenu
                 .buttonStyle(.borderless)
@@ -344,25 +338,25 @@ struct CouncisChatModelMenu: View {
                 label
         }
         .help(isBusy
-            ? CouncisLocalization.string("Model changes apply after the current response finishes")
+            ? IntatisLocalization.string("Model changes apply after the current response finishes")
             : help)
     }
 
     @ViewBuilder private var label: some View {
         if usesGlassButton && isCompact {
             labelContent
-                .councisComposerSelectionLabel()
+                .intatisComposerSelectionLabel()
         } else if usesGlassButton {
             labelContent
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .councisLiquidGlass(cornerRadius: 16, interactive: true)
+                .intatisLiquidGlass(cornerRadius: 16, interactive: true)
         } else {
             labelContent
                 .padding(.horizontal, 2)
                 .padding(.vertical, 1)
                 .frame(
-                    maxWidth: CouncisComposerControlMetrics.selectionMaxWidth,
+                    maxWidth: IntatisComposerControlMetrics.selectionMaxWidth,
                     alignment: .leading)
         }
     }
@@ -375,14 +369,14 @@ struct CouncisChatModelMenu: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Image(systemName: "chevron.down")
-                .font(.councisFixed(size: 10, weight: .semibold))
+                .font(IntatisTypography.system(size: 10, weight: .semibold))
                 .foregroundStyle(CouncisTheme.tertiaryText(scheme))
         }
         .frame(
             minWidth: isCompact || !usesGlassButton ? 0 : 190,
             maxWidth: usesGlassButton
                 ? (isCompact ? nil : 260)
-                : CouncisComposerControlMetrics.selectionMaxWidth,
+                : IntatisComposerControlMetrics.selectionMaxWidth,
             alignment: .leading)
     }
 
@@ -399,7 +393,7 @@ struct CouncisChatModelMenu: View {
     }
 }
 
-struct CouncisArtifactProgressStrip: View {
+struct IntatisArtifactProgressStrip: View {
     let progress: [ArtifactProgressSnapshot]
     @Environment(\.colorScheme) private var scheme
 
@@ -426,11 +420,11 @@ struct CouncisArtifactProgressStrip: View {
 
     private func localizedState(_ state: String) -> String {
         switch state.lowercased() {
-        case "queued": return CouncisLocalization.string("queued")
-        case "running": return CouncisLocalization.string("running")
-        case "completed": return CouncisLocalization.string("completed")
-        case "failed": return CouncisLocalization.string("failed")
-        case "cancelled": return CouncisLocalization.string("cancelled")
+        case "queued": return IntatisLocalization.string("queued")
+        case "running": return IntatisLocalization.string("running")
+        case "completed": return IntatisLocalization.string("completed")
+        case "failed": return IntatisLocalization.string("failed")
+        case "cancelled": return IntatisLocalization.string("cancelled")
         default: return state
         }
     }
@@ -438,7 +432,7 @@ struct CouncisArtifactProgressStrip: View {
 
 // MARK: - Message bubble
 
-struct CouncisMessageBubble: View {
+struct IntatisMessageBubble: View {
     let message: ChatMessageView
     let rowWidth: CGFloat
     let maxWidth: CGFloat
@@ -452,7 +446,7 @@ struct CouncisMessageBubble: View {
         case .user:      return nil
         case .assistant: return "Councis"
         case .agent:     return message.agent?.rawValue ?? "Councis"
-        case .system:    return CouncisLocalization.string("System")
+        case .system:    return IntatisLocalization.string("System")
         }
     }
 
@@ -461,7 +455,7 @@ struct CouncisMessageBubble: View {
     }
 
     var body: some View {
-        CouncisThreadBubbleRow(
+        IntatisThreadBubbleRow(
             isTrailing: isUser,
             fillsAvailableWidth: message.role == .assistant || message.role == .agent,
             rowWidth: rowWidth,
@@ -476,7 +470,7 @@ struct CouncisMessageBubble: View {
             bubbleBody
                 .padding(.horizontal, 15)
                 .padding(.vertical, 11)
-                .councisLiquidGlass(cornerRadius: 16)
+                .intatisLiquidGlass(cornerRadius: 20)
         } else {
             bubbleBody
                 .padding(.vertical, 8)
@@ -485,7 +479,7 @@ struct CouncisMessageBubble: View {
 
     private var bubbleBody: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if CouncisMessageHeaderPolicy.showsIdentity(for: message.role)
+            if IntatisMessageHeaderPolicy.showsIdentity(for: message.role)
                 || !message.tags.isEmpty {
                 HStack(spacing: 6) {
                     if let roleLabel {
@@ -496,7 +490,7 @@ struct CouncisMessageBubble: View {
                     }
                     if (message.role == .assistant || message.role == .agent),
                        let timestamp = message.timestamp {
-                        Text(CouncisMessageTimestampPresentation.string(for: timestamp))
+                        Text(IntatisMessageTimestampPresentation.string(for: timestamp))
                             .font(CouncisType.caption(10))
                             .monospacedDigit()
                             .foregroundStyle(CouncisTheme.tertiaryText(scheme))
@@ -507,15 +501,22 @@ struct CouncisMessageBubble: View {
                 }
             }
             if message.role == .assistant || message.role == .agent {
-                CouncisMessageContentView(
+                IntatisMessageContentView(
                     messageID: message.id.rawValue,
                     rawText: message.text,
                     isComplete: message.isComplete,
                     policy: .richText,
                     style: .councisMac(scheme))
                 if !message.citations.isEmpty {
-                    CouncisMessageCitationsView(
+                    IntatisMessageCitationsView(
                         citations: message.citations)
+                }
+                if message.isComplete {
+                    IntatisMessageFooter(
+                        messageID: message.id.rawValue,
+                        rawText: message.text,
+                        stats: message.turnStats,
+                        style: .councisMac(scheme))
                 }
             } else {
                 if !displayText.isEmpty {
@@ -528,10 +529,10 @@ struct CouncisMessageBubble: View {
                 if isUser, !message.attachments.isEmpty {
                     Label(
                         message.attachments.count == 1
-                            ? CouncisLocalization.format(
+                            ? IntatisLocalization.format(
                                 "%lld attachment",
                                 Int64(message.attachments.count))
-                            : CouncisLocalization.format(
+                            : IntatisLocalization.format(
                                 "%lld attachments",
                                 Int64(message.attachments.count)),
                         systemImage: "paperclip")
@@ -556,7 +557,7 @@ struct CouncisMessageBubble: View {
 
 // MARK: - Composer
 
-struct CouncisComposer: View {
+struct IntatisComposer: View {
     @ObservedObject var model: ChatViewModel
     let catalog: AppProviderCatalog
     let onSelectModel: (String, String, String?) -> Void
@@ -572,18 +573,18 @@ struct CouncisComposer: View {
     }
 
     var body: some View {
-        CouncisThreadComposer(
-            placeholder: CouncisLocalization.string("Message Councis..."),
+        IntatisThreadComposer(
+            placeholder: IntatisLocalization.string("Message Councis..."),
             input: $model.input,
             canSend: canSend,
             isInputDisabled: model.isBusy,
             style: .councisMac(scheme),
-            leadingAccessory: AnyView(CouncisComposerModelControl(
+            leadingAccessory: AnyView(IntatisComposerModelControl(
                 catalog: catalog,
                 isBusy: model.isBusy,
                 onSelectModel: onSelectModel)),
             inputLeadingAccessory: AnyView(
-                CouncisMacComposerAttachmentAccessory(
+                IntatisMacComposerAttachmentAccessory(
                     attachments: model.draftAttachments,
                     accessibilityPrefix: "chat",
                     isBusy: model.isImportingAttachments,
@@ -592,7 +593,7 @@ struct CouncisComposer: View {
                     onRemove: {
                         model.removeDraftAttachment($0)
                     })),
-            trailingAction: CouncisThreadComposerSecondaryAction(
+            trailingAction: IntatisThreadComposerSecondaryAction(
                 systemImage: model.voiceInput.buttonSystemImage,
                 help: model.voiceInput.buttonHelp,
                 isBusy: model.voiceInput.showsProgress,
@@ -601,13 +602,13 @@ struct CouncisComposer: View {
                 blocksSubmission: model.voiceInput.isEngaged,
                 action: { model.toggleVoiceInput() }),
             stopAction: model.isBusy
-                ? CouncisThreadComposerSecondaryAction(
+                ? IntatisThreadComposerSecondaryAction(
                     systemImage: "stop.fill",
-                    help: CouncisLocalization.string("Stop"),
+                    help: IntatisLocalization.string("Stop"),
                     action: { model.cancelCurrentOperation() })
                 : nil,
             accessory: {
-                CouncisComposerUsageStrip(
+                IntatisComposerContextStrip(
                     stats: model.latestTurnStats,
                     style: .councisMac(scheme))
             },
@@ -615,25 +616,25 @@ struct CouncisComposer: View {
     }
 }
 
-struct CouncisComposerModelControl: View {
+struct IntatisComposerModelControl: View {
     let catalog: AppProviderCatalog
     let isBusy: Bool
     let onSelectModel: (String, String, String?) -> Void
 
     var body: some View {
-        CouncisChatModelMenu(
+        IntatisChatModelMenu(
             catalog: catalog,
             isBusy: isBusy,
             isCompact: true,
             usesGlassButton: true,
-            help: CouncisLocalization.string("Switch model"),
+            help: IntatisLocalization.string("Switch model"),
             onSelect: onSelectModel)
     }
 }
 
 // MARK: - Settings panel
 
-struct CouncisSettingsPanel: View {
+struct IntatisSettingsPanel: View {
     @EnvironmentObject var env: AppEnvironment
     @Environment(\.colorScheme) private var scheme
     @State private var catalog = AppConfig.providerCatalog
@@ -649,16 +650,16 @@ struct CouncisSettingsPanel: View {
     @State private var isExportingDiagnostics = false
     @State private var diagnosticExportMessage: String?
     @State private var diagnosticExportSucceeded = false
-    @AppStorage(CouncisMessageRendererMode.defaultsKey)
-    private var rendererModeRawValue = CouncisMessageRendererMode.microsoft.rawValue
+    @AppStorage(IntatisMessageRendererMode.defaultsKey)
+    private var rendererModeRawValue = IntatisMessageRendererMode.microsoft.rawValue
 
     var body: some View {
         GeometryReader { proxy in
-            settingsContent(layout: CouncisMacScreenLayout(rawWidth: proxy.size.width))
+            settingsContent(layout: IntatisMacScreenLayout(rawWidth: proxy.size.width))
         }
         .sheet(isPresented: $showThirdPartyNotices) {
             NavigationStack {
-                CouncisThirdPartyNoticesView()
+                IntatisThirdPartyNoticesView()
                     .navigationTitle("Open-source notices")
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
@@ -670,11 +671,11 @@ struct CouncisSettingsPanel: View {
         }
     }
 
-    private func settingsContent(layout: CouncisMacScreenLayout) -> some View {
+    private func settingsContent(layout: IntatisMacScreenLayout) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 CouncisPageHeader(
-                    title: CouncisLocalization.string("Settings"),
+                    title: IntatisLocalization.string("Settings"),
                     subtitle: nil)
 
                 settingsCard(layout: layout)
@@ -714,8 +715,8 @@ struct CouncisSettingsPanel: View {
                     .font(CouncisType.body(14, .semibold))
                 Spacer(minLength: 12)
                 Picker("Message rendering", selection: rendererModeSelection) {
-                    Text("Rich Markdown").tag(CouncisMessageRendererMode.microsoft.rawValue)
-                    Text("Plain text safe mode").tag(CouncisMessageRendererMode.plainSafe.rawValue)
+                    Text("Rich Markdown").tag(IntatisMessageRendererMode.microsoft.rawValue)
+                    Text("Plain text safe mode").tag(IntatisMessageRendererMode.plainSafe.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -742,13 +743,13 @@ struct CouncisSettingsPanel: View {
         }
     }
 
-    private func advancedSettingsCard(layout: CouncisMacScreenLayout) -> some View {
+    private func advancedSettingsCard(layout: IntatisMacScreenLayout) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Divider().opacity(0.45)
 
             DisclosureGroup(isExpanded: $isAdvancedSettingsExpanded) {
                 VStack(alignment: .leading, spacing: 18) {
-                    CouncisMCPSettingsView()
+                    IntatisMCPSettingsView()
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                     Divider().opacity(0.45)
@@ -776,7 +777,7 @@ struct CouncisSettingsPanel: View {
         .frame(maxWidth: layout.settingsCardMaxWidth, alignment: .leading)
     }
 
-    private func diagnosticExportRow(layout: CouncisMacScreenLayout) -> some View {
+    private func diagnosticExportRow(layout: IntatisMacScreenLayout) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Divider().opacity(0.45)
 
@@ -824,22 +825,22 @@ struct CouncisSettingsPanel: View {
         Button(action: exportDiagnostics) {
             Label(
                 isExportingDiagnostics
-                    ? CouncisLocalization.string("Generating Diagnostic Logs…")
-                    : CouncisLocalization.string("Export Diagnostic Logs…"),
+                    ? IntatisLocalization.string("Generating Diagnostic Logs…")
+                    : IntatisLocalization.string("Export Diagnostic Logs…"),
                 systemImage: isExportingDiagnostics
                     ? "hourglass"
                     : "square.and.arrow.down")
                 .font(CouncisType.body(14, .semibold))
                 .foregroundStyle(.primary)
         }
-        .councisGlassButton()
+        .intatisGlassButton()
         .disabled(isExportingDiagnostics)
         .help("Choose where to save a local diagnostic ZIP")
         .accessibilityIdentifier("settings.export-diagnostic-logs")
     }
 
-    private var rendererLaunchOverride: CouncisMessageRendererMode? {
-        CouncisMessageRendererMode.launchOverride()
+    private var rendererLaunchOverride: IntatisMessageRendererMode? {
+        IntatisMessageRendererMode.launchOverride()
     }
 
     /// The Phase 0 renderer stored `rich`. Render routing already migrates that
@@ -848,7 +849,7 @@ struct CouncisSettingsPanel: View {
     private var rendererModeSelection: Binding<String> {
         Binding(
             get: {
-                CouncisMessageRendererMode.resolve(
+                IntatisMessageRendererMode.resolve(
                     persistedRawValue: rendererModeRawValue,
                     arguments: []).rawValue
             },
@@ -858,17 +859,17 @@ struct CouncisSettingsPanel: View {
     private var rendererModeHelpText: String {
         if let rendererLaunchOverride {
             let label = rendererLaunchOverride == .plainSafe
-                ? CouncisLocalization.string("Plain text safe mode")
-                : CouncisLocalization.string("Rich Markdown")
-            return CouncisLocalization.format(
+                ? IntatisLocalization.string("Plain text safe mode")
+                : IntatisLocalization.string("Rich Markdown")
+            return IntatisLocalization.format(
                 "Current launch is forced to %@. This picker is saved immediately for the next launch without an override, so a rescued session can remain in safe mode.",
                 label)
         }
-        return CouncisLocalization.string(
+        return IntatisLocalization.string(
             "This choice is saved and applied immediately; it is independent of provider Save. Rich Markdown uses the audited upstream renderer with LaTeX math typesetting enabled; remote images and syntax highlighting remain disabled for the first release. Plain text safe mode bypasses Markdown entirely. Raw session data is unchanged.")
     }
 
-    @ViewBuilder private func settingsCard(layout: CouncisMacScreenLayout) -> some View {
+    @ViewBuilder private func settingsCard(layout: IntatisMacScreenLayout) -> some View {
         if layout.settingsUsesColumns {
             HStack(alignment: .top, spacing: 18) {
                 providerList
@@ -892,7 +893,7 @@ struct CouncisSettingsPanel: View {
         }
     }
 
-    @ViewBuilder private func settingsActions(layout: CouncisMacScreenLayout) -> some View {
+    @ViewBuilder private func settingsActions(layout: IntatisMacScreenLayout) -> some View {
         if layout.isCompact {
             VStack(alignment: .trailing, spacing: 10) {
                 savedLabel
@@ -929,20 +930,20 @@ struct CouncisSettingsPanel: View {
                 .font(CouncisType.body(14, .semibold))
                 .foregroundStyle(.primary)
         }
-        .councisGlassButton()
+        .intatisGlassButton()
         .help(settingsStorageNote)
     }
 
-    private func testProviderButton(layout: CouncisMacScreenLayout) -> some View {
+    private func testProviderButton(layout: IntatisMacScreenLayout) -> some View {
         Button(action: testProvider) {
             Label(isTestingProvider
-                    ? CouncisLocalization.string("Testing")
-                    : CouncisLocalization.string(layout.isCompact ? "Test" : "Test Provider"),
+                    ? IntatisLocalization.string("Testing")
+                    : IntatisLocalization.string(layout.isCompact ? "Test" : "Test Provider"),
                   systemImage: isTestingProvider ? "hourglass" : "checkmark.seal")
                 .font(CouncisType.body(14, .semibold))
                 .foregroundStyle(.primary)
         }
-        .councisGlassButton()
+        .intatisGlassButton()
         .disabled(isTestingProvider)
         .help("Save current settings and run a small model health check")
     }
@@ -953,7 +954,7 @@ struct CouncisSettingsPanel: View {
                 .font(CouncisType.body(14, .semibold))
                 .foregroundStyle(.primary)
         }
-        .councisGlassButton(prominent: true)
+        .intatisGlassButton(prominent: true)
     }
 
     @ViewBuilder private var providerHealthSummary: some View {
@@ -965,15 +966,15 @@ struct CouncisSettingsPanel: View {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(providerHealthReports.enumerated()), id: \.offset) { _, report in
                     VStack(alignment: .leading, spacing: 4) {
-                        Label(CouncisLocalization.string(report.displayTitle),
+                        Label(IntatisLocalization.string(report.displayTitle),
                               systemImage: report.isOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                             .font(CouncisType.caption(12, .semibold))
                             .foregroundStyle(report.isOK ? .green : .red)
-                        Text(CouncisLocalization.providerHealthSummary(report))
+                        Text(IntatisLocalization.providerHealthSummary(report))
                             .font(CouncisType.caption(11, .medium))
                             .foregroundStyle(CouncisTheme.softText(scheme))
                             .lineLimit(2)
-                        Text(CouncisLocalization.providerHealthDetail(report))
+                        Text(IntatisLocalization.providerHealthDetail(report))
                             .font(CouncisType.caption(11, .regular))
                             .foregroundStyle(CouncisTheme.softText(scheme))
                             .fixedSize(horizontal: false, vertical: true)
@@ -992,7 +993,7 @@ struct CouncisSettingsPanel: View {
                 Spacer()
                 Button(action: addProvider) {
                     Image(systemName: "plus")
-                        .font(.councisFixed(size: 13, weight: .semibold))
+                        .font(IntatisTypography.system(size: 13, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .help("Add provider")
@@ -1006,7 +1007,7 @@ struct CouncisSettingsPanel: View {
         }
     }
 
-    private func providerDetail(layout: CouncisMacScreenLayout) -> some View {
+    private func providerDetail(layout: IntatisMacScreenLayout) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             if let providerIndex = selectedProviderIndex {
                 field("Provider name",
@@ -1036,7 +1037,7 @@ struct CouncisSettingsPanel: View {
                 field("Chat endpoint",
                       text: chatEndpointBinding(providerIndex),
                       placeholder: AppConfig.defaultChatEndpoint)
-                Text(CouncisLocalization.format(
+                Text(IntatisLocalization.format(
                     "Key source: %@",
                     apiKeySourceLabel(for: catalog.providers[providerIndex])))
                     .font(CouncisType.caption(11, .medium))
@@ -1059,7 +1060,7 @@ struct CouncisSettingsPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.councisFixed(size: 12, weight: .medium))
+                        .font(IntatisTypography.system(size: 12, weight: .medium))
                         .foregroundStyle(selected ? CouncisTheme.accent(scheme) : CouncisTheme.tertiaryText(scheme))
                     Text(provider.title)
                         .font(CouncisType.body(13, .semibold))
@@ -1083,14 +1084,14 @@ struct CouncisSettingsPanel: View {
         .buttonStyle(.plain)
     }
 
-    private func activeModelPicker(providerIndex: Int, layout: CouncisMacScreenLayout) -> some View {
+    private func activeModelPicker(providerIndex: Int, layout: IntatisMacScreenLayout) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Active model")
                 .font(CouncisType.caption(12, .semibold))
                 .foregroundStyle(CouncisTheme.softText(scheme))
             Picker("", selection: $catalog.selectedModelID) {
                 ForEach(catalog.providers[providerIndex].models) { model in
-                    CouncisModelTitleLabel(model: model).tag(model.id)
+                    IntatisModelTitleLabel(model: model).tag(model.id)
                 }
             }
             .labelsHidden()
@@ -1099,7 +1100,7 @@ struct CouncisSettingsPanel: View {
         }
     }
 
-    private func modelList(providerIndex: Int, layout: CouncisMacScreenLayout) -> some View {
+    private func modelList(providerIndex: Int, layout: IntatisMacScreenLayout) -> some View {
         DisclosureGroup(isExpanded: $isModelManagementExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -1144,7 +1145,7 @@ struct CouncisSettingsPanel: View {
 
     @ViewBuilder private func modelEditorRow(providerIndex: Int,
                                              modelIndex: Int,
-                                             layout: CouncisMacScreenLayout) -> some View {
+                                             layout: IntatisMacScreenLayout) -> some View {
         if layout.settingsUsesColumns {
             HStack(spacing: 8) {
                 modelIDField(providerIndex: providerIndex, modelIndex: modelIndex)
@@ -1183,7 +1184,7 @@ struct CouncisSettingsPanel: View {
     private func removeModelButton(providerIndex: Int, modelIndex: Int) -> some View {
         Button(action: { removeModel(providerIndex: providerIndex, modelIndex: modelIndex) }) {
             Image(systemName: "trash")
-                .font(.councisFixed(size: 13, weight: .medium))
+                .font(IntatisTypography.system(size: 13, weight: .medium))
                 .foregroundStyle(CouncisTheme.tertiaryText(scheme))
         }
         .buttonStyle(.plain)
@@ -1201,7 +1202,7 @@ struct CouncisSettingsPanel: View {
             withAnimation { saved = true }
         } catch {
             saved = false
-            settingsError = CouncisLocalization.format(
+            settingsError = IntatisLocalization.format(
                 "Could not save settings: %@",
                 error.localizedDescription)
         }
@@ -1216,17 +1217,17 @@ struct CouncisSettingsPanel: View {
             saved = false
             #if canImport(AppKit)
             if !NSWorkspace.shared.open(url) {
-                settingsError = CouncisLocalization.format(
+                settingsError = IntatisLocalization.format(
                     "Could not open JSON config at %@",
                     url.path)
             }
             #else
-            settingsError = CouncisLocalization.string(
+            settingsError = IntatisLocalization.string(
                 "Opening JSON config is not available on this platform.")
             #endif
         } catch {
             saved = false
-            settingsError = CouncisLocalization.format(
+            settingsError = IntatisLocalization.format(
                 "Could not open JSON config: %@",
                 error.localizedDescription)
         }
@@ -1247,7 +1248,7 @@ struct CouncisSettingsPanel: View {
                 providerHealthReports = await env.healthCheckSelectedProvider()
             } catch {
                 saved = false
-                settingsError = CouncisLocalization.format(
+                settingsError = IntatisLocalization.format(
                     "Could not test provider: %@",
                     error.localizedDescription)
             }
@@ -1262,8 +1263,8 @@ struct CouncisSettingsPanel: View {
         panel.nameFieldStringValue =
             CouncisDiagnosticExportService.suggestedArchiveName()
         panel.canCreateDirectories = true
-        panel.title = CouncisLocalization.string("Export Diagnostic Logs")
-        panel.message = CouncisLocalization.string(
+        panel.title = IntatisLocalization.string("Export Diagnostic Logs")
+        panel.message = IntatisLocalization.string(
             "Choose where to save a local diagnostic ZIP")
         CouncisMacProcessDiagnostics.shared.setKnownModalPresented(true)
         defer {
@@ -1282,18 +1283,18 @@ struct CouncisSettingsPanel: View {
                     to: destinationURL)
                 diagnosticExportSucceeded = true
                 if result.collectionErrorCount == 0 {
-                    diagnosticExportMessage = CouncisLocalization.format(
+                    diagnosticExportMessage = IntatisLocalization.format(
                         "Diagnostic logs were exported as %@.",
                         result.archiveFileName)
                 } else {
-                    diagnosticExportMessage = CouncisLocalization.format(
+                    diagnosticExportMessage = IntatisLocalization.format(
                         "Diagnostic logs were exported as %@ with %lld collection warnings recorded in manifest.json.",
                         result.archiveFileName,
                         Int64(result.collectionErrorCount))
                 }
             } catch {
                 diagnosticExportSucceeded = false
-                diagnosticExportMessage = CouncisLocalization.format(
+                diagnosticExportMessage = IntatisLocalization.format(
                     "Could not export diagnostic logs: %@",
                     error.localizedDescription)
             }
@@ -1358,9 +1359,9 @@ struct CouncisSettingsPanel: View {
 
     private func providerSubtitle(_ provider: AppProviderSettings) -> String {
         if provider.models.count == 1 {
-            return CouncisLocalization.string("1 model")
+            return IntatisLocalization.string("1 model")
         }
-        return CouncisLocalization.format(
+        return IntatisLocalization.format(
             "%lld models",
             Int64(provider.models.count))
     }
@@ -1424,48 +1425,48 @@ struct CouncisSettingsPanel: View {
     private func apiKeyPlaceholder(for provider: AppProviderSettings) -> String {
         let ref = AppConfig.apiKeyRef(for: provider)
         if ref.source != .authFile {
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "Using %@; enter key to replace",
                 apiKeySourceLabel(for: provider))
         }
         return env.hasAPIKey(for: provider)
             ? "••••••••••••••••"
-            : CouncisLocalization.string("Enter API key")
+            : IntatisLocalization.string("Enter API key")
     }
 
     private func apiKeySourceLabel(for provider: AppProviderSettings) -> String {
         let ref = AppConfig.apiKeyRef(for: provider)
         switch ref.source {
         case .authFile:
-            return CouncisLocalization.string("auth file")
+            return IntatisLocalization.string("auth file")
         case .environment:
             return ref.account.isEmpty
-                ? CouncisLocalization.string("environment")
-                : CouncisLocalization.format("env %@", ref.account)
+                ? IntatisLocalization.string("environment")
+                : IntatisLocalization.format("env %@", ref.account)
         case .file:
-            return CouncisLocalization.string("secret file")
+            return IntatisLocalization.string("secret file")
         case .providerConfig:
-            return CouncisLocalization.string("provider config")
+            return IntatisLocalization.string("provider config")
         case .keychain:
-            return CouncisLocalization.string("legacy keychain")
+            return IntatisLocalization.string("legacy keychain")
         }
     }
 
     private var settingsStorageNote: String {
         if let path = AppConfig.externalConfigDescription {
-            return CouncisLocalization.format("Config: %@", path)
+            return IntatisLocalization.format("Config: %@", path)
         }
-        return CouncisLocalization.format(
+        return IntatisLocalization.format(
             "Config: %@",
             AppConfig.editableConfigDescription)
     }
 
     @ViewBuilder private func field(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(CouncisLocalization.string(label))
+            Text(IntatisLocalization.string(label))
                 .font(CouncisType.caption(12, .semibold))
                 .foregroundStyle(CouncisTheme.softText(scheme))
-            TextField(CouncisLocalization.string(placeholder), text: text)
+            TextField(IntatisLocalization.string(placeholder), text: text)
                 .textFieldStyle(.plain)
                 .font(CouncisType.mono(13))
                 .foregroundStyle(CouncisTheme.deepText(scheme))
@@ -1477,10 +1478,10 @@ struct CouncisSettingsPanel: View {
 
     @ViewBuilder private func secureField(_ label: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(CouncisLocalization.string(label))
+            Text(IntatisLocalization.string(label))
                 .font(CouncisType.caption(12, .semibold))
                 .foregroundStyle(CouncisTheme.softText(scheme))
-            SecureField(CouncisLocalization.string(placeholder), text: text)
+            SecureField(IntatisLocalization.string(placeholder), text: text)
                 .textFieldStyle(.plain)
                 .font(CouncisType.mono(13))
                 .foregroundStyle(CouncisTheme.deepText(scheme))
@@ -1496,7 +1497,7 @@ struct CouncisSettingsPanel: View {
     }
 }
 
-struct CouncisModelTitleLabel: View {
+struct IntatisModelTitleLabel: View {
     let model: AppProviderModel
 
     var body: some View {

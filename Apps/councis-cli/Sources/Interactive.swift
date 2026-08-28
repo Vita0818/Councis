@@ -1,14 +1,14 @@
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisConversation
-import CouncisTools
-import CouncisPermission
-import CouncisAgentKernel
-import CouncisCowork
-import CouncisSkills
-import CouncisArtifacts
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisConversation
+import IntatisTools
+import IntatisPermission
+import IntatisAgentKernel
+import IntatisCowork
+import IntatisSkills
+import IntatisArtifacts
 
 enum REPLExit { case quit; case switchTo(Mode) }
 
@@ -99,8 +99,16 @@ func runMode(_ config: CLIConfig, mode startMode: Mode, workspace: URL) async th
     while true {
         let exit: REPLExit
         switch mode {
-        case .chat, .code: exit = try await chatCodeREPL(config, mode: mode, workspace: workspace)
-        case .cowork:      exit = try await coworkREPL(config, workspace: workspace)
+        case .chat:
+            exit = try await chatCodeREPL(
+                config,
+                mode: .chat,
+                workspace: workspace)
+        case .code, .cowork:
+            exit = try await codexRuntimeREPL(
+                config,
+                mode: mode,
+                workspace: workspace)
         }
         switch exit {
         case .quit: return
@@ -128,6 +136,10 @@ private let replHelp = """
 """
 
 private func chatCodeREPL(_ config: CLIConfig, mode: Mode, workspace: URL) async throws -> REPLExit {
+    guard mode == .chat else {
+        throw IntatisError.config(
+            "CLI Code/Cowork must run through Codex App Server")
+    }
     let registry = ProviderRegistry(
         config: config.providerConfig(),
         resolver: CLIExactSecretResolver(config: config))
@@ -346,7 +358,7 @@ private func chatCodeREPL(_ config: CLIConfig, mode: Mode, workspace: URL) async
                             \.providerAttachment))
             case .code:
                 guard let codeArtifactStore else {
-                    throw CouncisError.config(
+                    throw IntatisError.config(
                         "CLI Code artifact storage is unavailable.")
                 }
                 let attachmentIDs = try await preserveAgentImages(
@@ -633,6 +645,7 @@ private let coworkHelp = """
 
 """
 
+@available(*, unavailable, message: "CLI Cowork uses Codex App Server")
 private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REPLExit {
     let inferenceProfiles = try await CLIInferenceProfiles.load(config: config)
     let registry = ProviderRegistry(
@@ -645,7 +658,6 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
         config: config,
         registry: registry)
     var defaultProfile = inferenceProfiles.defaultBinding
-    let judgeBinding = inferenceProfiles.judgeBinding
     let permissionReviewerBinding = inferenceProfiles.permissionReviewerBinding
     let goalVerifierInference = CLIGoalVerifierInferenceBinding()
     var pending = PendingAttachments()
@@ -695,7 +707,7 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
                 return nil
             }
             guard let workspaceLease else {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "MCP dispatch requires an exact workspace lease")
             }
             let activation =
@@ -797,7 +809,7 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
         autoReviewResult = await enableAutomaticReview()
     } else if restoredEvents.isEmpty {
         // The workspace passed to `councis cowork` is the user's explicit
-        // initial-session authorization. Settings and all three local identities
+        // initial-session authorization. Settings and both local identities
         // are committed as one durable batch; no model request occurs here.
         let freshSettings = CoworkSessionSettings(
             sessionID: await log.sessionID,
@@ -819,8 +831,6 @@ private func coworkREPL(_ config: CLIConfig, workspace: URL) async throws -> REP
             profile: .reviewed,
             coordinationDepth: Agent.defaultCoordinationDepth),
             settings: freshSettings,
-            judgeModel: judgeBinding.modelID,
-            judgeInferenceBinding: judgeBinding,
             permissionReviewerModel: permissionReviewerBinding.modelID,
             permissionReviewerInferenceBinding: permissionReviewerBinding) {
         case .attached, .alreadyAttached:

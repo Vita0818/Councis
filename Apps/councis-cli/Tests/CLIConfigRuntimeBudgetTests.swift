@@ -1,5 +1,5 @@
 import Foundation
-import CouncisAgentKernel
+import IntatisAgentKernel
 import XCTest
 @testable import CouncisCLI
 

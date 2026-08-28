@@ -40,17 +40,22 @@ cat > "$plist" <<'PLIST_HEADER'
 PLIST_HEADER
 
 for scheme in \
-	CouncisCore \
-	CouncisProtocol \
-	CouncisProviders \
-	CouncisConversation \
-	CouncisArtifacts \
-	CouncisMultimodal \
-	CouncisSharedUI \
-	CouncisTools \
-	CouncisPermission \
-	CouncisAgentKernel \
-	CouncisCowork
+	IntatisCore \
+	IntatisProtocol \
+	IntatisProviders \
+	IntatisConversation \
+	IntatisArtifacts \
+	IntatisMultimodal \
+	IntatisSharedUI \
+	IntatisTools \
+	IntatisKnowledge \
+	IntatisSkills \
+	IntatisPermission \
+	IntatisMCP \
+	IntatisMCPStdio \
+	IntatisAgentKernel \
+	IntatisCowork \
+	IntatisCodexRuntime
 do
 	cat >> "$plist" <<PLIST_SCHEME
 		<key>$scheme.xcscheme</key>

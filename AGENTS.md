@@ -1,64 +1,37 @@
 # Councis 项目常驻上下文
 
-## 外部依赖优先与禁止功能兜底（Vitemis 强制规则）
+本文件继承 `/Users/vita/Vitemis/AGENTS.md` 与
+`/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。冲突时采用更具体、更严格且不违反上级指令的规则。
 
-本项目继承 `/Users/vita/Vitemis/docs/DEPENDENCY_POLICY.md`。本节是强制约束，不是建议。
+## 项目定位
 
-- 当用户指定、仓库已经采用，或经许可证、provenance、安全与平台审查可采用的外部依赖提供同等能力时，必须直接集成该依赖的官方 API 或官方扩展点。
-- 不得自行重写同等能力，不得新增替代 adapter、shim、compatibility layer、wrapper、proxy、facade、协议翻译层、parallel backend、preview backend、shadow implementation 或“先兜底、以后再换”的实现。
-- 本地代码只允许保留官方 API 必需的最薄生命周期、类型、权限、配置和 bundle 接线；不得重新实现、解释、扩展或替代依赖的核心能力。
-- exact 依赖因版本、构建、签名、许可证、平台、安全或官方 API 限制无法接入时，必须停止该能力、明确失败、报告 blocker 并请求用户决定；不得静默降级、切换 legacy/另一 provider/backend、使用 cache/mock/简化路径或继续交付不完整替代实现。
-- 现有 fallback、adapter 或重复实现不构成先例，后续不得扩展。安全 fail-closed 与明确要求的旧数据解码/迁移不是功能兜底，但必须保持最窄范围，不能演化成备用产品实现。
-- 只有用户针对 exact 依赖、exact 范围和退出条件作出的新明文决定才能例外。
+Councis 是 Intatis 的第一方下游产品覆盖层，不再保存 Intatis 源码快照。
 
-当前业务源码直接采用 `/Users/vita/Vitemis/Intatis` 的干净提交
-`120eda64fcb098f1bdc4852fee886450e80b3722`（提交标题 `v0.54`；tree
-`7fe2842aeec8fa08bec80e34342f971dc4226dcd`；`project.yml` 产品版本
-`0.48 (48)`）作为根工作树快照。这里没有需要仿照、同步或继续保留的
-`Upstream/Intatis` / `Intatis/` 副本；后续实现直接修改本仓库根目录下的
-`Apps/`、`Packages/`、`Vendor/`、配置、文档与测试，不得回到来源仓库修改。
+```text
+/Users/vita/Vitemis/Intatis            唯一共享实现源码
+  -> SwiftPM package Intatis
+  -> IntatisCodexRuntime + Intatis* products
+       -> CouncisMac product host / resources / branding
+       -> councis CLI host
+```
 
-本次 2026-08-14 整体基线替换只保留以下 Councis 控制层文件：根 `AGENTS.md`、
-`docs/COUNcis_IDENTITY.md`、`docs/INTATIS_BASELINE.md`，以及允许带最小项目覆盖的
-`docs/README.md`、`docs/CURRENT_STATE.md`、`docs/NEXT_TARGET.md`。其余 tracked
-源码、配置、测试、通用文档、脚本、资源与声明均取自上述固定 source tree；精确
-复制边界、排除项和验证结果见 `docs/INTATIS_BASELINE.md`。
+- `Package.swift` 与 `project.yml` 必须通过相对路径 `../Intatis` 直接依赖唯一 Intatis checkout。
+- Intatis 中的 agent loop、tool scheduling、context、native subagents、approval、MCP、Skills、Knowledge、文档/浏览器工具与共享协议不得复制回 Councis。
+- Councis 本地只保留产品身份、App/CLI 宿主接线、品牌视觉、图标、本地化、产品配置入口、必要测试与发行接线。
+- Intatis checkout 的修改会在 Councis 下一次构建时生效；已运行 App 不热替换。
+- 除非用户明确授权跨仓修改，Councis 任务只读 `/Users/vita/Vitemis/Intatis`，不得清理、覆盖或提交其中现有改动。
 
-Councis 已在上述固定来源之上完成自己的底层产品身份脱钩，精确边界见
-`docs/COUNcis_IDENTITY.md` 与 `docs/COUNcis_DECOUPLING_CHECKLIST.md`。唯一 shipping App 是 macOS
-Developer ID/direct-distribution `Councis`（target/scheme `CouncisMac`，Bundle ID
-`com.Vita0818.Councis`）；Swift package、15 个 public library products、3 个内部 C/guard targets、
-CLI、测试、配置/存储/日志/协议 canonical namespace 均使用 Councis。iOS App 与遗留 Mac App Store
-target 已删除。macOS 仍只显示 Cowork，Chat/Code 源码、session 历史兼容和 runtime 没有删除；fresh
-Cowork 仍固定登记 read-only ordinary data-plane `@judge`。`Intatis` 只允许作为固定来源 provenance、
-明确的 `LegacyIntatisCompatibility` 只读迁移/解码值和对应回归夹具存在；任何新 writer、target、
-路径、配置、CLI 或协议 identity 不得再使用旧品牌。不得扩大 Judge 的权限、控制面或 UI 范围。
+## 外部依赖优先与禁止兜底
 
-本文件继承 `/Users/vita/Vitemis/AGENTS.md` 中的 Vitemis 通用 Agent 规则。若本文件与通用规则冲突，在不违反系统和用户指令的前提下，以更具体、更严格的项目规则为准。
+- 直接使用 Intatis 官方 SwiftPM products、`CodexRuntimeHostContract` 与 App Server extension。
+- 不新增 wrapper、facade、protocol translator、MCP translator、compatibility shim、parallel backend、shadow runtime、preview runtime 或旧 Swift AgentKernel fallback。
+- `dynamicTools` 只承载 Councis/Intatis 已登记的第一方业务工具；App Server继续拥有 agent loop 和工具选择。
+- exact Intatis API、runtime binary、版本、derivation、签名、许可证或平台条件不成立时，明确失败并停止对应能力，不切换旧实现、另一 provider、shell/Python 重写、mock 或简化路径。
+- 安全 fail-closed 与明确的旧数据只读解码不是功能 fallback，但必须保持最窄范围。
 
-本文是 AI Agent 每轮进入本仓库时的入口文件。执行任何代码修改、配置修改、构建脚本修改或测试源码修改之前，必须先按顺序阅读并核对下列文档：
+## 每轮入口检查
 
-0. `/Users/vita/Vitemis/AGENTS.md`
-1. `docs/VERSIONING.md`
-2. `docs/CURRENT_STATE.md`
-3. `docs/COUNcis_IDENTITY.md`
-4. `docs/INTATIS_BASELINE.md`
-5. `docs/MACOS_DISTRIBUTION.md`
-6. `docs/PROJECT_MAP.md`
-7. `docs/ARCHITECTURE.md`
-8. `docs/DO_NOT_BREAK.md`
-9. `docs/OPEN_SOURCE_REUSE.md`
-10. `docs/TESTING.md`
-11. `docs/NEXT_TARGET.md`（如果存在）
-12. `docs/COWORK_PRINCIPLES.md`（修改 Cowork / AgentKernel / MessageBus / 权限 / agent 编排前必读）
-
-如果文档与源码、工程配置、测试或脚本冲突，必须以当前源码和配置为准，并在最终报告中明确指出冲突位置和采用源码为准的原因。
-
-> 仓内现有 `docs/COWORK_AGENT_ARCHITECTURE.md` / `COWORK_TASK_CONTEXT_MODEL.md` / `COWORK_CURRENT_FINDINGS.md` / `COWORK_MIGRATION_PLAN.md` / `COWORK_AGENT_INVOCATION_MODEL.md` / `COWORK_V0_10_SMOKE.md` / `COWORK_V0_10_STATUS.md` 是 Cowork 设计文档与状态记录，可作为深入参考；`docs/COWORK_PRINCIPLES.md` 是其原则提炼。
-
-## 工作目录检查
-
-每轮开始先在项目根目录执行：
+在项目根目录运行：
 
 ```sh
 pwd
@@ -66,122 +39,114 @@ git rev-parse --show-toplevel
 git status --short
 ```
 
-要求：
+`pwd` 与 Git root 必须同时为 `/Users/vita/Vitemis/Councis`。不匹配时停止修改。
+读取状态后区分用户已有改动与本轮改动；不得覆盖、回退或清理用户工作。
 
-- `pwd` 与 `git rev-parse --show-toplevel` 必须指向同一个仓库根目录：`/Users/vita/Vitemis/Councis`。
-- 如果当前目录不是 Git root，停止修改，只报告路径问题。
-- 读取 `git status --short` 后，先区分用户已有改动与本轮计划改动；不得覆盖、回退或清理用户已有改动。
+## 修改前必读
 
-## 修改边界
+按任务范围依次核对：
 
-本仓库是 Apple-first、Swift-native 优先的本地 AI 工作区（Swift 多 target，SwiftPM + XcodeGen），继承 Chat（普通多模态对话）/ Code（单 agent 本地工作区）/ Cowork（多 agent 本地工作区协作）三个 runtime 产品面。Councis macOS 当前只显示 Cowork 入口，但 Chat/Code 实现与历史兼容仍保留；项目不再提供 iOS App。允许按 `docs/OPEN_SOURCE_REUSE.md` 选择性复用兼容许可证的公开源码；当前实现是否实际包含上游代码以 `NOTICE.md` 为准。
+1. `/Users/vita/Vitemis/AGENTS.md`
+2. `docs/COUNcis_IDENTITY.md`
+3. `docs/VERSIONING.md`
+4. `docs/CURRENT_STATE.md`
+5. `docs/MACOS_DISTRIBUTION.md`
+6. `docs/PROJECT_MAP.md`
+7. `docs/ARCHITECTURE.md`
+8. `docs/DO_NOT_BREAK.md`
+9. `docs/OPEN_SOURCE_REUSE.md`
+10. `docs/TESTING.md`
+11. `docs/NEXT_TARGET.md`（存在时）
+12. `docs/COWORK_PRINCIPLES.md`（Cowork/runtime/permission/agent 任务）
+13. `docs/AI_PROVIDER_MODEL_CONFIGURATION.md`（provider/model/credential 任务）
+14. `/Users/vita/Vitemis/Intatis/docs/CODEX_RUNTIME_INTEGRATION.md`（runtime 接入任务）
 
-macOS 只通过 Developer ID 签名、公证和直接下载分发；不做 Mac App Store
-版本。Mac App Store target/profile/entitlements 与 iOS App target/source 已按用户明确授权删除，
-不得重新引入或把 App Sandbox 恢复为产品约束。此决定不弱化 Councis 自有权限链、Workspace
-confinement、managed-terminal Seatbelt、Hardened Runtime、签名/公证或最受限默认 platform
-profile；精确合同见 `docs/MACOS_DISTRIBUTION.md`。
+若文档与源码、manifest、工程或测试冲突，以当前源码与构建配置为准，并在最终报告指出冲突。
 
-未来常规任务可以按用户要求修改业务源码；但在只要求项目自查或文档更新的任务中，只允许修改：
+## 当前产品边界
 
-- `AGENTS.md`
-- `docs/` 下的项目说明文档
+- 唯一 App：macOS Developer ID/direct-distribution `CouncisMac`。
+- Bundle ID：`com.Vita0818.Councis`。
+- macOS 可见产品入口：Cowork；Chat/Code 兼容源码由共享 Intatis 图保留，但不作为平行 App 导航。
+- CLI：`councis`，保留 Chat/Code/Cowork 命令；Code/Cowork 使用 `CodexAppServerSession`，Chat 使用共享 ChatLoop。
+- 不存在 iOS App target、Mac App Store target、App Sandbox 产品分支或第二 App runtime。
+- 产品版本事实源仍为 `project.yml`。
 
-除非用户明确要求，不要修改：
+## Codex Runtime 接入合同
 
-- `Apps/`（`CouncisMac` / `councis-cli`）
-- `Packages/`（当前 15 个公共库、3 个内部 C/guard target、开发期 MCP
-  conformance executable 及其 Tests；精确清单以 `Package.swift` 为准）
-- `Package.swift`
-- `project.yml`
-- `Makefile`
-- `NOTICE.md`
+- 宿主 API major：`CodexRuntimeHostContract.publicAPIMajorVersion == 1`。
+- exact runtime：`codex-cli 0.145.0-intatis.4`，并独立校验 pinned derivation ID。
+- 每个 Councis session 必须拥有自己的 `runtimeRootURL`、isolated `CODEX_HOME`、workspace、credential 与权限状态；不同 session/project 不共享可写 runtime root。
+- 开发期可由 `COUNCIS_CODEX_RUNTIME` 显式指定 executable；值缺失时可使用 Intatis runtime 的受审开发发现路径。canonical 值存在但非法时不得回退。
+- 正式 App 必须把当前架构 exact executable 放入自己的 sealed bundle并完成 Councis 自己的签名、公证和 Gatekeeper 流程；`../Intatis` 与用户目录 executable 不是发行 fallback。
+- credential 只存在内存和 App Server 子进程环境，不进入 argv、runtime files、EventLog、日志、文档或 UI。
+- Code/Cowork send/start/cancel/shutdown 只调用 Codex Runtime；旧 `AgentLoop` / `Orchestrator` 不得成为 production execution path。
+- Cowork Agents、child history/message/archive、Goal、WorkTask、MCP、Skills、Knowledge 和 session rename 直接使用同一 Intatis checkout 的第一方 public surface；不得在 Councis 重建一套等价状态机。
 
-## 禁止事项
+## Councis 产品身份
 
-- 不执行破坏性 Git 操作：`git reset --hard`、`git clean -fd`、`git checkout .`、强制 push、删除用户未提交文件。
-- 未经用户明文要求具体 Git 操作，不 add、不 commit、不 push、不创建 PR；编辑、整理、修复、验证或准备工作都不等于提交请求。
-- 若用户要求提交，只提交当前 Git root 中与本任务相关的文件；不得递归进入、暂存、提交或推送子仓库、submodule、nested Git repo 或依赖 checkout。
-- 不引入新依赖，不改构建脚本，不改测试源码，除非任务明确要求。当前第三方依赖与
-  vendored 派生源码以 `NOTICE.md`、`ThirdPartyNotices/` 和
-  `docs/OPEN_SOURCE_REUSE.md` 为准；任何新增或升级都须先过许可证与 provenance 审查。
-- 不把密钥、token、证书私钥、shared secret、账号密码、完整指纹、完整 API 响应、完整转写文本或个人隐私路径写入文档。
-- 不绕过 3 层权限门（DeterministicPolicyGate / ModelPermissionReviewer / PermissionEngine）、PathConfinement 工作区边界、SecretScanner、Mediator 秘密拦截或 Keychain 凭据隔离。
-- 不把 Cowork 实现为硬编码递归 agent 树（main/coordinator/worker/leaf 永久角色）；遵循 `docs/COWORK_PRINCIPLES.md`。
-- 不让 `AgentLoop` 直接同步递归调用另一个 `AgentLoop`；用 mailbox / scheduler / event flow。
-- 不让 worker 默认获得 coordinator 工具（spawn_agent / remove_agent / delegate_task）；能力须经 `CapabilityLease` 显式授予。
-- 不使用泄露/私有源码或 prompt，不复制第三方产品名称、Logo、图标、截图、UI 资产、商标性外观或品牌文案。兼容许可证的公开源码、公开 model-facing prompt 和测试可以选择性复制、翻译或修改，但必须先固定上游 commit、核对文件/依赖许可证、记录 provenance、更新 `NOTICE.md`，并遵守 `docs/OPEN_SOURCE_REUSE.md`；不得把派生实现错误标成独立原创。
-- 不让复用的外部源码、依赖或 runtime 绕过 PermissionEngine、CapabilityLease、WorkspaceLease、PathConfinement、SecretScanner、Mediator、durable tool execution 或 EventLog；Apple 平台继续以 Swift 原生为主，非 Swift runtime 不得借共享源码创建未经授权的新 App target。
-- 不弱化平台边界：项目不提供 iOS App 或 Mac App Store target；未知 host 必须保持 `.restricted`，不得包含 shell/git/patch/local-agent workspace 执行。
-- 不把事件日志 JSONL schema、Envelope 格式、`seq` 单调性、ArtifactStore 索引格式当作一次性内部细节随意改动。
+用户可见和产品拥有的 canonical 值继续使用 Councis：
 
-## 项目理解要求
+- `CouncisMac`、`councis`、`com.Vita0818.Councis`；
+- `~/Library/Application Support/Councis`；
+- `~/.config/councis/councis.json[c]`；
+- `COUNCIS_CONFIG`、`COUNCIS_AUTH_FILE`、`COUNCIS_MODEL`、
+  `COUNCIS_BASE_URL`、`COUNCIS_API_KEY`、`COUNCIS_REASONING`、
+  `COUNCIS_CODEX_RUNTIME`；
+- `councis.*` UserDefaults 和 product-host identity。
 
-修改前至少确认：
+共享 module/type/wire/runtime identity 使用 Intatis 是预期事实，不得为了字符串纯度复制或包装它们。
 
-- 入口：`Apps/CouncisMac/Sources/CouncisMacApp.swift`（`@main struct CouncisMacApp`，唯一 Apple App）、`Apps/councis-cli/Sources/CouncisCLI.swift`（CLI）。
-- Chat 链路：`ChatViewModel` → `GoalInputParser`（行首 `/goal` 只生成可选 Goal 元数据，provider 收到清洗后的文本）→ `ChatLoop`（无工具）→ `EventLog`(JSONL append-only) → `ConversationProjection`。
-- Code 链路：`CodeViewModel` → `GoalInputParser` → 共享 headless `AgentRuntime.code` → `AgentLoop`（maxIterations 50）→ `ContextBuilder` + `RuntimeEnvironmentManifest` → `OpenAIWireProvider` → `runTool` → `PermissionEngine`（3 层门）→ `EventLog` → `CodeProjection`。
-- macOS Sidebar `+` 与空白 Cowork 启动页的既有 `New` 控件只可展开两个短菜单项：`Choose Folder…` 与 `No Folder`；不得增加说明段落、提示卡或独立模式页面。前者恢复现有 NSOpenPanel + user-selected workspace admission；后者在 inference binding 预检后，为 fresh session 创建 `~/Library/Application Support/Councis/Workspaces/<SessionID>` owner-only 独立工作区。两条路径都必须通过 session-owned bookmark、WorkspaceLease、root identity、PermissionEngine 与同一十事件 bootstrap；托管目录与 `<session>/events.jsonl`、artifacts、bookmark 和其它控制面文件分离。删除 session 不得顺带删除工作区内容。
-- Cowork 链路：`CoworkViewModel` → `GoalInputParser` + `CoworkMentionRouter` → `SubmittedIntentStore`（outbox → 原子 `user_message + queued`）→ `Orchestrator.runtime`（先取得 session writer lease）→ FIFO scheduler → 共享 headless `AgentRuntime.cowork` → `AgentLoop` → `PermissionEngine` → durable tool execution ticket → executor → `EventLog`；`MessageBus` → `Mediator`。fresh Cowork 在任何模型请求前，以同一原子 10-event batch 登记完整 session settings、`@main`、`@judge` 与 `@permission-reviewer` 各自的 workspace/capability lease 和 identity；三者共享 canonical workspace，但 identity、lease 与 exact inference binding 均独立。`@judge` 的 exact base binding 只来自顶层 `judge_model`；字段缺失时仅在配置解析层一次性继承同一 JSON 文档的顶层 `model`，显式空值、错误类型、未知/禁用或不可解析 route、兼容来源缺失/未知及整份已选配置损坏/不可读均 fail closed，不得回退 UI/session default、live/historical `@main` 或后续 rebind，也不增加 UI。Judge 是固定 read_only ordinary data-plane agent、depth 0；不能 spawn/remove/rebind，不获得 coordinator 或 run-control 工具，也不参与省略目标/auto worker 选择，但可由 Main 通过现有显式 delegate/message/ask 路径使用。`@permission-reviewer` 的 exact binding 仍由顶层 `permission_reviewer_model` 独立决定；同样只接受已配置的 `<provider>/<model-id>` base profile，字段缺失时只继承同一 JSON 文档顶层 `model`，非法来源 fail closed。reviewer 为 read_only、空工具/通信/委派且 depth 0。GoalVerifier 继续冻结首个可解析的 exact `@main` binding，与 Judge/reviewer 配置互不替代。GUI/CLI 默认启用该保留控制面 agent，`AgentPermissionResponder` 把结构化 `PermissionReviewTask` 交给独立 `PermissionReviewControlPlane` FIFO/single-flight；reviewer 有独立 timeout/cancel 与可选 soft token warning，不占普通 scheduler 槽，只返回 `allow` / `deny`。reviewer 默认不得注入 `temperature`、output-token 或字符上限；只有用户/host 显式策略或真实上游/上下文约束存在时才可传递相应控制。request/settled 均先落 EventLog，allow 只有 settled 成功后生效；pre-submit caller cancel 直接返回 typed deny、不创建 review lifecycle；timeout、malformed、provider/persistence failure 和已登记 review 在 terminal-claim 前被观察到的 cancel durable deny 当前调用，不转 GUI 人工等待；claim 后 cancel 保留唯一 settlement 但最终 authorization delivery deny。每个 provider dispatch 都使用 exact `{reviewTaskID, nonce}` generation；provider/timeout 竞争同代首 terminal，caller cancel 由同步 request token、actor path 与下游围栏共同处理。production 按冻结 reviewer exact binding 逐代 fresh-resolve provider wrapper；timeout/cancel 只影响当前 call，若已有 active generation 就只 retire 该代，late/duplicate output 无权影响新代或执行工具。`ToolCallingProvider.stream` 必须立即返回 request-owned stream，并传播 consumer termination；不得用 `Task.detached` 宣称支持同步永久阻塞实现。旧 `provider_still_stopping` 只保留 legacy decode。Phase A 后 GUI composer 始终可编辑，Send 先冻结并持久化本地提交；reviewer 未就绪只显示状态并使后续 ask-class tool fail closed，不阻止普通主请求。CLI `/auto` 重启，只有用户明确 `/default` 才进入人工模式。审查者不得作为普通 send/delegate/message/ask 目标，不得运行嵌套 `AgentLoop`。
-- Cowork automatic 的 request-owned provider-facing business schema 增加 required string `__councis_authorization_context`；任何 `strict:true` function 的 decorated copy 必须递归满足 `required == properties.keys` 与 `additionalProperties:false`，上述 strict object 不变量违规必须在发网前 typed fail closed。旧 `__intatis_authorization_context` 只作为保留字段识别并在业务执行前拒绝，不能进入 executor。`tool_search` 本身保持原样，但其 request-owned `tool_search_output` 中延迟发现的 function/namespace 子工具也必须装饰；durable output 不变。原 ToolDescriptor/business required/executor schema 不变；宿主仅在 deterministic gate 实际进入 automatic ask 时消费并验证该字段，deterministic allow/deny 忽略其语义。acting model 在原 business function call/generation 内用这一句话说明“为什么这个 exact action 服务当前任务”，不得复制全文、声明风险或自行给出权限结论；不再有第二次 acting-model Reporter 请求。宿主先剥离 sidecar，再用 stripped canonical business arguments 做原 schema、gate、authorization、durable history 与执行。live reviewer 只收到 complete safe business arguments、complete same-generation sidecar 和 mechanical host binding/gate/lease/action facts；不得发送 TaskContract objective/role/deliverable、causal userGoal、用户消息、assistant history、PDF 或图片原文。valid sidecar 只在当前 turn 的 acting-model 内存 conversation 中保留为正确格式示例，raw sidecar 与 transient exact-args 不进入 EventLog/permission lifecycle，durable history 仍只保存 stripped business call。missing/malformed/secret-bearing sidecar 是可纠正的 acting-model tool-input failure：只写 failed/runtimeFailed `tool_result`，不创建 `permission_request` / `permission_resolved`、不调用 reviewer、也不消耗 permission denial fuse；同 business args 修正后仍可进入 reviewer。binding/authorization snapshot 无法证明则另行 typed fail closed。manual/nonautomatic 模式出现保留字段必须在业务执行前拒绝。automatic responder 必须实现 bound-invocation overload，live cached/duplicate request 必须复验 exact transient invocation，recovered allow 不得重新交付；唯一无 acting-model sidecar 的 automatic `agent.attach` 必须走 dedicated host-admission entry，并核对 exact admission identity 与先行 durable events。Cowork 若误注入 in-engine reviewer，control-plane 前必须 fail closed；shipping 默认不得这样配置。reviewer 无工具，只接受短 reason + final-line ASCII `ALLOW` / `DENY`；对 live bound invocation，reviewer reason 与 provider diagnostic 不得进入 durable lifecycle/tool-result，改用固定宿主文案。旧 Reporter context/type 仅保留 legacy decode/reconciliation，不得恢复第二次 acting-model dispatch。acting model 仍可能在普通 assistant 文本中自行复述 sidecar，该普通文本按既有消息规则持久化；malformed acting-provider error preview 仍依赖通用 bounded/secret sanitizer。live 路径也没有固定 sidecar byte ceiling 或 `review_input_too_large` admission，未来上限只能由真实 route budget 推导，不得把这些后续能力写成当前事实。
-- Cowork run/mailbox 终态：只有 exact `@main` root 可见 `finish_run` / `stop_run`，模型只给 reason，所有 identity 由宿主绑定；close intent 先成为 in-process admission tombstone，EventLog first-write claim 必须先于既有 admission 等待与 exact-run drain 落盘，user/runtime/host-lifecycle source 保真，恢复时不得复活，普通 final 不伪造显式 claim。mailbox 按 authority class 收窄：ordinary message one-way/no ACK，information request 只允许一个 exact `reply_message(inReplyTo:)` terminal，information reply receipt 不得再 reply/ACK；确需继续时用 fresh `request_information(based_on: reply MessageID)`，保留 conversation root。因此 `information_replied` 只终结当前 correlation，不得成为长期协作的全局回复禁令。
-- Code/Cowork 的 model-facing 因果合同：同一 assistant response 的 multi-call batch 既不是 transaction，也不是 concurrency request/guarantee，只能包含互相独立且对任意 host execution order 都正确的 calls；任何 identity/ID/attachment/state 依赖必须等待前置调用成功 `ToolResult` 后在下一 tool-call round 使用，planned/future object 不得冒充已存在。WorkTask 是当前 Cowork Session 内的独立记录，不含 Run、Goal、Agent 或 Turn owner；`task_create` 不分配 agent。`delegate_task` 只能使用已经 attached 的 data-plane agent，省略 target 时也只选择现有 idle worker；需要新 agent 时必须先独立 `spawn_agent` 并等待成功 ToolResult。production `task_create` / `task_update` 只有首个 WorkTask EventLog append 前的 Orchestrator preflight rejection 可 typed `not_started`；append/persistence/lost-ack 仍是 unknown/manual，不得按错误字符串或 `CouncisError` case 全局推断安全重试。内部 delegation 必须先完成 preflight/Mediator，再以一个 EventLog batch 提交 message、delegation、lease、invocation、queue 与 WorkTask linkage；batch 前拒绝不得留下部分事实。
-- 权限 3 层：`DeterministicPolicyGate`（纯函数、模型无关、deny 终局；普通写入/网络/exec 进入 ask 流）→ `ModelPermissionReviewer`（只能收窄 gate `pass`，不能放行 hard deny）→ `PermissionEngine`（`askUser` 交给当前 `PermissionResponder`；Cowork 自动模式只接受 control-plane allow/deny，人工模式须由用户显式切换）。
-- Phase C 权限/turn 合同：每个新 Chat/Code/Cowork turn 使用稳定 `TurnID` 并追加唯一语义的 `turn_outcome`；权限请求携带 turn/tool-call/authorization correlation 与 manual/automatic mode。`EventLog.registerPermissionRequest` 对同一 RequestID first-write-wins，`settlePermissionRequest` 在 complete-known history 与跨进程锁内执行 first-terminal CAS：exact duplicate 幂等，冲突 payload/terminal fail closed。人工 `Decline Call` 只写当前 call 的 typed denied `tool_result` 并允许模型继续；`Cancel Turn` 写 permission terminal 后中断整个 turn，禁止伪造 denied tool result。user/policy/reviewer/sandbox/runtime/cancel 必须保留 typed source；明确的 sandbox wrapper startup denial 结算为 `sandbox_denied/not_started` 且不自动 retry，普通 nonzero/EPERM 不得误分类。权限投影保持 FIFO，重显复用同一 RequestID，任意一项终结不得重排其余项；取消/终止必须先 drain tool/provider 清理，再写 task/turn terminal 并恢复 caller。
-- Phase L 应用生命周期：macOS 的 Chat/Code/Cowork runtime 由进程级 `AppSessionRuntimeManager` 按 exact `{SessionKind, SessionID}` 持有，窗口只持有当前展示选择；切换 mode/session、Command-W 或关闭最后窗口不得隐式 stop。删除 session 必须先精确 drain 对应 runtime，其他窗口收到 removal 后退出已删除详情。Command-Q 先关闭新操作 admission，再同时广播所有 runtime stop，并在有界 deadline 后允许进程退出；超时不伪造 settled。冷启动只 replay/reconcile：历史 active Goal durable 转为 paused（达到预算则 budget-limited），历史 running/stopping 由既有恢复路径显示 interrupted，不自动调用 provider；只有明确 Retry、Resume、Send 或 CLI `/auto|/default` 后的显式 data-plane 动作才可继续。Chat/Code/Cowork shutdown 均须取消并等待本 runtime 已登记的 provider/tool/operation task，再释放权限 waiter、subscription 与 workspace scope。
-- 平台边界：项目不再提供 iOS App；`PlatformProfile.current` 默认 `.restricted`（最受限），任何 host 必须显式选择 `.macDeveloperID` 才能获得 workspace/shell/MCP 能力。共享库保留的 Apple 条件编译不构成 iOS 产品面。
-- macOS 分发边界：唯一发行 App 是 Developer ID/direct-distribution
-  `CouncisMac` / `Councis.app`。Mac App Store target 已删除，不得重新引入其 App Sandbox 限制；
-  不得把“无 App Store 约束”误解为可以移除
-  PermissionEngine、Lease、PathConfinement、SecretScanner、Seatbelt 或
-  Hardened Runtime。
-- 持久化：`EventLog`（`~/Library/Application Support/Councis/<session>/events.jsonl`）是 session canonical truth；append/batch 在跨进程锁内分配单调 `seq`，settings revision 也在同一事务边界分配，返回值/subscriber 发布实际落盘 bytes 反解的 canonical Envelope；production Cowork runtime 全生命周期持有 writer lease，旧 JSONL 必须继续可解码。`session.json` 是 owner-only、schema v2、可由 EventLog 重建的派生投影；`workspace-access.plist` 继续是独立 owner-only binary capability 文件。全局 UserDefaults canonical key 为 `councis.providerCatalog.v1` / `councis.providerSelection.v1`；高级配置 canonical 入口为 `COUNCIS_CONFIG`、`~/.config/councis/councis.json[c]` 与 Application Support 下 `councis.json[c]`。`LegacyIntatisCompatibility` 只读发现旧 bundle domain、旧 UserDefaults、旧配置/auth 路径和旧环境变量；新写入不得继续落旧 namespace，旧敏感路径仍永久受 SecretScanner/PathConfinement/terminal deny floor 保护。provider/model options/variants 必须按原始 JSON 保真到 wire adapter，凭据只从受控 env/file/auth/config reference 懒加载，不得写入事件、投影或项目文档。
-- Phase A durable 文件：`submitted-intent-outbox.json` 是 session-owned schema v1 owner-only 暂存，只在 canonical `user_message + queued(attempt 1)` 原子落盘前存在；`SubmissionID` first-write-wins、attempt one-based 单调、retry 复用 exact task 且不重复 user message。`ArtifactStore` 的 root/blobs/index/lock 必须 current-UID、no-follow、owner-only/single-link，索引在稳定锁内 read-merge-atomic-write；unsafe mode/symlink/hardlink fail closed，无法证明 rename durability 时返回 `commitUncertain`。
-- production Code/Cowork registry 不暴露 raw `run_shell`；macOS DeveloperID 与 CLI 的 shell-capable Code/Cowork runtime 改为显式提供 runtime-owned `exec_command` / `write_stdin` managed terminal。它是真实持久进程/PTY，但每次启动和后续输入仍必须经过 ToolRegistry、CapabilityLease、PermissionEngine 与 durable tool ticket，并按 exact session/agent/task/attempt/WorkspaceLease/root identity 隔离；默认断网，macOS 走 Seatbelt，取消、task terminal 与 runtime shutdown 必须先 drain 进程。交互输入不得原样进入 EventLog/permission preview，延迟回显也必须清洗；危险命令 guard 必须跨调用跟踪已支持的行输入，无法可靠还原的 cursor/completion/history/escape/keymap 改写 fail closed，partial-write uncertainty 必须终止 session。terminal executor 必须把不可移除的敏感凭据路径清单并入任何新旧 WorkspaceLease，并以大小写无关的 Seatbelt denied rules 执行。read-only worker、reviewer、restricted/禁用 shell 的 host 不得看到这两个工具。不得重新启用 raw `run_shell`，不得退回裸 shell；Linux 仅在 bwrap 可用时运行，否则 fail closed，PTY 当前仍不支持。structured browser/document backend 与 managed terminal 分流，但同样必须有 timeout/cancel 与进程清理。
-- 普通 Office/HTML/EPUB 读取不再暴露聚合 `document_read`，而是五个 exact 工具 `read_docx` / `read_pptx` / `read_xlsx` / `read_html` / `read_epub`。每个 schema 只有 `path` 与可选 `maxCharacters`，格式由工具名固定，统一通过固定 Docling high-level converter 输出有界 Markdown；不得恢复 model-authored format/options/backend、手写对象遍历或 raw Docling dict。五个 reader 的 intent 为 exact `structured_read_only + safeToReplay`：解析失败必须结算为 failed observation 并允许同批其他读取继续，不能升级成整轮终止；该语义不得扩宽到 OCR、写入、网络或任意 exec。fresh lease 发五个 exact capability；legacy `documentRead` 只为旧 session 映射到五个新 reader，不恢复旧 concrete tool。PDF 普通读取仍走 `read_pdf`，Docling PDF 只保留显式 OCR 路径。
-- 安全：provider credential 只按 env/file/auth JSON/Councis-owned OpenCode-compatible config `options.apiKey` reference 在真实请求时懒加载；canonical auth 路径为 `~/.config/councis/auth.json`，旧 Intatis auth/config 仅作受保护只读桥接，不默认读取 OpenCode app 自身配置。MCP secret 继续使用 macOS data-protection Keychain，canonical service 为 `com.Vita0818.Councis.mcp.credentials`。`PathConfinement`、`SecretScanner`、Developer ID Hardened Runtime 与 managed terminal 的 workspace-scoped Seatbelt/default-network-deny 均保持。
+## 安全与持久化边界
 
-不确定的模块必须标注 `UNKNOWN` 或 `需要后续确认`，不要编造。
+- Councis session EventLog、ArtifactStore、workspace bookmark 与 UI projection 仍位于 Councis Application Support root，但实现直接来自 Intatis products。
+- EventLog append-only、单调 `seq`、WAL、checked replay、owner-only storage 与 writer lease 不得弱化。
+- `WorkspaceLease`、`CapabilityLease`、`PathConfinement`、`PermissionEngine`、`SecretScanner`、Mediator、durable tool execution 与 managed process cleanup 继续有效。
+- App Server/native collaboration 是唯一 agent execution/scheduling core；WorkTask 只保留独立 UI 卡片记录，不得恢复旧 scheduler 或 MessageBus 执行后端。
+- 旧 runtime/thread/toolset 不做静默迁移。无法证明 exact mapping 时要求新 session，不能创建空 thread 或注入旧历史冒充迁移成功。
+- GUI 不读取、打印或写入真实 secret；不得读取 `.env*`、Keychain、auth JSON、provider config secret 值、证书或私钥。
 
-## 文档索引
+## UI 不变量
 
-- `docs/COUNcis_IDENTITY.md`：Councis 当前完整产品身份、固定 `@judge` 与 legacy/provenance 边界；
-  具体运行状态同时看 `docs/CURRENT_STATE.md` 和源码。
-- `docs/COUNcis_DECOUPLING_CHECKLIST.md`：2026-08-17 底层品牌脱钩的用户决策、执行批次、
-  legacy 白名单与验证清单。
-- `docs/INTATIS_BASELINE.md`：本次直接根工作树快照的来源、tree、复制边界、排除项与核验方式。
-- `docs/PROJECT_MAP.md`：目录、target、入口、关键文件、生成物和脚本地图。
-- `docs/MACOS_DISTRIBUTION.md`：macOS Developer ID 直接分发、唯一 `CouncisMac` target、
-  已删除 App Store/iOS 产品面、运行时安全边界和默认验证矩阵。
-- `docs/ARCHITECTURE.md`：总体架构、主要链路、数据模型、权限与安全机制。
-- `docs/CURRENT_STATE.md`：当前真实状态、已有能力、风险、工作区改动。
-- `docs/TESTING.md`：环境、构建、测试、lint/format 与手动验证方式。
-- `docs/DO_NOT_BREAK.md`：工程禁区、数据格式、协议、路径和回归要求。
-- `docs/OPEN_SOURCE_REUSE.md`：开源源码/公开 prompt/依赖准入、provenance、Apple-first 集成、NOTICE 与上游升级规则。
-- `docs/NEXT_TARGET.md`：当前 Councis 底层品牌脱钩目标与完成边界；不得自动继承来源项目的临时发行目标。
-- `docs/COWORK_PRINCIPLES.md`：Cowork 架构原则（agent 身份/任务契约/能力租约/上下文投影/递归禁止/安全边界/实现顺序/测试期望）。
+- 保持 Councis 品牌、图标、系统动态 window canvas、无色原生 Liquid Glass、JetBrains Mono、Cowork-only sidebar 和现有 composer/rail/thread 交互。
+- 用户消息仍是唯一普通对话气泡；assistant/agent/system 正文直接位于 canvas；permission/task/error 使用结构化表面。
+- root window canvas 必须继续使用系统动态 window surface；不得写死暖色、浅色、深色或引入 Intatis 用户可见品牌。
+- Sidebar `+` 与空白 Cowork `New` 必须继续只提供 `Choose Folder…` / `No Folder`；后者创建 session-owned managed workspace。
+- `judge_model` 当前解析为只读 native Codex child profile `judge`，不得获得 coordination、run-control 或最终决定权。旧产品合同还要求它在首个 provider request 前已经作为固定 ordinary agent 登记；当前 public Runtime 没有 host-side child spawn/attach 入口，因此不得把 profile advertisement 宣称为完整等价。不得为补齐它恢复第二 runtime；需要 Intatis public surface 或用户明确调整该产品合同。
+- 共享 Intatis UI 类型可以直接使用，但 App 层必须提供 Councis 主题与可见文案；不得复制共享 renderer/runtime 只为重命名内部类型。
 
-## 完成标准
+## Git 与删除规则
 
-完成任务前至少做到：
+- 未经用户明确要求具体 Git 操作，不 add、不 commit、不 push、不建 PR、不 stash。
+- 禁止 `git reset --hard`、`git clean`、`git checkout .`、强制 push 或删除用户未提交文件。
+- 删除旧复制快照时必须先证明目标已退出 `Package.swift`、`project.yml` 和 active source import graph；整目录删除要列出精确范围并取得所需安全批准。
+- 不删除或修改 `/Users/vita/Vitemis/Intatis` 的源码、runtime kit、未提交文件或 Git 状态。
 
-- 说明本轮实际阅读/检查过哪些源码、配置或测试。
-- 只修改任务范围内文件。
-- 保留用户已有改动。
-- 运行与任务相称的检查；文档任务至少运行 `git diff --check` 与 `git status --short`。
-- 将本轮已完成的持久性改动及时回写到相关项目文档；若无需更新文档，最终报告说明原因。
-- 如未运行构建或测试，最终报告必须明确写"未运行构建/测试"。
+## 验证与完成标准
 
-## 最终报告格式
+与改动相称地至少运行：
 
-最终报告建议包含：
+- `swift package dump-package`：确认唯一 local package dependency 是 `../Intatis`；
+- `swift test --filter CouncisRuntimeIntegrationTests --disable-automatic-resolution`；
+- `swift build --product councis --disable-automatic-resolution`；
+- CLI/runtime 改动运行 `CouncisCLITests`；
+- `xcodegen generate`；
+- `CouncisMac` unsigned Debug build；高风险/发行改动再跑 universal Release；
+- `scripts/check-version-consistency.sh`、`scripts/check-brand-boundary.sh`；
+- `git diff --check`、`git status --short`。
 
-1. `MODEL_CHECK_RESULT`：当前模型名称；无法确认时写无法确认。
-2. `PATH_CHECK_RESULT`：`pwd`、Git root、是否匹配预期。
-3. `FILES_WRITTEN`：新增/修改文件。
-4. `PROJECT_AUDIT_SUMMARY`：识别到的项目结构、主要模块和关键链路。
-5. `DOCS_CONTENT_SUMMARY`：各文档内容摘要。
-6. `VALIDATION_RESULT`：实际运行命令与结果。
-7. `UNCERTAINTIES`：无法确认、需要人工确认的点。
-8. `NEXT_RECOMMENDED_ACTION`：下一步建议；不要自动继续改业务源码。
+完成前说明实际阅读的源码/配置/测试、只修改任务范围、保留用户改动，并及时更新当前文档。
+未运行的构建、测试、真实 provider、签名、公证或 GUI 项必须明确标为未运行或 `UNKNOWN`。
+
+## 最终报告
+
+建议包含：
+
+1. `MODEL_CHECK_RESULT`
+2. `PATH_CHECK_RESULT`
+3. `FILES_WRITTEN`
+4. `PROJECT_AUDIT_SUMMARY`
+5. `DOCS_CONTENT_SUMMARY`
+6. `VALIDATION_RESULT`
+7. `UNCERTAINTIES`
+8. `NEXT_RECOMMENDED_ACTION`

@@ -1,10 +1,10 @@
 #if (DEBUG || COUNCIS_RENDERER_VALIDATION) && canImport(SwiftUI)
 import CryptoKit
 import Foundation
-import CouncisConversation
-import CouncisCore
-import CouncisProtocol
-import CouncisSharedUI
+import IntatisConversation
+import IntatisCore
+import IntatisProtocol
+import IntatisSharedUI
 import SwiftUI
 #if canImport(AppKit)
 import AppKit
@@ -28,8 +28,8 @@ struct RendererFixtureView: View {
     private let autoExitSeconds: Double?
     private let mathModeTitle: String
     private let resultRecorder: RendererFixtureResultRecorder?
-    @AppStorage(CouncisMessageRendererMode.defaultsKey)
-    private var rendererModeRawValue = CouncisMessageRendererMode.microsoft.rawValue
+    @AppStorage(IntatisMessageRendererMode.defaultsKey)
+    private var rendererModeRawValue = IntatisMessageRendererMode.microsoft.rawValue
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         let configuration = RendererFixtureLaunchConfiguration(arguments: arguments)
@@ -48,7 +48,7 @@ struct RendererFixtureView: View {
             : "LaTeX inline + display"
     }
 
-    private var style: CouncisThreadStyle {
+    private var style: IntatisThreadStyle {
         .councisMac(colorScheme)
     }
 
@@ -102,14 +102,14 @@ struct RendererFixtureView: View {
     private var fixtureHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Councis renderer fixture")
-                .font(.councisTitle.bold())
+                .font(IntatisTypography.system(.title, bold: true))
             Text("Offline · SwiftStreamingMarkdown derivative · swift-markdown 0.8.0")
-                .font(.councisSubheadline)
+                .font(IntatisTypography.system(.subheadline))
                 .foregroundStyle(.secondary)
 
             Picker("Renderer", selection: rendererModeSelection) {
-                Text("Rich Markdown").tag(CouncisMessageRendererMode.microsoft.rawValue)
-                Text("Plain safe").tag(CouncisMessageRendererMode.plainSafe.rawValue)
+                Text("Rich Markdown").tag(IntatisMessageRendererMode.microsoft.rawValue)
+                Text("Plain safe").tag(IntatisMessageRendererMode.plainSafe.rawValue)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 360)
@@ -124,18 +124,18 @@ struct RendererFixtureView: View {
             .accessibilityIdentifier("renderer.fixture.stage")
 
             Text("Active workload: \(fixtureStage.title)")
-                .font(.councisCaption)
+                .font(IntatisTypography.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("renderer.fixture.stage-status")
 
             Text("Math mode: \(mathModeTitle)")
-                .font(.councisCaption)
+                .font(IntatisTypography.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("renderer.fixture.math-mode")
 
             if let rendererLaunchOverride {
                 Text("Current launch override: \(rendererLaunchOverride == .plainSafe ? "Plain safe" : "Rich Markdown"). Picker stores the next unforced launch mode.")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("renderer.fixture.mode-override")
             }
@@ -165,6 +165,37 @@ struct RendererFixtureView: View {
                     id: "fixture-code",
                     source: Self.codeSelectionSource,
                     isComplete: true)
+            }
+        case .messageFooter:
+            fixtureSection(
+                "Message footer",
+                identifier: "renderer.fixture.message-footer"
+            ) {
+                VStack(alignment: .leading, spacing: 5) {
+                    message(
+                        id: "fixture-message-footer",
+                        source: Self.messageFooterSource,
+                        isComplete: true)
+                    IntatisMessageFooter(
+                        messageID: "fixture-message-footer",
+                        rawText: Self.messageFooterSource,
+                        stats: nil,
+                        responsesUsage: ResponsesUsageSnapshot(
+                            id: "fixture-message-footer-responses-usage",
+                            payload: ResponsesUsagePayload(
+                                turnID: TurnID(
+                                    rawValue: "fixture-message-footer-turn"),
+                                responseMessageID: MessageID(
+                                    rawValue: "fixture-message-footer"),
+                                inputTokens: 18_420,
+                                cachedInputTokens: 15_280,
+                                cacheWriteInputTokens: 3_140,
+                                outputTokens: 826,
+                                reasoningOutputTokens: 412,
+                                totalTokens: 19_246,
+                                durationMs: 7_400)),
+                        style: style)
+                }
             }
         case .mathOne:
             fixtureSection("Common math delimiters", identifier: "renderer.fixture.math-one") {
@@ -202,7 +233,7 @@ struct RendererFixtureView: View {
                     ForEach(Self.mathHistoryMessages) { row in
                         VStack(alignment: .leading, spacing: 5) {
                             Text(row.label)
-                                .font(.councisCaption)
+                                .font(IntatisTypography.system(.caption))
                                 .foregroundStyle(.secondary)
                             message(
                                 id: row.id,
@@ -230,7 +261,7 @@ struct RendererFixtureView: View {
                     }
                     .accessibilityIdentifier("renderer.fixture.math-stream.advance")
                     Text("Stage \(mathStreamStage + 1) / \(Self.mathStreamingSources.count)")
-                        .font(.councisCaption)
+                        .font(IntatisTypography.system(.caption))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("renderer.fixture.math-stream.status")
                     message(
@@ -247,7 +278,7 @@ struct RendererFixtureView: View {
                     }
                     .accessibilityIdentifier("renderer.fixture.advance")
                     Text("Stage \(streamStage + 1) / \(Self.streamingSources.count)")
-                        .font(.councisCaption)
+                        .font(IntatisTypography.system(.caption))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("renderer.fixture.stream-status")
                     message(
@@ -316,7 +347,7 @@ struct RendererFixtureView: View {
                 }
 
                 Text(incidentReplay.status)
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption, design: .monospaced))
                     .foregroundStyle(incidentReplay.hasFailed ? .red : .secondary)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("renderer.fixture.incident.status")
@@ -325,7 +356,7 @@ struct RendererFixtureView: View {
                     ForEach(incidentReplay.rows) { row in
                         VStack(alignment: .leading, spacing: 5) {
                             Text("@\(row.agent)")
-                                .font(.councisCaption)
+                                .font(IntatisTypography.system(.caption))
                                 .foregroundStyle(.secondary)
                             message(
                                 id: row.id,
@@ -348,7 +379,7 @@ struct RendererFixtureView: View {
     }
 
     private func message(id: String, source: String, isComplete: Bool) -> some View {
-        CouncisMessageContentView(
+        IntatisMessageContentView(
             messageID: id,
             rawText: source,
             isComplete: isComplete,
@@ -356,14 +387,14 @@ struct RendererFixtureView: View {
             style: style)
     }
 
-    private var rendererLaunchOverride: CouncisMessageRendererMode? {
-        CouncisMessageRendererMode.launchOverride()
+    private var rendererLaunchOverride: IntatisMessageRendererMode? {
+        IntatisMessageRendererMode.launchOverride()
     }
 
     private var rendererModeSelection: Binding<String> {
         Binding(
             get: {
-                CouncisMessageRendererMode.resolve(
+                IntatisMessageRendererMode.resolve(
                     persistedRawValue: rendererModeRawValue,
                     arguments: []).rawValue
             },
@@ -377,13 +408,13 @@ struct RendererFixtureView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title.uppercased())
-                .font(.councisCaption.bold())
+                .font(IntatisTypography.system(.caption, bold: true))
                 .foregroundStyle(style.tertiaryText)
             content()
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .councisContentSurface(cornerRadius: 14)
+        .intatisContentSurface(cornerRadius: 14)
         .accessibilityIdentifier(identifier)
     }
 
@@ -609,12 +640,20 @@ struct RendererFixtureView: View {
 
     Remote images are blocked: ![tracking pixel](https://example.com/tracker.png)
     """#
+
+    private static let messageFooterSource = #"""
+    A completed reply keeps its existing Markdown layout while the copy action and per-reply usage sit in one quiet row below the body.
+
+    - No feedback controls
+    - No additional card or glass surface
+    """#
 }
 
 private enum RendererFixtureStage: String, CaseIterable, Identifiable {
     case minimal
     case table
     case codeSelection = "code-selection"
+    case messageFooter = "message-footer"
     case mathOne = "math-one"
     case mathThirtyTwo = "math-thirty-two"
     case mathStructure = "math-structure"
@@ -633,6 +672,7 @@ private enum RendererFixtureStage: String, CaseIterable, Identifiable {
         case .minimal: "Minimal paragraph"
         case .table: "Table only"
         case .codeSelection: "Code and selection"
+        case .messageFooter: "Message footer"
         case .mathOne: "Common math delimiters"
         case .mathThirtyTwo: "More than thirty-two formulas"
         case .mathStructure: "Math across Markdown structures"
@@ -661,7 +701,7 @@ private struct RendererHeartbeatStallFixtureView: View {
             didFinish
                 ? "Intentional 3 s MainActor block completed"
                 : "Waiting to run one intentional 3 s MainActor block")
-            .font(.councisCaption)
+            .font(IntatisTypography.system(.caption, design: .monospaced))
             .foregroundStyle(.secondary)
             .accessibilityIdentifier(
                 "renderer.fixture.heartbeat-stall.status")
@@ -1273,7 +1313,7 @@ private final class RendererIncidentReplayModel: ObservableObject {
 ///
 /// The fixture deliberately renders the public `CodeShell`, not a second
 /// validation-only ScrollView. This means the live test exercises the product
-/// `CouncisThreadScrollCoordinator`, follow/detach state, viewport admission,
+/// `IntatisThreadScrollCoordinator`, follow/detach state, viewport admission,
 /// rich settle behavior, lazy thread stack, message facade and AppKit-backed
 /// renderer together. Its source stream is folded by the same
 /// `SessionProjectionPump` used by Code before any UI snapshot is committed.
@@ -1293,12 +1333,12 @@ private struct RendererThreadBurstFixtureView: View {
     @StateObject private var model: RendererThreadBurstReplayModel
     @State private var input = ""
     @State private var showsInspector = false
-    let style: CouncisThreadStyle
+    let style: IntatisThreadStyle
 
     init(
         fixturePath: String?,
         resultRecorder: RendererFixtureResultRecorder?,
-        style: CouncisThreadStyle
+        style: IntatisThreadStyle
     ) {
         _model = StateObject(
             wrappedValue: RendererThreadBurstReplayModel(
@@ -1311,7 +1351,7 @@ private struct RendererThreadBurstFixtureView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(model.status)
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption, design: .monospaced))
                     .foregroundStyle(model.hasFailed ? .red : .secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
@@ -1342,7 +1382,6 @@ private struct RendererThreadBurstFixtureView: View {
                 thinkingScopeID: model.presentationScope.sessionID,
                 pending: nil,
                 permissionNotice: nil,
-                latestTurnStats: nil,
                 isWorking: model.isWorking,
                 workspaceName: "Offline validation",
                 agentState: model.isWorking
@@ -1371,7 +1410,7 @@ private final class RendererThreadBurstReplayModel: ObservableObject {
     @Published private(set) var status = "Fixture not loaded"
     @Published private(set) var isWorking = false
     @Published private(set) var presentationScope =
-        CouncisThreadPresentationScope(
+        IntatisThreadPresentationScope(
             kind: "code",
             sessionID: "renderer-validation-a")
     @Published private(set) var hasFailed = false
@@ -1427,7 +1466,7 @@ private final class RendererThreadBurstReplayModel: ObservableObject {
         selectedSession = selectedSession == 0 ? 1 : 0
         sessionSwitchCount &+= 1
         presentationScope =
-            CouncisThreadPresentationScope(
+            IntatisThreadPresentationScope(
                 kind: "code",
                 sessionID: validationSessionID.rawValue)
         restartExactWorkload()
@@ -1649,7 +1688,7 @@ private final class RendererThreadBurstReplayModel: ObservableObject {
         selectedSession = selectedSession == 0 ? 1 : 0
         sessionSwitchCount &+= 1
         presentationScope =
-            CouncisThreadPresentationScope(
+            IntatisThreadPresentationScope(
                 kind: "code",
                 sessionID: validationSessionID.rawValue)
     }

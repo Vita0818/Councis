@@ -6,9 +6,9 @@ import Crypto
 #error("CouncisCLI requires CryptoKit or swift-crypto")
 #endif
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
 
 /// Opaque, non-secret identity for one CLI provider route. The digest binds the
 /// connection and credential reference to the exact endpoint/wire

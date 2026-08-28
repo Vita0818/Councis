@@ -1,5 +1,5 @@
 import Foundation
-import CouncisProviders
+import IntatisProviders
 
 struct PendingImageAttachment {
     var name: String

@@ -8,9 +8,9 @@
 
 #if canImport(SwiftUI)
 import SwiftUI
-import CouncisCore
-import CouncisConversation
-import CouncisSharedUI
+import IntatisCore
+import IntatisConversation
+import IntatisSharedUI
 
 enum CouncisNavItem: String, CaseIterable, Identifiable, Hashable {
     case chat, code, cowork
@@ -19,9 +19,9 @@ enum CouncisNavItem: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .chat: return CouncisLocalization.string("Chat")
-        case .code: return CouncisLocalization.string("Code")
-        case .cowork: return CouncisLocalization.string("Cowork")
+        case .chat: return IntatisLocalization.string("Chat")
+        case .code: return IntatisLocalization.string("Code")
+        case .cowork: return IntatisLocalization.string("Cowork")
         }
     }
 
@@ -43,17 +43,17 @@ enum CouncisNavItem: String, CaseIterable, Identifiable, Hashable {
 
     var newSessionTitle: String {
         switch self {
-        case .chat: return CouncisLocalization.string("New chat")
-        case .code: return CouncisLocalization.string("New code session")
-        case .cowork: return CouncisLocalization.string("New cowork session")
+        case .chat: return IntatisLocalization.string("New chat")
+        case .code: return IntatisLocalization.string("New code session")
+        case .cowork: return IntatisLocalization.string("New cowork session")
         }
     }
 
     var emptyHistoryTitle: String {
         switch self {
-        case .chat: return CouncisLocalization.string("No chat sessions yet.")
-        case .code: return CouncisLocalization.string("No code sessions yet.")
-        case .cowork: return CouncisLocalization.string("No cowork sessions yet.")
+        case .chat: return IntatisLocalization.string("No chat sessions yet.")
+        case .code: return IntatisLocalization.string("No code sessions yet.")
+        case .cowork: return IntatisLocalization.string("No cowork sessions yet.")
         }
     }
 }
@@ -106,7 +106,7 @@ struct CouncisMacRootView: View {
                 selection: $selection,
                 isSettings: $isSettings,
                 historyItems: historyItems,
-                historyTitle: CouncisLocalization.string("Recent"),
+                historyTitle: IntatisLocalization.string("Recent"),
                 emptyHistoryTitle: selection.emptyHistoryTitle,
                 newSessionTitle: selection.newSessionTitle,
                 isNewDisabled: newSessionDisabled,
@@ -118,7 +118,7 @@ struct CouncisMacRootView: View {
                 onRenameSession: beginRenameSession,
                 onDeleteSession: beginDeleteSession)
                 .navigationSplitViewColumnWidth(
-                    min: CouncisSplitColumnLayout.chatInspector.sidebarMin,
+                    min: IntatisSplitColumnLayout.chatInspector.sidebarMin,
                     ideal: 236)
         } detail: {
             ZStack {
@@ -163,20 +163,20 @@ struct CouncisMacRootView: View {
                 deleteSession(target)
             }
         } message: { target in
-            Text(CouncisLocalization.format(
+            Text(IntatisLocalization.format(
                 "\"%@\" and its Councis event history and artifacts will be permanently deleted. Files in the linked workspace will not be changed.",
                 target.title))
         }
         .alert("Session Action Failed", isPresented: sessionErrorPresented) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(sessionActionError ?? CouncisLocalization.string("The session action failed."))
+            Text(sessionActionError ?? IntatisLocalization.string("The session action failed."))
         }
     }
 
     @ViewBuilder private var detail: some View {
         if isSettings {
-            CouncisSettingsPanel()
+            IntatisSettingsPanel()
         } else {
             switch selection {
             case .chat:
@@ -195,7 +195,7 @@ struct CouncisMacRootView: View {
 
     @ViewBuilder private var codeDetail: some View {
         if let vm = codeVM {
-            let presentationScope = CouncisThreadPresentationScope(
+            let presentationScope = IntatisThreadPresentationScope(
                 kind: .code,
                 sessionID: vm.sessionID)
             CodeSessionView(
@@ -214,14 +214,14 @@ struct CouncisMacRootView: View {
                 .id(presentationScope)
         } else {
             WorkspaceSessionHome(
-                title: CouncisLocalization.string("Code"),
-                subtitle: CouncisLocalization.string("Local workspace agent session"),
+                title: IntatisLocalization.string("Code"),
+                subtitle: IntatisLocalization.string("Local workspace agent session"),
                 icon: "folder.badge.plus",
-                primaryTitle: CouncisLocalization.string("Choose Workspace"),
+                primaryTitle: IntatisLocalization.string("Choose Workspace"),
                 primarySystemImage: "folder",
                 primaryShortcut: "o",
                 error: codeSessionError,
-                sessionsTitle: CouncisLocalization.string("Recent Code Sessions"),
+                sessionsTitle: IntatisLocalization.string("Recent Code Sessions"),
                 sessions: [],
                 workspacePath: { WorkspaceAccess.workspacePath(for: $0) },
                 onPrimary: startNewCodeSession,
@@ -231,7 +231,7 @@ struct CouncisMacRootView: View {
 
     @ViewBuilder private var coworkDetail: some View {
         if let vm = coworkVM {
-            let presentationScope = CouncisThreadPresentationScope(
+            let presentationScope = IntatisThreadPresentationScope(
                 kind: .cowork,
                 sessionID: vm.sessionID)
             CoworkSessionView(
@@ -250,15 +250,15 @@ struct CouncisMacRootView: View {
                 .id(presentationScope)
         } else {
             WorkspaceSessionHome(
-                title: CouncisLocalization.string("Cowork"),
-                subtitle: CouncisLocalization.string("Multi-agent workspace session"),
+                title: IntatisLocalization.string("Cowork"),
+                subtitle: IntatisLocalization.string("Multi-agent workspace session"),
                 icon: "person.2",
-                primaryTitle: CouncisLocalization.string("New Cowork Session"),
+                primaryTitle: IntatisLocalization.string("New Cowork Session"),
                 primarySystemImage: "plus",
                 primaryShortcut: "n",
                 primaryActions: coworkNewActions,
                 error: coworkSessionError,
-                sessionsTitle: CouncisLocalization.string("Recent Cowork Sessions"),
+                sessionsTitle: IntatisLocalization.string("Recent Cowork Sessions"),
                 sessions: [],
                 workspacePath: { _ in String?.none },
                 onPrimary: startNewCoworkSession,
@@ -266,7 +266,7 @@ struct CouncisMacRootView: View {
         }
     }
 
-    private var historyItems: [CouncisSessionHistoryItem] {
+    private var historyItems: [IntatisSessionHistoryItem] {
         switch selection {
         case .chat:
             return recentChatSessions.map {
@@ -296,11 +296,11 @@ struct CouncisMacRootView: View {
     private var coworkNewActions: [CouncisSessionNewAction] {
         [
             CouncisSessionNewAction(
-                title: CouncisLocalization.string("Choose Folder…"),
+                title: IntatisLocalization.string("Choose Folder…"),
                 systemImage: "folder",
                 action: startNewCoworkSessionChoosingFolder),
             CouncisSessionNewAction(
-                title: CouncisLocalization.string("No Folder"),
+                title: IntatisLocalization.string("No Folder"),
                 systemImage: "square.dashed",
                 action: startNewCoworkSession),
         ]
@@ -308,8 +308,8 @@ struct CouncisMacRootView: View {
 
     private func historyItem(_ session: AppSessionSummary,
                              icon: String,
-                             selected: Bool) -> CouncisSessionHistoryItem {
-        CouncisSessionHistoryItem(
+                             selected: Bool) -> IntatisSessionHistoryItem {
+        IntatisSessionHistoryItem(
             id: session.id,
             title: session.displayName ?? session.id.rawValue,
             detail: "",
@@ -532,7 +532,6 @@ struct CouncisMacRootView: View {
                         try SessionHistoryStore.deleteSession(
                             root: AppConfig.appSupportDir(),
                             session: target.sessionID)
-                        WorkspaceAccess.forget(session: target.sessionID)
                     }
                 case .cowork:
                     try await env.runtimeManager.removeSession(
@@ -544,7 +543,6 @@ struct CouncisMacRootView: View {
                             root: AppConfig.appSupportDir(),
                             session: target.sessionID)
                         CoworkProjectSettingsStore.remove(sessionID: target.sessionID)
-                        WorkspaceAccess.forget(session: target.sessionID)
                     }
                 }
                 refreshAllSessions()
@@ -563,7 +561,7 @@ struct CouncisMacRootView: View {
             codeSessionError = nil
             refreshCodeSessions()
         } catch {
-            codeSessionError = CouncisLocalization.format(
+            codeSessionError = IntatisLocalization.format(
                 "Could not start Code session: %@",
                 error.localizedDescription)
         }
@@ -582,8 +580,8 @@ struct CouncisMacRootView: View {
             } else {
                 guard let expectedPath = try WorkspaceAccess.workspacePathChecked(for: sessionID),
                       let selected = WorkspaceAccess.choose(
-                        prompt: CouncisLocalization.string("Reauthorize Code Workspace")) else {
-                    codeSessionError = CouncisLocalization.string(
+                        prompt: IntatisLocalization.string("Reauthorize Code Workspace")) else {
+                    codeSessionError = IntatisLocalization.string(
                         "The original Code workspace identity is unavailable; this session was not rebound.")
                     return
                 }
@@ -592,7 +590,7 @@ struct CouncisMacRootView: View {
                     .resolvingSymlinksInPath()
                 guard selected.canonicalURL == expected else {
                     selected.release()
-                    codeSessionError = CouncisLocalization.format(
+                    codeSessionError = IntatisLocalization.format(
                         "Choose the original Code workspace at %@.",
                         expectedPath)
                     return
@@ -600,7 +598,7 @@ struct CouncisMacRootView: View {
                 workspace = selected
             }
         } catch {
-            codeSessionError = CouncisLocalization.format(
+            codeSessionError = IntatisLocalization.format(
                 "Code workspace access could not be read safely: %@",
                 error.localizedDescription)
             return
@@ -620,7 +618,7 @@ struct CouncisMacRootView: View {
             codeSessionError = nil
             refreshCodeSessions()
         } catch {
-            codeSessionError = CouncisLocalization.format(
+            codeSessionError = IntatisLocalization.format(
                 "Could not resume Code session: %@",
                 error.localizedDescription)
         }
@@ -632,7 +630,7 @@ struct CouncisMacRootView: View {
 
     private func startNewCoworkSessionChoosingFolder() {
         guard let workspace = WorkspaceAccess.choose(
-            prompt: CouncisLocalization.string(
+            prompt: IntatisLocalization.string(
                 "Choose Cowork Workspace")) else {
             return
         }
@@ -664,7 +662,7 @@ struct CouncisMacRootView: View {
                 coworkSessionError = nil
                 refreshCoworkSessions()
             } catch {
-                coworkSessionError = CouncisLocalization.format(
+                coworkSessionError = IntatisLocalization.format(
                     "Could not start Cowork session: %@",
                     error.localizedDescription)
             }
@@ -696,7 +694,7 @@ struct CouncisMacRootView: View {
                 coworkSessionError = nil
                 refreshCoworkSessions()
             } catch {
-                coworkSessionError = CouncisLocalization.format(
+                coworkSessionError = IntatisLocalization.format(
                     "Could not resume Cowork session: %@",
                     error.localizedDescription)
             }
@@ -776,7 +774,7 @@ struct CouncisSidebar: View {
     let items: [CouncisNavItem]
     @Binding var selection: CouncisNavItem
     @Binding var isSettings: Bool
-    let historyItems: [CouncisSessionHistoryItem]
+    let historyItems: [IntatisSessionHistoryItem]
     let historyTitle: String
     let emptyHistoryTitle: String
     let newSessionTitle: String
@@ -795,7 +793,7 @@ struct CouncisSidebar: View {
                 .padding(.top, 22)
                 .padding(.bottom, 12)
 
-            CouncisSessionHistoryList(
+                CouncisSessionHistoryList(
                 title: historyTitle,
                 newTitle: newSessionTitle,
                 emptyTitle: emptyHistoryTitle,
@@ -860,7 +858,7 @@ private struct CouncisSidebarModeRow: View {
         Group {
             if selected {
                 content
-                    .councisLiquidGlass(cornerRadius: 10, interactive: true)
+                    .intatisLiquidGlass(cornerRadius: 10, interactive: true)
             } else {
                 content
             }
@@ -899,7 +897,7 @@ private struct CouncisSidebarSettingsRow: View {
                 .font(.councisFixed(size: 13, weight: .medium))
                 .foregroundStyle(selected ? CouncisTheme.accent(scheme) : CouncisTheme.softText(scheme))
                 .frame(width: 20)
-            Text(CouncisLocalization.string("Settings"))
+            Text(IntatisLocalization.string("Settings"))
                 .font(CouncisType.body(13, selected ? .semibold : .medium))
                 .foregroundStyle(selected ? CouncisTheme.deepText(scheme) : CouncisTheme.softText(scheme))
             Spacer(minLength: 0)

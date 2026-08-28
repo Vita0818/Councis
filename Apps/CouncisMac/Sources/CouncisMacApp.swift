@@ -2,16 +2,18 @@
 import SwiftUI
 import Combine
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisConversation
-import CouncisAgentKernel
-import CouncisArtifacts
-import CouncisTools
-import CouncisMCP
-import CouncisSharedUI
-import CouncisKnowledge
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisConversation
+import IntatisAgentKernel
+import IntatisArtifacts
+import IntatisTools
+import IntatisPermission
+import IntatisMCP
+import IntatisSharedUI
+import IntatisKnowledge
+import IntatisCodexRuntime
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -27,6 +29,8 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var chatSessionID: SessionID
     @Published private(set) var viewModel: ChatViewModel
     @Published private(set) var chatSessionError: String?
+    @Published private(set) var projects: [ProjectFolderRecord]
+    @Published private(set) var projectStoreError: String?
     @Published var needsAPIKey: Bool
 
     let runtimeManager: AppSessionRuntimeManager
@@ -38,6 +42,17 @@ final class AppEnvironment: ObservableObject {
 
     init(runtimeManager: AppSessionRuntimeManager) {
         PlatformProfile.current = AppConfig.platformProfile
+
+        let initialProjects: [ProjectFolderRecord]
+        let initialProjectStoreError: String?
+        do {
+            initialProjects = try ProjectFolderStore.load(
+                root: AppConfig.appSupportDir()).projects
+            initialProjectStoreError = nil
+        } catch {
+            initialProjects = []
+            initialProjectStoreError = error.localizedDescription
+        }
 
         self.runtimeManager = runtimeManager
         self.mcp = AppMCPService()
@@ -65,6 +80,8 @@ final class AppEnvironment: ObservableObject {
         }
         self.chatRuntime = initialChatRuntime
         self.viewModel = initialChatRuntime.viewModel
+        self.projects = initialProjects
+        self.projectStoreError = initialProjectStoreError
         self.needsAPIKey = !Self.hasAPIKey(ref: AppConfig.selectedAPIKeyRef)
 
         Task { [weak self] in
@@ -80,7 +97,7 @@ final class AppEnvironment: ObservableObject {
         do {
             try switchChatSession(to: SessionID.new())
         } catch {
-            chatSessionError = CouncisLocalization.format(
+            chatSessionError = IntatisLocalization.format(
                 "Could not start chat session: %@",
                 error.localizedDescription)
         }
@@ -90,7 +107,7 @@ final class AppEnvironment: ObservableObject {
         do {
             try switchChatSession(to: session.id)
         } catch {
-            chatSessionError = CouncisLocalization.format(
+            chatSessionError = IntatisLocalization.format(
                 "Could not resume chat session: %@",
                 error.localizedDescription)
         }
@@ -100,9 +117,69 @@ final class AppEnvironment: ObservableObject {
         AppConfig.recentSessions(kind: .chat)
     }
 
+    @discardableResult
+    func addProject(
+        workspace: WorkspaceAccessLease,
+        kind: SessionKind
+    ) throws -> ProjectFolderRecord {
+        let project = try ProjectFolderStore.add(
+            root: AppConfig.appSupportDir(),
+            kind: kind,
+            path: workspace.canonicalPath)
+        refreshProjects()
+        return project
+    }
+
+    func removeProject(_ projectID: ProjectID) throws {
+        try ProjectFolderStore.remove(
+            root: AppConfig.appSupportDir(),
+            projectID: projectID)
+        refreshProjects()
+    }
+
+    func refreshProjects() {
+        do {
+            projects = try ProjectFolderStore.load(
+                root: AppConfig.appSupportDir()).projects
+            projectStoreError = nil
+        } catch {
+            projectStoreError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func startNewProjectChatSession(
+        projectID: ProjectID
+    ) throws -> ProjectConversationReference {
+        try validateProjectFolder(
+            projectID: projectID,
+            expectedKind: .chat)
+        let session = SessionID.new()
+        let conversation = ProjectConversationReference(
+            sessionID: session,
+            kind: .chat)
+        try associate(conversation, with: projectID)
+        do {
+            try switchChatSession(to: session)
+            return conversation
+        } catch {
+            rollbackProjectConversation(conversation)
+            throw error
+        }
+    }
+
+    func removeProjectConversation(
+        _ conversation: ProjectConversationReference
+    ) throws {
+        try ProjectFolderStore.removeConversation(
+            root: AppConfig.appSupportDir(),
+            conversation: conversation)
+        refreshProjects()
+    }
+
     func deleteChatSession(_ session: SessionID) async throws {
         guard !runtimeManager.isBusy(kind: .chat, sessionID: session) else {
-            throw CouncisError.io(CouncisLocalization.string(
+            throw IntatisError.io(IntatisLocalization.string(
                 "Wait for the Chat response to finish before deleting this session."))
         }
         if session == chatSessionID {
@@ -130,7 +207,7 @@ final class AppEnvironment: ObservableObject {
         do {
             try switchChatSession(to: replacement)
         } catch {
-            chatSessionError = CouncisLocalization.format(
+            chatSessionError = IntatisLocalization.format(
                 "The removed Chat session could not be replaced: %@",
                 error.localizedDescription)
         }
@@ -217,6 +294,32 @@ final class AppEnvironment: ObservableObject {
         return try makeCodeViewModel(session: session, workspace: workspace)
     }
 
+    func makeProjectCodeViewModel(
+        projectID: ProjectID
+    ) throws -> CodeViewModel {
+        let workspace = try projectWorkspaceAccess(
+            projectID: projectID,
+            expectedKind: .code)
+        let session = SessionID(rawValue: IDGen.random(prefix: "code"))
+        let conversation = ProjectConversationReference(
+            sessionID: session,
+            kind: .code)
+        do {
+            try associate(conversation, with: projectID)
+        } catch {
+            workspace.release()
+            throw error
+        }
+        do {
+            return try makeCodeViewModel(
+                session: session,
+                workspace: workspace)
+        } catch {
+            rollbackProjectConversation(conversation)
+            throw error
+        }
+    }
+
     func makeCodeViewModel(session: SessionID,
                            workspace: WorkspaceAccessLease) throws -> CodeViewModel {
         if let existing = runtimeManager.cachedCodeRuntime(sessionID: session) {
@@ -256,6 +359,9 @@ final class AppEnvironment: ObservableObject {
                         workspacePaths: [
                             workspace.canonicalPath,
                         ]),
+                codexMCPConfiguration:
+                    makeCodexMCPConfigurationFactory(
+                        log: codeLog),
                 internalToolRegistryAugmenter:
                     makeKnowledgeToolAugmenter(),
                 initialConfigurationNotice:
@@ -273,97 +379,94 @@ final class AppEnvironment: ObservableObject {
         }
     }
 
-    /// Builds a fresh Cowork session in an app-owned, session-isolated
-    /// workspace without presenting a folder picker.
+    /// Build a fresh multi-agent Cowork project session bound to a primary workspace.
     func makeCoworkViewModel() async throws -> CoworkViewModel {
-        let bindings = try resolvedFreshCoworkBindings()
         let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
         let primaryWorkspace = try WorkspaceAccess
             .createManagedWorkspace(for: session)
-        return try await makeFreshCoworkViewModel(
+        return try await makeCoworkViewModel(
             session: session,
-            primaryWorkspace: primaryWorkspace,
-            selectedBinding: bindings.selected,
-            judgeBinding: bindings.judge,
-            permissionReviewerBinding:
-                bindings.permissionReviewer)
+            primaryWorkspace: primaryWorkspace)
     }
 
-    /// Builds a fresh multi-agent Cowork project session bound to a primary
-    /// workspace selected by the user. This remains the host seam for explicit
-    /// external-workspace admission.
+    /// Build a fresh multi-agent Cowork project session bound to a primary workspace.
     func makeCoworkViewModel(primaryWorkspace: WorkspaceAccessLease) async throws -> CoworkViewModel {
-        let bindings: (
-            selected: AgentInferenceBinding,
-            judge: AgentInferenceBinding,
-            permissionReviewer: AgentInferenceBinding
-        )
+        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
+        return try await makeCoworkViewModel(
+            session: session,
+            primaryWorkspace: primaryWorkspace)
+    }
+
+    func makeProjectCoworkViewModel(
+        projectID: ProjectID
+    ) async throws -> CoworkViewModel {
+        let workspace = try projectWorkspaceAccess(
+            projectID: projectID,
+            expectedKind: .cowork)
+        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
+        let conversation = ProjectConversationReference(
+            sessionID: session,
+            kind: .cowork)
         do {
-            bindings = try resolvedFreshCoworkBindings()
+            try associate(conversation, with: projectID)
         } catch {
-            primaryWorkspace.release()
+            workspace.release()
             throw error
         }
-        let session = SessionID(rawValue: IDGen.random(prefix: "cowork"))
-        return try await makeFreshCoworkViewModel(
-            session: session,
-            primaryWorkspace: primaryWorkspace,
-            selectedBinding: bindings.selected,
-            judgeBinding: bindings.judge,
-            permissionReviewerBinding:
-                bindings.permissionReviewer)
+        do {
+            return try await makeCoworkViewModel(
+                session: session,
+                primaryWorkspace: workspace)
+        } catch {
+            rollbackProjectConversation(conversation)
+            throw error
+        }
     }
 
-    private func resolvedFreshCoworkBindings() throws -> (
-        selected: AgentInferenceBinding,
-        judge: AgentInferenceBinding,
-        permissionReviewer: AgentInferenceBinding
-    ) {
+    private func makeCoworkViewModel(
+        session: SessionID,
+        primaryWorkspace: WorkspaceAccessLease
+    ) async throws -> CoworkViewModel {
         guard let inferenceCatalogSnapshot else {
-            throw CouncisError.config(
-                inferenceCatalogError ?? CouncisLocalization.string(
+            primaryWorkspace.release()
+            throw IntatisError.config(
+                inferenceCatalogError ?? IntatisLocalization.string(
                     "Inference profiles are still loading. Try again in a moment."))
         }
         guard let selectedBinding = AppInferenceCatalogCompiler.selectedBinding(
             catalog: providerCatalog,
             snapshot: inferenceCatalogSnapshot) else {
-            throw CouncisError.config(CouncisLocalization.string(
+            primaryWorkspace.release()
+            throw IntatisError.config(IntatisLocalization.string(
                 "Choose a resolvable default inference profile before creating Cowork."))
-        }
-        guard let permissionReviewerBinding =
-                configuredPermissionReviewerBinding(
-                    snapshot: inferenceCatalogSnapshot) else {
-            throw CouncisError.config(CouncisLocalization.string(
-                "Configure a resolvable permission_reviewer_model before creating Cowork."))
         }
         guard let judgeBinding = configuredJudgeBinding(
             snapshot: inferenceCatalogSnapshot) else {
-            throw CouncisError.config(CouncisLocalization.string(
+            primaryWorkspace.release()
+            throw IntatisError.config(IntatisLocalization.string(
                 "Configure a resolvable judge_model before creating Cowork."))
         }
-        return (
-            selected: selectedBinding,
-            judge: judgeBinding,
-            permissionReviewer: permissionReviewerBinding)
-    }
-
-    private func makeFreshCoworkViewModel(
-        session: SessionID,
-        primaryWorkspace: WorkspaceAccessLease,
-        selectedBinding: AgentInferenceBinding,
-        judgeBinding: AgentInferenceBinding,
-        permissionReviewerBinding: AgentInferenceBinding
-    ) async throws -> CoworkViewModel {
+        // Codex App Server owns automatic approval review and binds it to the
+        // selected Responses model through its official model catalog. The
+        // legacy Intatis permission_reviewer_model is not a Cowork startup
+        // dependency on the new kernel.
+        let permissionReviewerBinding: AgentInferenceBinding? = nil
         do {
             try WorkspaceAccess.remember(
                 primaryWorkspace.scopedURL,
                 for: session,
                 isPrimary: true)
-            let settings = CoworkProjectSettings.fresh(
+            var settings = CoworkProjectSettings.fresh(
                 sessionID: session,
                 primaryWorkspace: primaryWorkspace.canonicalURL,
                 catalog: providerCatalog,
                 defaultInferenceProfileBinding: selectedBinding)
+            settings.upsertCodexAgentProfile(CoworkCodexAgentProfile(
+                roleName: "judge",
+                description: "Councis read-only evaluator for comparing, criticizing, selecting, rewriting, or synthesizing candidate work. It never owns final decisions or coordination.",
+                workspacePath: primaryWorkspace.canonicalPath,
+                inferenceBinding: judgeBinding,
+                permissionProfile: PermissionProfile.readOnly.rawValue))
             let coworkLog = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
             return try await runtimeManager.coworkRuntime(sessionID: session) { [self] in
                 try makeCoworkViewModel(
@@ -372,7 +475,6 @@ final class AppEnvironment: ObservableObject {
                     projectSettings: settings,
                     launchMode: .fresh,
                     initialWorkspaceAccess: primaryWorkspace,
-                    judgeInferenceBinding: judgeBinding,
                     permissionReviewerInferenceBinding:
                         permissionReviewerBinding)
             }
@@ -388,19 +490,13 @@ final class AppEnvironment: ObservableObject {
 
     func makeCoworkViewModel(session: SessionID) async throws -> CoworkViewModel {
         guard let inferenceCatalogSnapshot else {
-            throw CouncisError.config(
-                inferenceCatalogError ?? CouncisLocalization.string(
+            throw IntatisError.config(
+                inferenceCatalogError ?? IntatisLocalization.string(
                     "Inference profiles are still loading. Try again in a moment."))
         }
-        let permissionReviewerBinding =
-            configuredPermissionReviewerBinding(
-                snapshot: inferenceCatalogSnapshot)
-        let judgeBinding = configuredJudgeBinding(
-            snapshot: inferenceCatalogSnapshot)
+        let permissionReviewerBinding: AgentInferenceBinding? = nil
         return try await runtimeManager.coworkRuntime(sessionID: session) { [self] in
         let coworkLog = try EventLog(session: session, fileURL: AppConfig.sessionFile(session))
-        let legacyOwnedWorkspacePaths = CoworkProjectSettingsStore
-            .legacyOwnedWorkspacePaths(sessionID: session)
         let loaded = await CoworkProjectSettingsStore.loadAndMigrate(
             sessionID: session,
             log: coworkLog,
@@ -408,54 +504,20 @@ final class AppEnvironment: ObservableObject {
         var projectSettings = loaded.settings
         var warning = loaded.warning
         do {
-            let projection = try await SessionProjectionStore.rebuild(from: coworkLog)
-            let migrationAlreadyCompleted = projection.completedMigrations.contains {
-                $0.migrationID == SessionProjectionStore.legacyWorkspaceAccessMigrationID
-            }
-            if migrationAlreadyCompleted {
-                // Older/interrupted Phase S builds could have persisted a
-                // symbolic-link spelling in EventLog while correctly keying
-                // the capability plist by the canonical directory. Repair
-                // only aliases proven through a live session bookmark.
-                let mappings = try WorkspaceAccess.validatedCanonicalPathMappings(
-                    for: projectSettings.workspaces.map(\.path),
-                    in: session)
-                projectSettings = try await persistValidatedWorkspacePathMappings(
-                    mappings,
-                    settings: projectSettings,
-                    log: coworkLog)
-                // The marker is appended only after the session-owned file was
-                // read back successfully. Retrying cleanup here closes the
-                // crash window between that durable marker and UserDefaults
-                // deletion without ever re-importing shared capabilities.
-                WorkspaceAccess.clearLegacySessionStorage(for: session)
-                if loaded.legacySettingsCleanupEligible {
-                    CoworkProjectSettingsStore.clearLegacyStorage(sessionID: session)
-                }
-            } else {
-                let migration = try WorkspaceAccess.migrateLegacyBookmarks(
-                    for: session,
-                    workspacePaths: projectSettings.workspaces.map(\.path),
-                    primaryPath: projectSettings.primaryWorkspace?.path,
-                    sharedLegacyPaths: legacyOwnedWorkspacePaths)
-                if migration.didMigrate {
-                    projectSettings = try await persistValidatedWorkspacePathMappings(
-                        migration.canonicalPathsByStoredPath,
-                        settings: projectSettings,
-                        log: coworkLog)
-                    _ = try await SessionProjectionStore.recordMigration(
-                        in: coworkLog,
-                        migrationID: SessionProjectionStore.legacyWorkspaceAccessMigrationID,
-                        source: .legacyWorkspaceUserDefaults)
-                    WorkspaceAccess.clearLegacySessionStorage(for: session)
-                    if loaded.legacySettingsCleanupEligible {
-                        CoworkProjectSettingsStore.clearLegacyStorage(sessionID: session)
-                    }
-                }
-            }
+            // Current Councis capability files may retain a symbolic-link
+            // spelling in the settings projection. Repair only aliases proven
+            // through this session's owner-only bookmark store. Legacy Intatis
+            // UserDefaults are deliberately not inspected during startup.
+            let mappings = try WorkspaceAccess.validatedCanonicalPathMappings(
+                for: projectSettings.workspaces.map(\.path),
+                in: session)
+            projectSettings = try await persistValidatedWorkspacePathMappings(
+                mappings,
+                settings: projectSettings,
+                log: coworkLog)
         } catch {
-            let message = CouncisLocalization.format(
-                "Legacy workspace access remains in compatibility mode: %@",
+            let message = IntatisLocalization.format(
+                "Workspace access could not be validated: %@",
                 error.localizedDescription)
             warning = warning.map { "\($0) \(message)" } ?? message
         }
@@ -465,7 +527,6 @@ final class AppEnvironment: ObservableObject {
             projectSettings: projectSettings,
             launchMode: .restored,
             sessionStorageWarning: warning,
-            judgeInferenceBinding: judgeBinding,
             permissionReviewerInferenceBinding:
                 permissionReviewerBinding)
         }
@@ -486,7 +547,7 @@ final class AppEnvironment: ObservableObject {
             coworkSettings: canonical,
             changeKind: .migrated)
         guard let persisted = document.coworkSettings else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "Canonical workspace aliases were not persisted in session settings.")
         }
         return persisted
@@ -499,20 +560,11 @@ final class AppEnvironment: ObservableObject {
         launchMode: CoworkSessionLaunchMode,
         sessionStorageWarning: String? = nil,
         initialWorkspaceAccess: WorkspaceAccessLease? = nil,
-        judgeInferenceBinding: AgentInferenceBinding?,
         permissionReviewerInferenceBinding:
             AgentInferenceBinding?
     ) throws -> CoworkViewModel {
         let artifactStore = try ArtifactStore(root: AppConfig.artifactsDir(session))
-        let permissionReviewerConfigurationError =
-            permissionReviewerInferenceBinding == nil
-            ? CouncisLocalization.string(
-                "The configured permission_reviewer_model is missing, invalid, or unavailable in the current inference catalog.")
-            : nil
-        let judgeConfigurationError = judgeInferenceBinding == nil
-            ? CouncisLocalization.string(
-                "The configured judge_model is missing, invalid, or unavailable in the current inference catalog.")
-            : nil
+        let permissionReviewerConfigurationError: String? = nil
         let combinedStorageWarning = [
             sessionStorageWarning,
             knowledgeToolsConfigurationNotice(),
@@ -524,8 +576,6 @@ final class AppEnvironment: ObservableObject {
             sessionNaming: makeSessionNamingService(log: coworkLog, kind: .cowork),
             registry: registry,
             inferenceProfileOptions: inferenceProfileOptions,
-            judgeInferenceBinding: judgeInferenceBinding,
-            judgeConfigurationError: judgeConfigurationError,
             permissionReviewerInferenceBinding:
                 permissionReviewerInferenceBinding,
             permissionReviewerConfigurationError:
@@ -545,6 +595,9 @@ final class AppEnvironment: ObservableObject {
                     workspacePaths:
                         projectSettings.workspaces
                             .map(\.path)),
+            codexMCPConfiguration:
+                makeCodexMCPConfigurationFactory(
+                    log: coworkLog),
             internalToolRegistryAugmenter:
                 makeKnowledgeToolAugmenter())
     }
@@ -570,9 +623,6 @@ final class AppEnvironment: ObservableObject {
         guard let judge = providerCatalog.judgeModel else {
             return nil
         }
-        // Judge is a fixed data-plane identity whose base route comes only from
-        // config parsing. It never borrows the mutable UI-selected variant or
-        // a live/historical @main binding.
         return AppInferenceCatalogCompiler.binding(
             providerID: judge.endpoint,
             modelID: judge.model.rawValue,
@@ -628,7 +678,7 @@ final class AppEnvironment: ObservableObject {
     {
         { [weak self] in
             guard let self else {
-                throw CouncisError.io(
+                throw IntatisError.io(
                     "The application MCP runtime owner is unavailable.")
             }
             let runtime =
@@ -639,6 +689,22 @@ final class AppEnvironment: ObservableObject {
                     workspacePaths:
                         workspacePaths)
             return runtime.snapshots
+        }
+    }
+
+    private func makeCodexMCPConfigurationFactory(
+        log: EventLog
+    ) -> @MainActor @Sendable (
+        AgentID,
+        CapabilityLeaseID,
+        TaskID?
+    ) async throws -> CodexRuntimeMCPConfiguration {
+        { [mcp] agentID, capabilityLeaseID, taskID in
+            try await mcp.codexRuntimeConfiguration(
+                log: log,
+                agentID: agentID,
+                capabilityLeaseID: capabilityLeaseID,
+                taskID: taskID)
         }
     }
 
@@ -768,6 +834,76 @@ final class AppEnvironment: ObservableObject {
         }
     }
 
+    private func projectWorkspaceAccess(
+        projectID: ProjectID,
+        expectedKind: SessionKind
+    ) throws -> WorkspaceAccessLease {
+        let project = try projectRecord(
+            projectID: projectID,
+            expectedKind: expectedKind)
+        guard let workspace = WorkspaceAccess.choose(
+            prompt: IntatisLocalization.string("Choose Project Folder")) else {
+            throw CancellationError()
+        }
+        guard workspace.canonicalPath == project.path else {
+            workspace.release()
+            throw IntatisError.io(IntatisLocalization.string(
+                "Choose the exact folder registered for this project."))
+        }
+        return workspace
+    }
+
+    private func validateProjectFolder(
+        projectID: ProjectID,
+        expectedKind: SessionKind
+    ) throws {
+        let project = try projectRecord(
+            projectID: projectID,
+            expectedKind: expectedKind)
+        let url = try PathConfinement.canonicalExistingDirectory(
+            URL(fileURLWithPath: project.path, isDirectory: true))
+        guard url.path == project.path else {
+            throw ProjectFolderStoreError.invalidProject
+        }
+    }
+
+    private func projectRecord(
+        projectID: ProjectID,
+        expectedKind: SessionKind
+    ) throws -> ProjectFolderRecord {
+        guard let project = projects.first(where: { $0.id == projectID }) else {
+            throw ProjectFolderStoreError.projectNotFound
+        }
+        guard project.kind == expectedKind else {
+            throw ProjectFolderStoreError.invalidProject
+        }
+        return project
+    }
+
+    private func associate(
+        _ conversation: ProjectConversationReference,
+        with projectID: ProjectID
+    ) throws {
+        _ = try ProjectFolderStore.associate(
+            root: AppConfig.appSupportDir(),
+            projectID: projectID,
+            conversation: conversation)
+        refreshProjects()
+    }
+
+    private func rollbackProjectConversation(
+        _ conversation: ProjectConversationReference
+    ) {
+        do {
+            try ProjectFolderStore.removeConversation(
+                root: AppConfig.appSupportDir(),
+                conversation: conversation)
+            refreshProjects()
+        } catch {
+            projectStoreError = error.localizedDescription
+        }
+    }
+
     func recentCodeSessions() -> [AppSessionSummary] {
         AppConfig.recentSessions(kind: .code)
     }
@@ -837,7 +973,7 @@ final class AppEnvironment: ObservableObject {
             // Keep a previously valid snapshot/registry alive for exact
             // bindings. Initial startup remains fail-closed until a valid
             // durable catalog can be loaded or reconciled.
-            inferenceCatalogError = CouncisLocalization.format(
+            inferenceCatalogError = IntatisLocalization.format(
                 "Versioned inference profiles are unavailable: %@",
                 error.localizedDescription)
         }
@@ -898,14 +1034,14 @@ struct WorkspaceSessionHome: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let layout = CouncisMacScreenLayout(rawWidth: proxy.size.width)
+            let layout = IntatisMacScreenLayout(rawWidth: proxy.size.width)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     CouncisPageHeader(title: title, subtitle: subtitle)
 
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: icon)
-                            .font(.councisFixed(size: 28, weight: .semibold))
+                            .font(IntatisTypography.system(size: 28, weight: .semibold))
                             .foregroundStyle(CouncisTheme.accent(scheme))
                             .frame(width: 64, height: 64)
                         Text(primaryTitle)
@@ -928,7 +1064,7 @@ struct WorkspaceSessionHome: View {
                             title: sessionsTitle,
                             sessions: sessions,
                             workspacePath: workspacePath,
-                            actionTitle: CouncisLocalization.string("Resume"),
+                            actionTitle: IntatisLocalization.string("Resume"),
                             onAction: onResume)
                     }
 
@@ -950,7 +1086,7 @@ struct WorkspaceSessionHome: View {
                 primaryButtonLabel
             }
             .controlSize(.large)
-            .councisGlassButton(prominent: true)
+            .intatisGlassButton(prominent: true)
 
             if let primaryShortcut {
                 button.keyboardShortcut(primaryShortcut)
@@ -958,26 +1094,20 @@ struct WorkspaceSessionHome: View {
                 button
             }
         } else {
-            let menu = Menu {
+            Menu {
                 ForEach(primaryActions.indices, id: \.self) { index in
                     let item = primaryActions[index]
-                    Button {
-                        item.action()
-                    } label: {
+                    Button(action: item.action) {
                         Label(item.title, systemImage: item.systemImage)
                     }
                 }
             } label: {
                 primaryButtonLabel
             }
+            .menuIndicator(.visible)
             .controlSize(.large)
-            .councisGlassButton(prominent: true)
-
-            if let primaryShortcut {
-                menu.keyboardShortcut(primaryShortcut)
-            } else {
-                menu
-            }
+            .intatisGlassButton(prominent: true)
+            .accessibilityIdentifier("workspace.session.new")
         }
     }
 
@@ -1017,7 +1147,7 @@ private struct RecentSessionList: View {
                     Spacer(minLength: 8)
                     Button(actionTitle) { onAction(session) }
                         .controlSize(.small)
-                        .councisGlassButton()
+                        .intatisGlassButton()
                 }
                 .padding(.horizontal, 13)
                 .padding(.vertical, 10)
@@ -1033,12 +1163,12 @@ private struct RecentSessionList: View {
 
     private func metadata(for session: AppSessionSummary) -> String {
         let timestamp = session.updatedAt == .distantPast
-            ? CouncisLocalization.string("Unknown date")
+            ? IntatisLocalization.string("Unknown date")
             : session.updatedAt.formatted(date: .abbreviated, time: .shortened)
         let workspace = workspacePath(session.id).map { " · \($0)" } ?? ""
         let count = session.eventCount == 1
-            ? CouncisLocalization.string("1 event")
-            : CouncisLocalization.format("%lld events", Int64(session.eventCount))
+            ? IntatisLocalization.string("1 event")
+            : IntatisLocalization.format("%lld events", Int64(session.eventCount))
         return "\(count) · \(timestamp)\(workspace)"
     }
 }
@@ -1063,14 +1193,13 @@ struct CodeSessionView: View {
 
     var body: some View {
             CodeShell(items: vm.items,
-                      presentationScope: CouncisThreadPresentationScope(
+                      presentationScope: IntatisThreadPresentationScope(
                         kind: .code,
                         sessionID: vm.sessionID),
                       sessionTitle: sessionTitle,
                       thinkingScopeID: vm.sessionID.rawValue,
-                      pending: vm.pendingPermission,
+                  pending: vm.pendingPermission,
                   permissionNotice: vm.permissionNotice,
-                  latestTurnStats: vm.latestTurnStats,
                   isWorking: vm.isWorking,
                   workspaceName: vm.workspaceName,
                   agentState: vm.agentState,
@@ -1083,9 +1212,9 @@ struct CodeSessionView: View {
                   onNewSession: onNewSession,
                   composerAccessory: AnyView(HStack(
                     alignment: .center,
-                    spacing: CouncisComposerControlMetrics.rowSpacing
+                    spacing: IntatisComposerControlMetrics.rowSpacing
                   ) {
-                    CouncisComposerModelControl(
+                    IntatisComposerModelControl(
                         catalog: catalog,
                         isBusy: vm.isWorking,
                         onSelectModel: onSelectModel)
@@ -1095,7 +1224,7 @@ struct CodeSessionView: View {
                         onCancel: {
                             vm.cancelPendingMCPExternalContexts()
                         })
-                    CouncisMacComposerAttachmentAccessory(
+                    IntatisMacComposerAttachmentAccessory(
                         attachments: vm.draftAttachments,
                         accessibilityPrefix: "code",
                         isDisabled: vm.isWorking,
@@ -1107,7 +1236,7 @@ struct CodeSessionView: View {
                         })
                   }),
                   composerTrailingAction:
-                    CouncisThreadComposerSecondaryAction(
+                    IntatisThreadComposerSecondaryAction(
                         systemImage: vm.voiceInput.buttonSystemImage,
                         help: vm.voiceInput.buttonHelp,
                         isBusy: vm.voiceInput.showsProgress,
@@ -1117,7 +1246,7 @@ struct CodeSessionView: View {
                         blocksSubmission: vm.voiceInput.isEngaged,
                         action: { vm.toggleVoiceInput() }),
                   headerActions: [
-                    CouncisThreadHeaderAction(
+                    IntatisThreadHeaderAction(
                         title: "MCP Content",
                         systemImage: "shippingbox.and.arrow.backward",
                         isIconOnly: true,
@@ -1125,7 +1254,7 @@ struct CodeSessionView: View {
                         accessibilityIdentifier: "code.mcp.content") {
                             showMCPContent = true
                         },
-                    CouncisThreadHeaderAction(
+                    IntatisThreadHeaderAction(
                         title: "MCP Settings",
                         systemImage: "network.badge.shield.half.filled",
                         isIconOnly: true,
@@ -1157,7 +1286,7 @@ struct CodeSessionView: View {
                     minWidth: 980,
                     minHeight: 680)
             }
-            .councisComposerAttachmentImport(
+            .intatisComposerAttachmentImport(
                 isPresented: $showAttachmentImporter,
                 onImport: { vm.importDraftAttachments($0) },
                 onFailure: { vm.reportAttachmentImportFailure($0) })
@@ -1213,13 +1342,12 @@ struct CoworkSessionView: View {
         self._agentThreadPresentation = StateObject(
             wrappedValue: CoworkAgentThreadPresentationModel(
                 mainAgentID: vm.project.mainAgentName,
-                loadPage: { [weak vm] agentID, upperBound in
+                loadSnapshot: { [weak vm] agentID in
                     guard let vm else {
                         return .empty(agentID: agentID)
                     }
-                    return await vm.agentThreadPage(
-                        agentID: agentID,
-                        requestedUpperBound: upperBound)
+                    return await vm.agentThreadSnapshot(
+                        agentID: agentID)
                 },
                 updates: { [weak vm] agentID in
                     guard let vm else {
@@ -1239,8 +1367,8 @@ struct CoworkSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CoworkShell(threadPage: agentThreadPresentation.page,
-                        presentationScope: CouncisThreadPresentationScope(
+            CoworkShell(threadSnapshot: agentThreadPresentation.snapshot,
+                        presentationScope: IntatisThreadPresentationScope(
                             kind: .cowork,
                             sessionID: vm.sessionID),
                         sessionTitle: sessionTitle,
@@ -1248,7 +1376,6 @@ struct CoworkSessionView: View {
                         agents: vm.agents,
                         pending: vm.pendingPermission,
                         permissionNotice: vm.permissionNotice,
-                        latestTurnStats: vm.latestTurnStats,
                         summary: vm.summary,
                         project: vm.project,
                         goal: vm.goal,
@@ -1269,7 +1396,7 @@ struct CoworkSessionView: View {
                         onShowProjectSettings: { showProjectSettings = true },
                         composerAccessory: AnyView(HStack(
                             alignment: .center,
-                            spacing: CouncisComposerControlMetrics.rowSpacing
+                            spacing: IntatisComposerControlMetrics.rowSpacing
                         ) {
                             CoworkInferenceAccessory(
                                 options: vm.inferenceProfileOptions,
@@ -1286,7 +1413,7 @@ struct CoworkSessionView: View {
                                 })
                         }),
                         composerInputAccessory: AnyView(
-                            CouncisMacComposerAttachmentAccessory(
+                            IntatisMacComposerAttachmentAccessory(
                                 attachments: vm.draftAttachments,
                                 accessibilityPrefix: "cowork",
                                 onAttach: {
@@ -1296,7 +1423,7 @@ struct CoworkSessionView: View {
                                     vm.removeDraftAttachment($0)
                                 })),
                         composerTrailingAction:
-                            CouncisThreadComposerSecondaryAction(
+                            IntatisThreadComposerSecondaryAction(
                                 systemImage:
                                     vm.voiceInput.buttonSystemImage,
                                 help: vm.voiceInput.buttonHelp,
@@ -1327,21 +1454,12 @@ struct CoworkSessionView: View {
                         onClearGoal: { showGoalClearConfirmation = true },
                         selectedAgentID:
                             agentThreadPresentation.selectedAgentID,
-                        isThreadPageLoading:
+                        isThreadSnapshotLoading:
                             agentThreadPresentation.isLoading,
                         isRichRenderingEligible:
                             agentThreadPresentation.isRichRenderingEligible,
                         onSelectAgent: {
                             agentThreadPresentation.select($0)
-                        },
-                        onShowEarlier: {
-                            agentThreadPresentation.showEarlier()
-                        },
-                        onShowNewer: {
-                            agentThreadPresentation.showNewer()
-                        },
-                        onShowLatest: {
-                            agentThreadPresentation.showLatest()
                         })
         }
         // SwiftUI preserves this view's structural identity when one Cowork
@@ -1367,7 +1485,7 @@ struct CoworkSessionView: View {
         }
         .sheet(isPresented: $showProjectSettings) { projectSettingsSheet }
         .sheet(isPresented: $showGoalEditor) { goalEditorSheet }
-        .councisComposerAttachmentImport(
+        .intatisComposerAttachmentImport(
             isPresented: $showAttachmentImporter,
             onImport: { vm.importDraftAttachments($0) },
             onFailure: { vm.reportAttachmentImportFailure($0) })
@@ -1398,11 +1516,11 @@ struct CoworkSessionView: View {
     private var goalEditorValidationMessage: String? {
         if let goalEditorSubmissionError { return goalEditorSubmissionError }
         if goalObjectiveDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return CouncisLocalization.string("A Goal objective is required.")
+            return IntatisLocalization.string("A Goal objective is required.")
         }
         let budget = goalTokenBudgetDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if !budget.isEmpty, Int(budget).map({ $0 > 0 }) != true {
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Token budget must be a positive whole number, or left empty for no budget.")
         }
         return nil
@@ -1428,7 +1546,7 @@ struct CoworkSessionView: View {
                 onAddWorkspace: {
                     if let url = WorkspaceAccess.choose(
                         prompt:
-                            CouncisLocalization.string(
+                            IntatisLocalization.string(
                                 "Choose Project Workspace"))
                     {
                         vm.addProjectWorkspace(url)
@@ -1461,16 +1579,16 @@ struct CoworkSessionView: View {
     private var goalEditorSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Edit Goal")
-                .font(.councisTitle2.bold())
+                .font(IntatisTypography.system(.title2, bold: true))
             Text("Edit the durable objective and its requirements. Enter one success criterion or constraint per line. Leaving token budget empty means no Goal budget. A paused Goal remains paused.")
-                .font(.councisCallout)
+                .font(IntatisTypography.system(.callout))
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Objective")
-                    .font(.councisCaption.bold())
+                    .font(IntatisTypography.system(.caption, bold: true))
                 TextEditor(text: $goalObjectiveDraft)
-                    .font(.councisBody)
+                    .font(IntatisTypography.system(.body))
                     .frame(minWidth: 500, minHeight: 90)
                     .padding(8)
                     .overlay {
@@ -1484,14 +1602,14 @@ struct CoworkSessionView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Success criteria")
-                        .font(.councisCaption.bold())
+                        .font(IntatisTypography.system(.caption, bold: true))
                     Spacer()
                     Text("One per line")
-                        .font(.councisCaption2)
+                        .font(IntatisTypography.system(.caption2))
                         .foregroundStyle(.tertiary)
                 }
                 TextEditor(text: $goalSuccessCriteriaDraft)
-                    .font(.councisBody)
+                    .font(IntatisTypography.system(.body))
                     .frame(minHeight: 82)
                     .padding(8)
                     .overlay {
@@ -1505,14 +1623,14 @@ struct CoworkSessionView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Constraints")
-                        .font(.councisCaption.bold())
+                        .font(IntatisTypography.system(.caption, bold: true))
                     Spacer()
                     Text("One per line")
-                        .font(.councisCaption2)
+                        .font(IntatisTypography.system(.caption2))
                         .foregroundStyle(.tertiary)
                 }
                 TextEditor(text: $goalConstraintsDraft)
-                    .font(.councisBody)
+                    .font(IntatisTypography.system(.body))
                     .frame(minHeight: 82)
                     .padding(8)
                     .overlay {
@@ -1525,7 +1643,7 @@ struct CoworkSessionView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Token budget (optional)")
-                    .font(.councisCaption.bold())
+                    .font(IntatisTypography.system(.caption, bold: true))
                 TextField("No budget", text: $goalTokenBudgetDraft)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 220)
@@ -1535,7 +1653,7 @@ struct CoworkSessionView: View {
 
             if let validationMessage = goalEditorValidationMessage {
                 Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.councisCaption)
+                    .font(IntatisTypography.system(.caption))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("cowork.goal.editor.validation")
@@ -1585,7 +1703,7 @@ private struct CoworkInferenceAccessory: View {
     }
 
     private var modelLabel: String {
-        selectedOption?.modelTitle ?? CouncisLocalization.string("Inference unavailable")
+        selectedOption?.modelTitle ?? IntatisLocalization.string("Inference unavailable")
     }
 
     private var menuProviders: [ProviderModelMenuProvider] {
@@ -1631,15 +1749,15 @@ private struct CoworkInferenceAccessory: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Image(systemName: "chevron.down")
-                        .font(.councisFixed(size: 10, weight: .semibold))
+                        .font(IntatisTypography.system(size: 10, weight: .semibold))
                         .foregroundStyle(CouncisTheme.tertiaryText(scheme))
                         .accessibilityHidden(true)
                 }
-                .councisComposerSelectionLabel()
+                .intatisComposerSelectionLabel()
         }
-        .councisComposerSelectionMenu()
+        .intatisComposerSelectionMenu()
         .help(helpText)
-        .accessibilityLabel(Text(CouncisLocalization.format(
+        .accessibilityLabel(Text(IntatisLocalization.format(
             "Next @main model: %@",
             modelLabel)))
         .accessibilityIdentifier("cowork.main.inference-profile")
@@ -1647,13 +1765,13 @@ private struct CoworkInferenceAccessory: View {
 
     private var helpText: String {
         if options.isEmpty {
-            return CouncisLocalization.string("No configured inference profiles are available")
+            return IntatisLocalization.string("No configured inference profiles are available")
         }
         if isDisabled {
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "@main must be attached before selecting its next model")
         }
-        return CouncisLocalization.string(
+        return IntatisLocalization.string(
             "Model for the next @main message. Current work and other agents keep their existing models.")
     }
 }
@@ -1686,8 +1804,7 @@ final class CouncisApplicationDelegate: NSObject, NSApplicationDelegate {
         let controller = NSHostingController(
             rootView:
                 RendererFixtureView(
-                    arguments: arguments)
-                    .font(CouncisTypography.body()))
+                    arguments: arguments))
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
@@ -1788,7 +1905,13 @@ struct CouncisMacApp: App {
     #endif
 
     init() {
-        CouncisTypography.prepareBundledFonts()
+        do {
+            try IntatisHostApplication.configure(name: "Councis")
+        } catch {
+            fatalError(
+                "Councis could not install its shared runtime host identity: \(error.localizedDescription)")
+        }
+        IntatisTypography.prepareJetBrainsMonoTypography()
     }
 
     private var launchAppearance: ColorScheme? {
@@ -1807,55 +1930,87 @@ struct CouncisMacApp: App {
             || Bundle.main.bundleIdentifier?.hasSuffix(
                 ".CoworkAgentConversationFixture") == true
     }
+
+    private var launchesMessageFooterFixture: Bool {
+        Bundle.main.bundleIdentifier?.hasSuffix(
+            ".MessageFooterFixture") == true
+    }
+
+    private var documentSelectionFixtureStage: String? {
+        let identifier = Bundle.main.bundleIdentifier
+        if identifier?.hasSuffix(".DocumentSelectionFixture") == true {
+            return "code-selection"
+        }
+        if identifier?.hasSuffix(".DocumentSelectionTableFixture") == true {
+            return "table"
+        }
+        if identifier?.hasSuffix(".DocumentSelectionFullFixture") == true {
+            return "full-static"
+        }
+        return nil
+    }
+
+    private var messageFooterFixtureArguments: [String] {
+        return ProcessInfo.processInfo.arguments + [
+            "-CouncisRendererFixtureStage",
+            "message-footer",
+        ]
+    }
+    private var documentSelectionFixtureArguments: [String] {
+        guard let documentSelectionFixtureStage else {
+            return ProcessInfo.processInfo.arguments
+        }
+        return ProcessInfo.processInfo.arguments + [
+            "-CouncisRendererFixtureStage",
+            documentSelectionFixtureStage,
+        ]
+    }
     #endif
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                #if DEBUG || COUNCIS_RENDERER_VALIDATION
-                #if DEBUG
-                if ProcessInfo.processInfo.arguments.contains(
-                    "-CouncisPhaseLLifecycleFixture"
-                ) {
-                    PhaseLSessionLifecycleFixtureView()
-                        .preferredColorScheme(launchAppearance)
-                } else if ProcessInfo.processInfo.arguments.contains(
-                    "-CouncisPhaseCPermissionFixture"
-                ) {
-                    PhaseCPermissionFixtureView()
-                        .preferredColorScheme(launchAppearance)
-                } else if launchesCoworkAgentConversationFixture {
-                    CoworkAgentConversationFixtureView()
-                        .preferredColorScheme(launchAppearance)
-                } else if ProcessInfo.processInfo.arguments.contains(
-                    "-CouncisRendererFixture"
-                ) {
-                    RendererFixtureView()
-                        .preferredColorScheme(launchAppearance)
-                } else {
-                    CouncisProductionRootView(launchAppearance: launchAppearance)
-                }
-                #else
-                if ProcessInfo.processInfo.arguments.contains(
-                    "-CouncisRendererFixture"
-                ) {
-                    // The validation-only AppDelegate owns the single deterministic
-                    // NSHostingController fixture window. Keeping this scene inert
-                    // avoids running the exact workload twice while preserving the
-                    // normal Debug fixture scene unchanged.
-                    Color.clear
-                        .accessibilityIdentifier(
-                            "renderer.validation.host.placeholder")
-                        .preferredColorScheme(launchAppearance)
-                } else {
-                    CouncisProductionRootView(launchAppearance: launchAppearance)
-                }
-                #endif
-                #else
+            #if DEBUG || COUNCIS_RENDERER_VALIDATION
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-CouncisPhaseLLifecycleFixture") {
+                PhaseLSessionLifecycleFixtureView()
+                    .preferredColorScheme(launchAppearance)
+            } else if ProcessInfo.processInfo.arguments.contains("-CouncisPhaseCPermissionFixture") {
+                PhaseCPermissionFixtureView()
+                    .preferredColorScheme(launchAppearance)
+            } else if launchesCoworkAgentConversationFixture {
+                CoworkAgentConversationFixtureView()
+                    .preferredColorScheme(launchAppearance)
+            } else if launchesMessageFooterFixture {
+                RendererFixtureView(
+                    arguments: messageFooterFixtureArguments)
+                    .preferredColorScheme(launchAppearance)
+            } else if documentSelectionFixtureStage != nil {
+                RendererFixtureView(
+                    arguments: documentSelectionFixtureArguments)
+                    .preferredColorScheme(launchAppearance)
+            } else if ProcessInfo.processInfo.arguments.contains("-CouncisRendererFixture") {
+                RendererFixtureView()
+                    .preferredColorScheme(launchAppearance)
+            } else {
                 CouncisProductionRootView(launchAppearance: launchAppearance)
-                #endif
             }
-            .font(CouncisTypography.body())
+            #else
+            if ProcessInfo.processInfo.arguments.contains("-CouncisRendererFixture") {
+                // The validation-only AppDelegate owns the single deterministic
+                // NSHostingController fixture window. Keeping this scene inert
+                // avoids running the exact workload twice while preserving the
+                // normal Debug fixture scene unchanged.
+                Color.clear
+                    .accessibilityIdentifier(
+                        "renderer.validation.host.placeholder")
+                    .preferredColorScheme(launchAppearance)
+            } else {
+                CouncisProductionRootView(launchAppearance: launchAppearance)
+            }
+            #endif
+            #else
+            CouncisProductionRootView(launchAppearance: launchAppearance)
+            #endif
         }
         .defaultSize(width: 1100, height: 760)
     }
@@ -1874,6 +2029,7 @@ private struct CouncisProductionRootView: View {
     var body: some View {
         CouncisMacRootView(runtimeManager: env.runtimeManager)
             .environmentObject(env)
+            .font(IntatisTypography.globalFont)
             .preferredColorScheme(launchAppearance)
     }
 }

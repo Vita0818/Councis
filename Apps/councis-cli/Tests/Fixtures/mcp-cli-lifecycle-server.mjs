@@ -7,7 +7,7 @@ if (!statsPath) {
 }
 
 let catalogGeneration = 0;
-const sessionID = "councis-cli-lifecycle";
+const sessionID = "intatis-cli-lifecycle";
 
 const server = http.createServer(async (request, response) => {
   const method = request.method ?? "UNKNOWN";
@@ -61,7 +61,7 @@ const server = http.createServer(async (request, response) => {
       result = {
         protocolVersion: "2025-06-18",
         serverInfo: {
-          name: "councis-cli-lifecycle",
+          name: "intatis-cli-lifecycle",
           version: "1.0.0"
         },
         capabilities: {
@@ -75,7 +75,7 @@ const server = http.createServer(async (request, response) => {
         tools: [{
           name: "lifecycle_echo",
           title: `Lifecycle Echo ${catalogGeneration}`,
-          description: "Real loopback tool used by the Councis CLI owner E2E.",
+          description: "Real loopback tool used by the Intatis CLI owner E2E.",
           inputSchema: {
             type: "object",
             properties: {

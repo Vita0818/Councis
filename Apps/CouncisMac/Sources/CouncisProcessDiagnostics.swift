@@ -1,7 +1,7 @@
 #if canImport(AppKit)
 import AppKit
 import Foundation
-import CouncisCore
+import IntatisCore
 
 /// Process-level owner for the low-overhead main-thread heartbeat.
 ///
@@ -29,9 +29,9 @@ final class CouncisMacProcessDiagnostics {
     private var started = false
 
     private init() {
-        let store: CouncisHangDiagnosticBundleStore?
-        if let root = try? CouncisHangDiagnosticBundleStore.defaultRootURL() {
-            store = CouncisHangDiagnosticBundleStore(rootURL: root)
+        let store: IntatisHangDiagnosticBundleStore?
+        if let root = try? IntatisHangDiagnosticBundleStore.defaultRootURL() {
+            store = IntatisHangDiagnosticBundleStore(rootURL: root)
         } else {
             store = nil
         }
@@ -172,18 +172,18 @@ private final class CouncisMainThreadHeartbeatDriver: @unchecked Sendable {
     private let queue = DispatchQueue(
         label: "com.Vita0818.Councis.main-thread-heartbeat",
         qos: .utility)
-    private let diagnostics = CouncisPerformanceDiagnostics.shared
-    private let store: CouncisHangDiagnosticBundleStore?
+    private let diagnostics = IntatisPerformanceDiagnostics.shared
+    private let store: IntatisHangDiagnosticBundleStore?
     private let applicationVersion: String?
     private let buildVersion: String?
 
-    private var state = CouncisMainThreadHeartbeatStateMachine()
+    private var state = IntatisMainThreadHeartbeatStateMachine()
     private var timer: DispatchSourceTimer?
     private var mainPing: (@Sendable (UInt64) -> Void)?
     private var started = false
 
     init(
-        store: CouncisHangDiagnosticBundleStore?,
+        store: IntatisHangDiagnosticBundleStore?,
         applicationVersion: String?,
         buildVersion: String?
     ) {
@@ -207,7 +207,7 @@ private final class CouncisMainThreadHeartbeatDriver: @unchecked Sendable {
         timer.schedule(
             deadline: .now(),
             repeating: .milliseconds(
-                Int(CouncisDiagnosticConstants.heartbeatTickMilliseconds)),
+                Int(IntatisDiagnosticConstants.heartbeatTickMilliseconds)),
             leeway: .milliseconds(25))
         timer.setEventHandler { [weak self] in
             self?.tick()
@@ -265,7 +265,7 @@ private final class CouncisMainThreadHeartbeatDriver: @unchecked Sendable {
 
     private func persistIncident(delayMilliseconds: UInt64) {
         guard let store else { return }
-        let manifest = CouncisHangDiagnosticManifest(
+        let manifest = IntatisHangDiagnosticManifest(
             source: .mainThreadHeartbeat,
             recordedAt: Date(),
             processIdentifier: ProcessInfo.processInfo.processIdentifier,

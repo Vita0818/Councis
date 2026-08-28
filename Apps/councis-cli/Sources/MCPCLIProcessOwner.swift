@@ -1,10 +1,10 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
-import CouncisTools
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCore
+import IntatisMCP
+import IntatisProtocol
+import IntatisTools
 
 struct MCPCLIProcessOwnerKey:
     Hashable, Sendable
@@ -220,7 +220,7 @@ func makeMCPCLIInteractiveCodeSession(
             WorkspaceRootIdentity.capture(
                 rootPath: canonicalWorkspace.path)
     else {
-        throw CouncisError.permissionDenied(
+        throw IntatisError.permissionDenied(
             "The CLI Code workspace identity cannot be proven.")
     }
     try await context.bindInteractiveSessionLog(log)
@@ -319,7 +319,7 @@ actor MCPCLIInteractiveCodeHost {
         -> MCPCLIInteractiveCodeActivation
     {
         guard acceptsActivation else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "The CLI Code MCP host is shutting down.")
         }
         if let activation { return activation }
@@ -440,7 +440,7 @@ actor MCPCLIInteractiveCoworkHost {
         -> MCPCLIInteractiveCoworkActivation
     {
         guard acceptsActivation else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "The CLI Cowork MCP host is shutting down.")
         }
         if let activation { return activation }

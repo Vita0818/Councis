@@ -1,9 +1,9 @@
 #if DEBUG && canImport(SwiftUI)
 import SwiftUI
-import CouncisCore
-import CouncisProtocol
-import CouncisConversation
-import CouncisSharedUI
+import IntatisCore
+import IntatisProtocol
+import IntatisConversation
+import IntatisSharedUI
 
 /// Offline-only acceptance surface for Phase C permission semantics. This view
 /// deliberately owns no AppEnvironment, EventLog, provider, credential
@@ -24,10 +24,10 @@ struct PhaseCPermissionFixtureView: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Phase C Permission Validation")
-                    .font(.councisTitle2.bold())
+                    .font(IntatisTypography.system(.title2, bold: true))
                     .accessibilityIdentifier("phase-c.fixture.title")
                 Text("Offline fixture — no provider, EventLog, credential resolver, responder, or executor.")
-                    .font(.councisCallout)
+                    .font(IntatisTypography.system(.callout))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("phase-c.fixture.offline")
             }

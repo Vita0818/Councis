@@ -1,7 +1,7 @@
 #if canImport(SwiftUI)
 import Foundation
-import CouncisCore
-import CouncisProviders
+import IntatisCore
+import IntatisProviders
 
 /// Resolves provider secrets from configuration files, environment variables,
 /// and explicit secret files. Legacy `.keychain` refs are treated as config refs
@@ -24,7 +24,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
         case .environment:
             guard let value = ProcessInfo.processInfo.environment[ref.account],
                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw CouncisError.notFound("environment secret '\(ref.account)'")
+                throw IntatisError.notFound("environment secret '\(ref.account)'")
             }
             secret = value
         case .file:
@@ -33,7 +33,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
             secret = try Self.readAuthFileSecret(providerID: ref.account)
         case .providerConfig:
             guard Self.isAllowedProviderConfigPath(ref.service) else {
-                throw CouncisError.notFound("provider config is not a Councis-owned or explicitly selected config")
+                throw IntatisError.notFound("provider config is not a Councis-owned or explicitly selected config")
             }
             secret = try Self.readProviderConfigSecret(providerID: ref.account, path: ref.service)
         }
@@ -132,7 +132,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
         guard let value = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !value.isEmpty else {
-            throw CouncisError.notFound("empty secret file '\(path)'")
+            throw IntatisError.notFound("empty secret file '\(path)'")
         }
         return value
     }
@@ -152,7 +152,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
                 }
             }
         }
-        throw CouncisError.notFound("auth file secret for provider '\(providerID)'")
+        throw IntatisError.notFound("auth file secret for provider '\(providerID)'")
     }
 
     private static func readProviderConfigSecret(providerID: String, path: String) throws -> String {
@@ -160,7 +160,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? jsonCompatibleData(from: url),
               let object = try? JSONSerialization.jsonObject(with: data) else {
-            throw CouncisError.notFound("provider config secret for provider '\(providerID)'")
+            throw IntatisError.notFound("provider config secret for provider '\(providerID)'")
         }
         for candidate in authProviderIDCandidates(from: providerID) {
             if let secret = authSecret(in: object,
@@ -169,7 +169,7 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
                 return secret
             }
         }
-        throw CouncisError.notFound("provider config secret for provider '\(providerID)'")
+        throw IntatisError.notFound("provider config secret for provider '\(providerID)'")
     }
 
     private static func authFileContainsSecret(providerID: String, url: URL) -> Bool {
@@ -306,23 +306,11 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
             return [URL(fileURLWithPath: expandedPath(override))]
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let legacyOverride = environment[
-            LegacyIntatisCompatibility.Environment.authFile]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         var urls: [URL] = [
             writableAuthFileURL(),
-            home.appendingPathComponent(".local/share/councis/auth.json"),
+            home.appendingPathComponent(
+                "\(CouncisProductIdentity.sharedDataDirectoryRelativePath)/auth.json"),
         ]
-        if let legacyOverride, !legacyOverride.isEmpty {
-            urls.append(URL(fileURLWithPath: expandedPath(legacyOverride)))
-        } else {
-            urls.append(
-                home.appendingPathComponent(
-                    "\(LegacyIntatisCompatibility.configurationDirectoryRelativePath)/auth.json"))
-            urls.append(
-                home.appendingPathComponent(
-                    "\(LegacyIntatisCompatibility.sharedDataDirectoryRelativePath)/auth.json"))
-        }
         urls.append(contentsOf: providerConfigURLs())
         return urls
     }
@@ -334,45 +322,23 @@ public final class ConfigSecretResolver: SecretResolver, @unchecked Sendable {
             return [URL(fileURLWithPath: expandedPath(configOverride))]
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let legacyOverride = environment[
-            LegacyIntatisCompatibility.Environment.config]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        var urls = [
-            home.appendingPathComponent(".config/councis/councis.json"),
-            home.appendingPathComponent(".config/councis/councis.jsonc"),
-            home.appendingPathComponent(".config/councis/config.json"),
-            home.appendingPathComponent(".config/councis/config.jsonc"),
-            appSupportDir().appendingPathComponent("councis.json"),
-            appSupportDir().appendingPathComponent("councis.jsonc"),
+        let configDirectory = home.appendingPathComponent(
+            CouncisProductIdentity.configurationDirectoryRelativePath,
+            isDirectory: true)
+        return [
+            configDirectory.appendingPathComponent(
+                CouncisProductIdentity.configurationFileName),
+            configDirectory.appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName),
+            configDirectory.appendingPathComponent("config.json"),
+            configDirectory.appendingPathComponent("config.jsonc"),
+            appSupportDir().appendingPathComponent(
+                CouncisProductIdentity.configurationFileName),
+            appSupportDir().appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName),
             appSupportDir().appendingPathComponent("config.json"),
             appSupportDir().appendingPathComponent("config.jsonc"),
         ]
-        if let legacyOverride, !legacyOverride.isEmpty {
-            urls.append(URL(fileURLWithPath: expandedPath(legacyOverride)))
-        } else {
-            let legacyConfig = home.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationDirectoryRelativePath,
-                isDirectory: true)
-            let legacySupport = appSupportDir().deletingLastPathComponent()
-                .appendingPathComponent(
-                    LegacyIntatisCompatibility.applicationSupportDirectoryName,
-                    isDirectory: true)
-            urls.append(contentsOf: [
-                legacyConfig.appendingPathComponent(
-                    LegacyIntatisCompatibility.configurationFileName),
-                legacyConfig.appendingPathComponent(
-                    LegacyIntatisCompatibility.configurationJSONCFileName),
-                legacyConfig.appendingPathComponent("config.json"),
-                legacyConfig.appendingPathComponent("config.jsonc"),
-                legacySupport.appendingPathComponent(
-                    LegacyIntatisCompatibility.configurationFileName),
-                legacySupport.appendingPathComponent(
-                    LegacyIntatisCompatibility.configurationJSONCFileName),
-                legacySupport.appendingPathComponent("config.json"),
-                legacySupport.appendingPathComponent("config.jsonc"),
-            ])
-        }
-        return urls
     }
 
     private static func isAllowedProviderConfigPath(_ path: String) -> Bool {

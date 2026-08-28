@@ -1,9 +1,9 @@
 import Foundation
-import CouncisCore
-import CouncisKnowledge
-import CouncisProtocol
-import CouncisProviders
-import CouncisTools
+import IntatisCore
+import IntatisKnowledge
+import IntatisProtocol
+import IntatisProviders
+import IntatisTools
 
 /// Composes the shipping CLI Knowledge surface only when both independent
 /// model roles are configured. This keeps Chat and partially configured

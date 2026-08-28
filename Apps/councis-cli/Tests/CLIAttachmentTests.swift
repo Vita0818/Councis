@@ -1,14 +1,14 @@
 import Foundation
 import XCTest
-import CouncisAgentKernel
-import CouncisArtifacts
-import CouncisConversation
-import CouncisCore
-import CouncisCowork
-import CouncisPermission
-import CouncisProtocol
-import CouncisProviders
-import CouncisTools
+import IntatisAgentKernel
+import IntatisArtifacts
+import IntatisConversation
+import IntatisCore
+import IntatisCowork
+import IntatisPermission
+import IntatisProtocol
+import IntatisProviders
+import IntatisTools
 @testable import CouncisCLI
 
 private final class CLIMultimodalCapturingProvider:
@@ -269,8 +269,6 @@ final class CLIAttachmentTests: XCTestCase {
                     path: workspace.path,
                     agentName: Orchestrator.mainAgentID.rawValue,
                     isPrimary: true)]),
-            judgeModel: binding.modelID,
-            judgeInferenceBinding: binding,
             permissionReviewerModel: binding.modelID,
             permissionReviewerInferenceBinding: binding)
         XCTAssertEqual(bootstrap, .attached(Orchestrator.mainAgentID))

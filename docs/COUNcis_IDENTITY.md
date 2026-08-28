@@ -1,113 +1,143 @@
-# Councis 产品身份与来源边界
+# Councis 产品身份与共享实现边界
 
 文档状态：当前产品身份合同
-
-最近核对：2026-08-18
-
+最近核对：2026-08-28
 产品基线：v0.10（build 49）
 
 ## 一句话定位
 
-Councis 是 Apple-first、Swift-native 的本地 AI Cowork 产品。它在固定 Intatis source snapshot 的
-业务能力基础上拥有独立的工程、模块、App、CLI、配置、存储、日志与协议 canonical identity；
-macOS 只呈现 Cowork，但仍保留 Chat/Code runtime 与历史兼容。fresh Cowork 固定登记普通只读
-数据面 `@judge`，Main 可按需取得多个候选并显式让 Judge 比较，最终产品与编排责任仍属于 Main。
-
-## 固定来源
-
-业务基线来自 `/Users/vita/Vitemis/Intatis` 的干净提交
-`120eda64fcb098f1bdc4852fee886450e80b3722`（标题 `v0.54`，tree
-`7fe2842aeec8fa08bec80e34342f971dc4226dcd`）。来源、archive digest、复制边界和排除项见
-`docs/INTATIS_BASELINE.md`。
-
-该来源事实必须保留，不能因为产品改名而把派生实现描述成无来源原创。仓库没有
-`Upstream/Intatis` 或第二份实现树；所有实现直接修改 Councis 根工作树，不回到来源仓库改代码。
+Councis 是 Apple-first、Swift-native 的本地 AI Cowork 产品，也是唯一
+`/Users/vita/Vitemis/Intatis` checkout 的第一方下游产品覆盖层。Councis
+拥有自己的 App/CLI、品牌、UI composition、配置、数据根、session/workspace
+生命周期与发行闭包；共享 agent/runtime/core/tool 实现直接来自 Intatis
+SwiftPM products，不再复制或同步源码快照。
 
 ## 当前 Councis canonical identity
 
-- 唯一 Apple App：macOS `Councis`。
+- 唯一 App：macOS `Councis`。
 - Xcode project：`Councis.xcodeproj`。
 - App target/scheme：`CouncisMac`。
 - App bundle/product/executable：`Councis.app` / `Councis`。
 - Bundle ID：`com.Vita0818.Councis`。
-- 分发：Developer ID、Hardened Runtime、公证、直接下载；无 Mac App Store target。
-- 无 iOS App target/source/product。
-- SwiftPM package：`Councis`。
-- public libraries：`CouncisCore`、`CouncisProtocol`、`CouncisProviders`、
-  `CouncisArtifacts`、`CouncisConversation`、`CouncisTools`、`CouncisKnowledge`、
-  `CouncisSkills`、`CouncisPermission`、`CouncisMCP`、`CouncisMCPStdio`、
-  `CouncisAgentKernel`、`CouncisCowork`、`CouncisMultimodal`、`CouncisSharedUI`。
-- internal C/guard targets：`CouncisPTYLauncher`、`CouncisCurlTransport`、
-  `CouncisMCPStdioGuard`。
-- CLI target/product：`CouncisCLI` / `councis`；不提供新的 `intatis` alias。
-- source roots：`Apps/CouncisMac`、`Apps/councis-cli`、`Packages/Councis*`、
-  `Councis.icon`、`.agents/skills/councis-skill-creator`。
+- CLI target/product：`CouncisCLI` / `councis`。
 - Application Support：`~/Library/Application Support/Councis`。
-- config/auth：`~/.config/councis/councis.json[c]`、`~/.config/councis/auth.json`；
-  canonical override 使用 `COUNCIS_*`。
-- UserDefaults、workspace metadata、Knowledge、tool registry、permission policy、MCP、diagnostic、
-  MIME/UTI 与 sidecar canonical identity 使用 `councis` / `Councis` / `COUNCIS`。
-- automatic permission sidecar：`__councis_authorization_context`。
-- MCP Keychain service：`com.Vita0818.Councis.mcp.credentials`。
+- config：`~/.config/councis/councis.json[c]` / `COUNCIS_CONFIG`。
+- auth：`~/.config/councis/auth.json` / `COUNCIS_AUTH_FILE`。
+- UserDefaults 与 product host keys：`councis.*`。
+- development Runtime override：`COUNCIS_CODEX_RUNTIME`。
+- 分发：Developer ID、Hardened Runtime、公证、直接下载。
+- 无 iOS App、无 Mac App Store target、无 App Sandbox 产品分支。
 
-完整逐项清单、legacy 白名单和验证矩阵见 `docs/COUNcis_DECOUPLING_CHECKLIST.md`。
+共享 Swift modules、public types、wire identity、Codex Runtime version 与
+derivation 使用 `Intatis*` / `intatis` 是实现来源事实，不是 Councis
+用户品牌，也不允许为了字符串纯度再复制或包装实现。
+
+App与CLI在构造任何共享storage/provider/runtime前调用
+`IntatisHostApplication.configure(name: "Councis")`，使Intatis共享实现中明确
+属于embedding host的路径、环境变量、defaults与diagnostic namespace解析为
+Councis；固定Swift module/runtime/protocol provenance仍保持Intatis。
+
+## 唯一共享实现
+
+`Package.swift` 与 `project.yml` 都通过 `../Intatis` 指向：
+
+```text
+/Users/vita/Vitemis/Intatis
+```
+
+当前核对 revision 与工作树形态：
+
+```text
+42cb5b36fb6be943ee7812aca3f8520c2e487b04  v0.66 HEAD
+同一 checkout 上叠加尚未提交的最新 host-identity/storage 内核改动
+```
+
+Councis 本次适配与验证消费的是上述当前工作树字节，而不是仅消费 HEAD commit。
+因此源码接线结果可验证，但在 Intatis 把这些字节形成可引用 revision 前，发行级
+可复现性仍为 `UNKNOWN`。
+
+Councis 直接链接实际需要的 `IntatisCore`、`IntatisProtocol`、
+`IntatisProviders`、Conversation、Artifacts、Tools、Knowledge、Skills、
+Permission、MCP、MCPStdio、AgentKernel compatibility types、Cowork、
+SharedUI、Multimodal 与 `IntatisCodexRuntime` products。具体 App/CLI 清单见
+`Package.swift`、`project.yml` 和 `docs/PROJECT_MAP.md`。
+
+## 运行时身份
+
+- 宿主 API：`CodexRuntimeHostContract.publicAPIMajorVersion == 1`。
+- exact executable：`codex-cli 0.145.0-intatis.4`。
+- version 与 pinned derivation ID 独立复核。
+- 每个 Councis session 使用自己的 `runtimeRootURL`、isolated
+  `CODEX_HOME`、workspace、credential 与权限状态。
+- Code/Cowork production send、approval、cancel、Goal、child 和 shutdown
+  只走 `CodexAppServerSession`。
+- 项目/第一方工具只经 official `dynamicTools` extension；不存在旧
+  AgentLoop/Orchestrator production fallback。
+- 开发期可显式使用 `COUNCIS_CODEX_RUNTIME`；正式 App 必须自带 exact
+  current-architecture executable，不依赖 sibling checkout 或 PATH。
 
 ## 产品表面
 
-- macOS 根界面不显示 Chat/Code/Cowork 模式切换；初始 selection 固定为 Cowork，sidebar 只显示
-  Councis、Cowork Recent/New 与 Settings。
-- Chat/Code view、runtime、session kind、EventLog replay 与历史数据兼容继续保留；隐藏不等于删除。
-- CLI 继续提供 Chat/Code/Cowork、managed terminal、Skills、Knowledge 与 external MCP client。
-- 项目不再提供 iOS App，也不再维护或验证 Mac App Store target。
+- macOS 只显示 Cowork history/New 与 Settings；Chat/Code 共享实现与 CLI
+  命令继续编译，但不成为平行 App 导航。
+- Sidebar `+` 与空白 Cowork `New` 继续只显示
+  `Choose Folder…` / `No Folder`。
+- `No Folder` 创建
+  `~/Library/Application Support/Councis/Workspaces/<SessionID>` 的
+  owner-only managed workspace；删除 session 不删除 workspace 内容。
+- Councis 继续使用系统动态 window canvas、原生 Liquid Glass、JetBrains
+  Mono、现有 Cowork rail/composer/thread 布局和 Councis 图标/文案。
 
-## 固定 Judge
+## Judge
 
-- fresh empty Cowork session 在任何模型请求前，以 settings-first 十事件 batch 原子登记 `@main`、
-  `@judge` 与 `@permission-reviewer` 各自的 workspace lease、capability lease 和 identity。
-- macOS fresh `New` 只提供 `Choose Folder…` 与 `No Folder` 两项：前者使用用户选择的 canonical
-  workspace，后者创建 Councis-owned、per-session owner-only canonical workspace。三者共享该
-  session canonical workspace，但 identity、lease 与 exact inference binding 独立。
-- `judge_model` 是 macOS/modern CLI 高级 JSON/JSONC 的 canonical 顶层字段，不增加 Judge UI。
-- 字段缺失只在配置解析层一次性继承同一 JSON 文档的顶层 `model`；显式 null/错误类型/空值、
-  unknown/disabled route、损坏配置或不可证明来源均 fail closed，不回退 UI/session/Main/rebind。
-- Judge 是 host 管理的 ordinary read-only data-plane agent，`coordinationDepth=0`；不可 ordinary
-  attach/spawn/remove/detach/rebind/recycle，不进入 omitted/auto delegation，无 coordinator、
-  run-control、Permission Reviewer 或 GoalVerifier authority。
-- Main 只能通过既有显式 delegate/message/ask 路径使用 Judge。Judge report 是候选证据；Main 必须
-  自己验证、选择、改写/综合、结算 WorkTask 并承担最终决定。
-- 既有非空历史 session 不自动补写 Judge；已持久化 Judge 按 ordinary roster 恢复。
+`judge_model` 仍由 Councis config 解析为 exact base inference binding，显式
+非法值 fail closed。fresh Cowork 把它登记为 host-advertised、read-only native
+Codex child profile `judge`：
 
-## Legacy Intatis 白名单
+- 只能比较、批评、选择、改写或综合候选；
+- sandbox 与 permission profile 均为 read-only；
+- 不获得 coordination、run-control、Goal 或最终决定权；
+- Main 仍承担事实复核、选择、WorkTask settlement 与最终答复。
 
-`Intatis` 不再是活跃 identity。它只可存在于：
+共享 Runtime 的 native child thread identity/历史由 Codex App Server拥有；
+Councis 不再维护另一套固定 AgentLoop/Judge scheduler。既有旧 Swift runtime
+session 若无法 exact 映射到 current Codex thread/toolset，不静默迁移，要求新
+session。
 
-- `docs/INTATIS_BASELINE.md`、固定 source commit/tree/archive、真实来源路径和 NOTICE/provenance；
-- dated reports、历史事故/验证记录、byte-exact 第三方标准或必须保留的 upstream/local patch ledger；
-- `LegacyIntatisCompatibility` 只读路径/key/env/raw value、旧 EventLog/schema/registry/policy decoder；
-- 旧 config/auth/UserDefaults/bundle domain、CLI root/AAD、MCP Keychain service、provider adapter、
-  permission sidecar 与敏感路径保护；
-- 专门证明旧值可读但新 writer 只输出 Councis 的回归 fixture。
+与旧产品合同相比仍有一个明确 gap：当前 public Runtime 只能广告 `judge`
+profile，不能由 host 在零 provider 请求下预先创建/attach该child。因此fresh UI
+在Judge尚未由Main创建前不能证明已有同一可选conversation row。这项strict
+功能/UI parity尚未完成；不得用第二Runtime或synthetic thread伪造。
 
-任何新的 target/module/type/path、CLI help、用户文案、配置模板、App/发行产物、新 EventLog/registry/
-policy/schema identity 或 canonical writer 命中旧品牌都属于失败。`scripts/check-brand-boundary.sh` 对活跃
-源码执行显式白名单门。
+## 旧 Intatis 数据边界
 
-## 保持不变的安全与运行时边界
+正常 App/CLI 启动不再自动读取：
 
-- EventLog append-only、`seq` 单调、WAL、session writer lease、checked replay 与 unknown-future-event
-  fail-closed 不变；旧 JSONL 不原地改写。
-- `session.json` 仍是可删除重建投影；bookmark 仍只进入 session-owned binary plist。
-- PermissionEngine 三层门、CapabilityLease、WorkspaceLease、PathConfinement、SecretScanner、Mediator、
-  durable execution ticket、managed-terminal Seatbelt/default-network-deny 不得弱化。
-- AgentLoop 不同步递归；协作继续经 scheduler、mailbox、MessageBus 与 EventLog。
-- `@permission-reviewer` 与 GoalVerifier 继续是彼此独立、无工具的控制面；Judge 不替代它们。
-- 不因删除 App Store/iOS 产品面而扩大默认 platform profile；`PlatformProfile.current` 仍为
-  `.restricted`，只有显式 `.macDeveloperID` host 获得本地 workspace/shell/MCP 能力。
+- `INTATIS_*` 环境变量；
+- `~/.config/intatis` 或 `~/.local/share/intatis`；
+- `~/Library/Application Support/Intatis`；
+- Intatis bundle domain中的provider/model/UserDefaults。
 
-## 实现纪律
+`LegacyIntatisCompatibility` 当前只保留旧 workspace bookmark key，供未来明确
+发起、确认归属的迁移路径解码；正常session restore与Cowork启动不调用它。当前
+产品没有自动认领旧Intatis配置、凭据或workspace capability的入口。新writer、
+App/CLI help、config template、UserDefaults、Application Support、diagnostic和
+用户可见文案只使用Councis identity；共享SecretScanner仍由Intatis保留旧敏感
+路径的deny floor。
 
-- 新功能只使用 Councis canonical identity；需要读旧值时必须进入清晰的 legacy namespace 和测试。
-- legacy bridge 必须只读来源、新写 Councis、canonical 值优先、不自动合并或删除旧数据；旧
-  secret/config 路径继续受安全硬拒绝。
-- 不从旧 Git 历史机械恢复其它 Councis 差异，不扩大 Judge/UI/authority，不恢复 iOS/App Store 产品面。
-- 不把来源证明、第三方版权或 patch provenance 错误批量改成 Councis 原创。
+## 已删除的旧快照
+
+2026-08-28 迁移删除了 661 个 Git-tracked snapshot 文件，范围为：
+
+- `Packages/Councis*`；
+- `Vendor/`；
+- `ThirdPartyStandards/`；
+- `Tests/MCPBM25ParityOracle/`；
+- `Tests/MCPConformance/`。
+
+ignored build cache 未被递归清理；它们不属于 manifest、active import graph 或
+production fallback。共享源码、Vendor、standards、tests、NOTICE 和 runtime
+provenance 现在只由 Intatis checkout 维护。
+
+Councis本地只保留dev-only `councis-skill-creator`自身的notice/license；共享依赖
+notice不再复制维护，App从Intatis canonical目录打包。

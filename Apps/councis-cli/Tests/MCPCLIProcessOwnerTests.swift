@@ -1,15 +1,147 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCodexRuntime
+import IntatisCore
+import IntatisMCP
+import IntatisProtocol
 import XCTest
 @testable import CouncisCLI
 
 final class MCPCLIProcessOwnerTests:
     XCTestCase
 {
+    func testNativeCodexGrantEntryPersistsOnlyRootCompleteNonExpiringAuthority()
+        async throws
+    {
+        let fixture: MCPCLILoopbackFixture
+        do {
+            fixture = try MCPCLILoopbackFixture()
+        } catch MCPCLILoopbackFixtureError
+                    .loopbackBindPermissionDenied {
+            throw XCTSkip(
+                "This test runner forbids binding a real 127.0.0.1 listener.")
+        }
+        defer { fixture.stop() }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "councis-cli-native-grant-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent(
+            "workspace",
+            isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: workspace,
+            withIntermediateDirectories: true)
+        let context = MCPCLIContext(
+            root: root.appendingPathComponent(
+                "mcp-config",
+                isDirectory: true))
+        let sessionID = SessionID(
+            rawValue: "cli_native_grant")
+        let interactive = try await makeMCPCLIInteractiveCodeSession(
+            context: context,
+            workspace: workspace,
+            sessionID: sessionID,
+            agentID: AgentID(rawValue: "Coder"))
+        try await context.bindInteractiveSessionLog(
+            interactive.log,
+            nativeCodexRootAgentID: interactive.agentID)
+
+        do {
+            try await runMCPCommand([
+                "add",
+                "--alias", "native",
+                "--url", fixture.endpoint,
+                "--profile", "codex-compat",
+                "--allow-insecure-loopback-development-http",
+                "--yes",
+            ][...], context: context)
+            try await runMCPCommand([
+                "attach",
+                "--session", sessionID.rawValue,
+                "--server", "native",
+                "--agent", interactive.agentID.rawValue,
+            ][...], context: context)
+
+            do {
+                try await runMCPCommand([
+                    "grant",
+                    "--session", sessionID.rawValue,
+                    "--server", "native",
+                    "--agent", interactive.agentID.rawValue,
+                    "--capabilities", "tools",
+                ][...], context: context)
+                XCTFail("A partial native Codex grant must be rejected")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(
+                    "partial capability grant"))
+            }
+            do {
+                try await runMCPCommand([
+                    "grant",
+                    "--session", sessionID.rawValue,
+                    "--server", "native",
+                    "--agent", "child",
+                ][...], context: context)
+                XCTFail("A child native Codex grant must be rejected")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(
+                    "session-root Agent"))
+            }
+            do {
+                try await runMCPCommand([
+                    "status",
+                    "--session", sessionID.rawValue,
+                    "--agent", "child",
+                ][...], context: context)
+                XCTFail("A child native Codex live action must be rejected")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(
+                    "session-root Agent"))
+            }
+            do {
+                try await runMCPCommand([
+                    "grant",
+                    "--session", sessionID.rawValue,
+                    "--server", "native",
+                    "--agent", interactive.agentID.rawValue,
+                    "--ttl-seconds", "60",
+                ][...], context: context)
+                XCTFail("An expiring native Codex grant must be rejected")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(
+                    "cannot use --ttl-seconds"))
+            }
+
+            try await runMCPCommand([
+                "grant",
+                "--session", sessionID.rawValue,
+                "--server", "native",
+                "--agent", interactive.agentID.rawValue,
+            ][...], context: context)
+            let state = try await MCPDurableSessionState.load(
+                from: interactive.log)
+            let grant = try XCTUnwrap(state.grants.values.first)
+            XCTAssertEqual(state.grants.count, 1)
+            XCTAssertEqual(
+                Set(grant.capabilities),
+                CodexRuntimeMCPProjector
+                    .requiredNativeSurfaceCapabilities)
+            XCTAssertEqual(grant.agentID, interactive.agentID)
+            XCTAssertNil(grant.taskID)
+            XCTAssertNil(grant.expiresAt)
+        } catch {
+            await interactive.shutdown(
+                reason: "native Codex grant entry test failed")
+            throw error
+        }
+        await interactive.shutdown(
+            reason: "native Codex grant entry test completed")
+    }
+
     func testShippingCodeHostWithoutAttachmentIsCompletelyInert()
         async throws
     {
@@ -334,6 +466,44 @@ final class MCPCLIProcessOwnerTests:
         }
         let configURL = root.appendingPathComponent(
             "councis.json")
+        let codexRuntime = root.appendingPathComponent(
+            "intatis-codex")
+        let codexScript = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          echo 'codex-cli 0.145.0-intatis.4'
+          exit 0
+        fi
+        if [ "$1" = "--intatis-derivation-id" ]; then
+          echo '0003-sha256:9cd57fc61366cb7410f6e551aa48ec762094e9a4edbfcbf0ae4670b7ba1f2285'
+          exit 0
+        fi
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+          if [ "$count" = "1" ]; then
+            echo '{"id":1,"result":{"userAgent":"fake"}}'
+          elif [ "$count" = "2" ]; then
+            case "$line" in
+              *skills/extraRoots/set*)
+                echo '{"id":2,"result":{}}'
+                ;;
+              *) exit 41 ;;
+            esac
+          elif [ "$count" = "3" ]; then
+            case "$line" in
+              *thread/start*)
+                echo '{"id":3,"result":{"thread":{"id":"thread-cli-no-mcp","turns":[],"createdAt":0,"updatedAt":0,"status":{"type":"idle"}}}}'
+                ;;
+              *) exit 42 ;;
+            esac
+          fi
+        done
+        """
+        try Data(codexScript.utf8).write(to: codexRuntime)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)],
+            ofItemAtPath: codexRuntime.path)
         let config: [String: Any] = [
             "model": "test/cli-no-mcp-model",
             "enabled_providers": ["test"],
@@ -378,6 +548,13 @@ final class MCPCLIProcessOwnerTests:
             "test/cli-no-mcp-model"
         environment["COUNCIS_MODE"] = "code"
         environment["COUNCIS_USAGE"] = "0"
+        environment["COUNCIS_CODEX_RUNTIME"] =
+            codexRuntime.path
+        // Keep the shipping-process smoke's deterministic Codex session home
+        // inside this fixture. The fixture defer removes it, so a test run
+        // cannot leave empty runtime directories in the user's real
+        // Application Support tree.
+        environment["CFFIXED_USER_HOME"] = root.path
         process.environment = environment
         process.standardInput = input
         process.standardOutput = output
@@ -789,7 +966,7 @@ private final class MCPCLILoopbackFixture {
             withExtension: "mjs",
             subdirectory: "Fixtures")
         else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "The bundled MCP loopback fixture is unavailable.")
         }
         let process = Process()
@@ -833,7 +1010,7 @@ private final class MCPCLILoopbackFixture {
             if byte[0] == 0x0A { break }
             line.append(byte)
             guard line.count <= 16 else {
-                throw CouncisError.io(
+                throw IntatisError.io(
                     "The MCP loopback fixture returned an invalid port.")
             }
         }
@@ -843,7 +1020,7 @@ private final class MCPCLILoopbackFixture {
               let port = Int(value),
               (1...65_535).contains(port)
         else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "The MCP loopback fixture returned an invalid port.")
         }
         endpoint =

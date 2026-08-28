@@ -1,7 +1,8 @@
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
+import CouncisProductSupport
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
 
 /// One named variant from the shared Councis/OpenCode-compatible provider
 /// configuration. The raw configuration name stays local; durable bindings use
@@ -137,44 +138,41 @@ struct CLIModernProviderConfig: Sendable {
     let sourceURL: URL
 
     static func existingURL(environment: [String: String]) -> URL? {
+        existingURL(
+            environment: environment,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            applicationSupportDirectory: FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask).first)
+    }
+
+    static func existingURL(
+        environment: [String: String],
+        homeDirectory: URL,
+        applicationSupportDirectory: URL?
+    ) -> URL? {
         if let override = environment["COUNCIS_CONFIG"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !override.isEmpty {
             return URL(fileURLWithPath: expandedPath(override)).standardizedFileURL
         }
-        if let override = environment[
-            LegacyIntatisCompatibility.Environment.config]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !override.isEmpty {
-            return URL(fileURLWithPath: expandedPath(override))
-                .standardizedFileURL
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let config = home.appendingPathComponent(".config/councis", isDirectory: true)
-        let legacyConfig = home.appendingPathComponent(
-            LegacyIntatisCompatibility.configurationDirectoryRelativePath,
+        let config = homeDirectory.appendingPathComponent(
+            CouncisProductIdentity.configurationDirectoryRelativePath,
             isDirectory: true)
         var candidates = [
-            config.appendingPathComponent("councis.json"),
-            config.appendingPathComponent("councis.jsonc"),
-            legacyConfig.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationFileName),
-            legacyConfig.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationJSONCFileName),
+            config.appendingPathComponent(
+                CouncisProductIdentity.configurationFileName),
+            config.appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName),
         ]
-        if let support = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask).first {
-            let directory = support.appendingPathComponent("Councis", isDirectory: true)
-            candidates.append(directory.appendingPathComponent("councis.json"))
-            candidates.append(directory.appendingPathComponent("councis.jsonc"))
-            let legacyDirectory = support.appendingPathComponent(
-                LegacyIntatisCompatibility.applicationSupportDirectoryName,
+        if let applicationSupportDirectory {
+            let directory = applicationSupportDirectory.appendingPathComponent(
+                CouncisProductIdentity.applicationSupportDirectoryName,
                 isDirectory: true)
-            candidates.append(legacyDirectory.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationFileName))
-            candidates.append(legacyDirectory.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationJSONCFileName))
+            candidates.append(directory.appendingPathComponent(
+                CouncisProductIdentity.configurationFileName))
+            candidates.append(directory.appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName))
         }
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -182,13 +180,13 @@ struct CLIModernProviderConfig: Sendable {
     static func load(from url: URL,
                      environment: [String: String]) throws -> CLIModernProviderConfig {
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw CouncisError.config("selected Councis provider config is unavailable")
+            throw IntatisError.config("selected Councis provider config is unavailable")
         }
         let data = try JSONC.data(contentsOf: url)
         guard case .object(let root) = try JSONDecoder().decode(JSONValue.self, from: data),
               let providerMap = root.object("provider"),
               !providerMap.isEmpty else {
-            throw CouncisError.config("selected Councis provider config has no provider map")
+            throw IntatisError.config("selected Councis provider config has no provider map")
         }
 
         let enabled = Set((root.stringArray("enabled_providers")
@@ -207,7 +205,7 @@ struct CLIModernProviderConfig: Sendable {
         if permissionReviewerFieldPresent,
            permissionReviewerModelRaw?.trimmingCharacters(
                in: .whitespacesAndNewlines).isEmpty != false {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "invalid CLI permission_reviewer_model")
         }
         let judgeFieldPresent = root["judge_model"] != nil
@@ -218,7 +216,7 @@ struct CLIModernProviderConfig: Sendable {
         if judgeFieldPresent,
            judgeModelRaw?.trimmingCharacters(
                in: .whitespacesAndNewlines).isEmpty != false {
-            throw CouncisError.config("invalid CLI judge_model")
+            throw IntatisError.config("invalid CLI judge_model")
         }
         let imageModelRaw = resolvedConfigValue(
             root.string("image_model") ?? root.string("imageModel"),
@@ -262,7 +260,7 @@ struct CLIModernProviderConfig: Sendable {
             let chatEndpoint: URL?
             if let rawChat = options.string("chatEndpoint") ?? provider.string("chatEndpoint") {
                 guard let validated = CLIProviderRoute.validHTTPURL(rawChat) else {
-                    throw CouncisError.config("invalid CLI provider chat endpoint")
+                    throw IntatisError.config("invalid CLI provider chat endpoint")
                 }
                 chatEndpoint = validated
             } else {
@@ -325,7 +323,7 @@ struct CLIModernProviderConfig: Sendable {
             return filtered.models.isEmpty ? nil : filtered
         }
         guard !inferenceRoutes.isEmpty else {
-            throw CouncisError.config("selected Councis provider config has no usable routes")
+            throw IntatisError.config("selected Councis provider config has no usable routes")
         }
 
         let selection = try selectModel(selectedRaw, routes: inferenceRoutes)
@@ -373,7 +371,7 @@ struct CLIModernProviderConfig: Sendable {
             if let selected = exact.first(where: { $0.id == selectedProviderID }) {
                 return (selected.id, trimmed)
             }
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "ambiguous CLI model override; qualify a model that is not also a complete configured model ID")
         }
         for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
@@ -384,7 +382,7 @@ struct CLIModernProviderConfig: Sendable {
                     guard !isKnowledgeRoleModel(
                         providerID: route.id,
                         modelID: model) else {
-                        throw CouncisError.config(
+                        throw IntatisError.config(
                             "Knowledge role models cannot be selected as CLI inference models")
                     }
                     return (route.id, model)
@@ -416,7 +414,7 @@ struct CLIModernProviderConfig: Sendable {
         }
         let baseMatches = Self.reasoningEffort(in: model.requestOptions) == reasoningEffort
         guard matchingVariants.count + (baseMatches ? 1 : 0) <= 1 else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "selected CLI reasoning effort matches multiple configured profiles; select an exact profile instead")
         }
         return matchingVariants.first?.id
@@ -445,7 +443,7 @@ struct CLIModernProviderConfig: Sendable {
             }
             if exact.count == 1, let only = exact.first { return only }
             if exact.count > 1 {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "ambiguous configured model ID across CLI provider routes")
             }
             for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
@@ -476,7 +474,7 @@ struct CLIModernProviderConfig: Sendable {
             guard let inheritedRaw = inheritedTopLevelModel?.trimmingCharacters(
                 in: .whitespacesAndNewlines),
                 !inheritedRaw.isEmpty else {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "\(configurationKey) is absent and the JSON top-level model is unavailable")
             }
             let inherited = try selectModel(
@@ -488,7 +486,7 @@ struct CLIModernProviderConfig: Sendable {
                         $0.id == inherited.modelID
                     })
             }) else {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "\(configurationKey) cannot inherit an unknown JSON top-level model")
             }
             return CLIProviderModelSelection(
@@ -497,7 +495,7 @@ struct CLIModernProviderConfig: Sendable {
         }
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "invalid CLI \(configurationKey)")
         }
         for route in routes.sorted(by: { $0.id.count > $1.id.count }) {
@@ -506,14 +504,14 @@ struct CLIModernProviderConfig: Sendable {
             let modelID = String(raw.dropFirst(prefix.count))
             guard !modelID.isEmpty,
                   route.models.contains(where: { $0.id == modelID }) else {
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "CLI \(configurationKey) does not resolve to a configured inference model")
             }
             return CLIProviderModelSelection(
                 providerID: route.id,
                 modelID: modelID)
         }
-        throw CouncisError.config(
+        throw IntatisError.config(
             "CLI \(configurationKey) must use the canonical provider/model shape")
     }
 
@@ -544,7 +542,7 @@ struct CLIModernProviderConfig: Sendable {
                         providerID: preferred.id,
                         modelID: raw)
                 }
-                throw CouncisError.config(
+                throw IntatisError.config(
                     "ambiguous CLI \(roleName) model; qualify it with a provider ID")
             }
         }
@@ -554,7 +552,7 @@ struct CLIModernProviderConfig: Sendable {
             if raw.hasPrefix(prefix) {
                 let modelID = String(raw.dropFirst(prefix.count))
                 guard !modelID.isEmpty else {
-                    throw CouncisError.config("invalid CLI \(roleName) model")
+                    throw IntatisError.config("invalid CLI \(roleName) model")
                 }
                 return CLIProviderModelSelection(
                     providerID: route.id,
@@ -563,12 +561,12 @@ struct CLIModernProviderConfig: Sendable {
         }
 
         if requiresQualifiedProvider {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "CLI \(roleName)_model must use the canonical provider/model shape")
         }
 
         guard routes.contains(where: { $0.id == preferredProviderID }) else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "selected CLI \(roleName) provider route is unavailable")
         }
         return CLIProviderModelSelection(
@@ -727,7 +725,7 @@ struct CLIExactSecretResolver: SecretResolver {
         }
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "credential unavailable for the exact CLI inference route")
         }
         return trimmed
@@ -740,20 +738,13 @@ struct CLIExactSecretResolver: SecretResolver {
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !override.isEmpty {
             urls = [URL(fileURLWithPath: expandedPath(override))]
-        } else if let override = environment[
-            LegacyIntatisCompatibility.Environment.authFile]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !override.isEmpty {
-            urls = [URL(fileURLWithPath: expandedPath(override))]
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser
             urls = [
-                home.appendingPathComponent(".config/councis/auth.json"),
-                home.appendingPathComponent(".local/share/councis/auth.json"),
                 home.appendingPathComponent(
-                    "\(LegacyIntatisCompatibility.configurationDirectoryRelativePath)/auth.json"),
+                    "\(CouncisProductIdentity.configurationDirectoryRelativePath)/auth.json"),
                 home.appendingPathComponent(
-                    "\(LegacyIntatisCompatibility.sharedDataDirectoryRelativePath)/auth.json"),
+                    "\(CouncisProductIdentity.sharedDataDirectoryRelativePath)/auth.json"),
             ]
         }
         for url in urls where FileManager.default.fileExists(atPath: url.path) {

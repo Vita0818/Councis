@@ -1,8 +1,8 @@
 #if canImport(AppKit)
 import AppKit
 import Foundation
-import CouncisCore
-import CouncisSharedUI
+import IntatisCore
+import IntatisSharedUI
 
 #if canImport(Darwin)
 import Darwin
@@ -48,7 +48,7 @@ enum CouncisDiagnosticExportService {
             in: .userDomainMask,
             appropriateFor: nil,
             create: true)
-        let hangRoot = try? CouncisHangDiagnosticBundleStore.defaultRootURL()
+        let hangRoot = try? IntatisHangDiagnosticBundleStore.defaultRootURL()
         let context = CouncisDiagnosticExportContext(
             generatedAt: Date(),
             destinationURL: destinationURL,
@@ -77,12 +77,12 @@ enum CouncisDiagnosticExportService {
             selectedVariantID: catalog.selectedVariantID,
             providerCount: catalog.providers.count,
             modelCount: catalog.providers.reduce(0) { $0 + $1.models.count },
-            rendererMode: CouncisMessageRendererMode.resolve(
+            rendererMode: IntatisMessageRendererMode.resolve(
                 persistedRawValue: UserDefaults.standard.string(
-                    forKey: CouncisMessageRendererMode.defaultsKey),
+                    forKey: IntatisMessageRendererMode.defaultsKey),
                 arguments: ProcessInfo.processInfo.arguments).rawValue,
             performanceMetrics: try? JSONEncoder().encode(
-                CouncisPerformanceDiagnostics.shared.snapshot()))
+                IntatisPerformanceDiagnostics.shared.snapshot()))
 
         let work = Task.detached(priority: .utility) {
             try CouncisDiagnosticBundleBuilder(context: context).build()
@@ -296,7 +296,7 @@ private struct CouncisDiagnosticBundleBuilder {
             timeoutSeconds: 30,
             maximumOutputBytes: 1 * 1_024 * 1_024)
         guard execution.succeeded else {
-            let detail = CouncisHangDiagnosticTextSanitizer.sanitize(
+            let detail = IntatisHangDiagnosticTextSanitizer.sanitize(
                 String(decoding: execution.standardError, as: UTF8.self),
                 sensitivePaths: sensitivePaths,
                 maximumBytes: 1_024)
@@ -420,13 +420,13 @@ private struct CouncisDiagnosticBundleBuilder {
                 continue
             }
             do {
-                let snapshot = try CouncisDiagnosticSnapshotReader.readTail(
+                let snapshot = try IntatisDiagnosticSnapshotReader.readTail(
                     from: events,
                     maximumBytes: min(
                         Self.maximumEventBytesPerSession,
                         remainingInputBytes))
                 remainingInputBytes -= snapshot.data.count
-                let redacted = CouncisDiagnosticEventLogRedactor.redact(snapshot)
+                let redacted = IntatisDiagnosticEventLogRedactor.redact(snapshot)
                 let relativePath = "sessions/\(name)/events.redacted.jsonl"
                 try write(
                     redacted.data,
@@ -583,7 +583,7 @@ private struct CouncisDiagnosticBundleBuilder {
                 let source = directory.appendingPathComponent(fileName)
                 guard fileManager.fileExists(atPath: source.path) else { continue }
                 do {
-                    let snapshot = try CouncisDiagnosticSnapshotReader.readTail(
+                    let snapshot = try IntatisDiagnosticSnapshotReader.readTail(
                         from: source,
                         maximumBytes: 4 * 1_024 * 1_024)
                     try writeSanitizedText(
@@ -640,7 +640,7 @@ private struct CouncisDiagnosticBundleBuilder {
         for (index, report) in reports.prefix(Self.maximumCrashCount).enumerated() {
             if Task.isCancelled { return }
             do {
-                let snapshot = try CouncisDiagnosticSnapshotReader.readTail(
+                let snapshot = try IntatisDiagnosticSnapshotReader.readTail(
                     from: report.0,
                     maximumBytes: Self.maximumCrashBytes)
                 let ext = report.0.pathExtension.lowercased()
@@ -670,7 +670,7 @@ private struct CouncisDiagnosticBundleBuilder {
         bundleRoot: URL,
         manifest: inout CouncisDiagnosticExportManifest
     ) throws {
-        let sanitized = CouncisHangDiagnosticTextSanitizer.sanitize(
+        let sanitized = IntatisHangDiagnosticTextSanitizer.sanitize(
             String(decoding: rawData, as: UTF8.self),
             sensitivePaths: sensitivePaths,
             maximumBytes: 8 * 1_024 * 1_024)
@@ -744,14 +744,14 @@ private struct CouncisDiagnosticBundleBuilder {
     }
 
     private func safeIdentifier(_ value: String) -> String {
-        CouncisHangDiagnosticTextSanitizer.sanitize(
+        IntatisHangDiagnosticTextSanitizer.sanitize(
             value,
             sensitivePaths: sensitivePaths,
             maximumBytes: 512)
     }
 
     private func safeDiagnosticMessage(_ value: String) -> String {
-        CouncisHangDiagnosticTextSanitizer.sanitize(
+        IntatisHangDiagnosticTextSanitizer.sanitize(
             value,
             sensitivePaths: sensitivePaths,
             maximumBytes: 2_048)

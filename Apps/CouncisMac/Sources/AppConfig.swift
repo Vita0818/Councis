@@ -1,10 +1,10 @@
 #if canImport(SwiftUI)
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisConversation
-import CouncisSkills
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisConversation
+import IntatisSkills
 
 typealias AppSessionSummary = SessionSummary
 
@@ -443,14 +443,6 @@ enum AppConfig {
             } else if let data = UserDefaults.standard.data(forKey: providerCatalogKey),
                       let decoded = try? JSONDecoder().decode(AppProviderCatalog.self, from: data) {
                 catalog = normalizedCatalog(decoded)
-            } else if let data = legacyDefaultsData(
-                        forKey: LegacyIntatisCompatibility.UserDefaultsKey
-                            .providerCatalog),
-                      let decoded = try? JSONDecoder().decode(
-                        AppProviderCatalog.self,
-                        from: data) {
-                UserDefaults.standard.set(data, forKey: providerCatalogKey)
-                catalog = normalizedCatalog(decoded)
             } else {
                 catalog = normalizedCatalog(legacyProviderCatalog())
             }
@@ -810,12 +802,8 @@ enum AppConfig {
     private static func legacyProviderCatalog() -> AppProviderCatalog {
         let baseURL = baseURL(fromChatEndpoint:
             UserDefaults.standard.string(forKey: baseURLKey)
-                ?? legacyDefaultsString(
-                    forKey: LegacyIntatisCompatibility.UserDefaultsKey.baseURL)
                 ?? defaultBaseURL)
         let model = UserDefaults.standard.string(forKey: modelKey)
-            ?? legacyDefaultsString(
-                forKey: LegacyIntatisCompatibility.UserDefaultsKey.model)
             ?? defaultModel
         let provider = AppProviderSettings(
             id: defaultProviderID,
@@ -854,35 +842,11 @@ enum AppConfig {
     }
 
     private static func storedSelection() -> AppProviderSelection? {
-        let current = UserDefaults.standard.data(forKey: providerSelectionKey)
-        let legacy = legacyDefaultsData(
-            forKey: LegacyIntatisCompatibility.UserDefaultsKey
-                .providerSelection)
-        guard let data = current ?? legacy else {
+        guard let data = UserDefaults.standard.data(
+            forKey: providerSelectionKey) else {
             return nil
         }
-        if current == nil {
-            UserDefaults.standard.set(data, forKey: providerSelectionKey)
-        }
         return try? JSONDecoder().decode(AppProviderSelection.self, from: data)
-    }
-
-    private static func legacyDefaultsData(forKey key: String) -> Data? {
-        if let data = UserDefaults.standard.data(forKey: key) {
-            return data
-        }
-        return UserDefaults.standard.persistentDomain(
-            forName: LegacyIntatisCompatibility.macOSBundleIdentifier)?[key]
-            as? Data
-    }
-
-    private static func legacyDefaultsString(forKey key: String) -> String? {
-        if let value = UserDefaults.standard.string(forKey: key) {
-            return value
-        }
-        return UserDefaults.standard.persistentDomain(
-            forName: LegacyIntatisCompatibility.macOSBundleIdentifier)?[key]
-            as? String
     }
 
     private static func storeSelection(from catalog: AppProviderCatalog) {
@@ -1147,10 +1111,7 @@ enum AppConfig {
     private static func catalogWithFixedCoworkRolesFailedClosed()
         -> AppProviderCatalog {
         let fallback: AppProviderCatalog
-        if let data = UserDefaults.standard.data(forKey: providerCatalogKey)
-                ?? legacyDefaultsData(
-                    forKey: LegacyIntatisCompatibility.UserDefaultsKey
-                        .providerCatalog),
+        if let data = UserDefaults.standard.data(forKey: providerCatalogKey),
            let decoded = try? JSONDecoder().decode(
             AppProviderCatalog.self,
             from: data) {
@@ -1179,35 +1140,22 @@ enum AppConfig {
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let userConfigDir = home
-            .appendingPathComponent(".config/councis", isDirectory: true)
-        let legacyConfigDir = home.appendingPathComponent(
-            LegacyIntatisCompatibility.configurationDirectoryRelativePath,
-            isDirectory: true)
-        let applicationSupport = appSupportDir().deletingLastPathComponent()
-        let legacyAppSupport = applicationSupport.appendingPathComponent(
-            LegacyIntatisCompatibility.applicationSupportDirectoryName,
-            isDirectory: true)
+            .appendingPathComponent(
+                CouncisProductIdentity.configurationDirectoryRelativePath,
+                isDirectory: true)
         return [
-            userConfigDir.appendingPathComponent("councis.json"),
-            userConfigDir.appendingPathComponent("councis.jsonc"),
-            appSupportDir().appendingPathComponent("councis.json"),
-            appSupportDir().appendingPathComponent("councis.jsonc"),
+            userConfigDir.appendingPathComponent(
+                CouncisProductIdentity.configurationFileName),
+            userConfigDir.appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName),
+            appSupportDir().appendingPathComponent(
+                CouncisProductIdentity.configurationFileName),
+            appSupportDir().appendingPathComponent(
+                CouncisProductIdentity.configurationJSONCFileName),
             userConfigDir.appendingPathComponent("config.json"),
             userConfigDir.appendingPathComponent("config.jsonc"),
             appSupportDir().appendingPathComponent("config.json"),
             appSupportDir().appendingPathComponent("config.jsonc"),
-            legacyConfigDir.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationFileName),
-            legacyConfigDir.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationJSONCFileName),
-            legacyConfigDir.appendingPathComponent("config.json"),
-            legacyConfigDir.appendingPathComponent("config.jsonc"),
-            legacyAppSupport.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationFileName),
-            legacyAppSupport.appendingPathComponent(
-                LegacyIntatisCompatibility.configurationJSONCFileName),
-            legacyAppSupport.appendingPathComponent("config.json"),
-            legacyAppSupport.appendingPathComponent("config.jsonc"),
         ]
     }
 
@@ -1216,7 +1164,11 @@ enum AppConfig {
             return URL(fileURLWithPath: expandedPath(override))
         }
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/councis/councis.json")
+            .appendingPathComponent(
+                CouncisProductIdentity.configurationDirectoryRelativePath,
+                isDirectory: true)
+            .appendingPathComponent(
+                CouncisProductIdentity.configurationFileName)
     }
 
     private static func isModernConfigFile(_ url: URL) -> Bool {
@@ -1232,11 +1184,7 @@ enum AppConfig {
         let environment = ProcessInfo.processInfo.environment
         let trimmed = environment[configEnvKey]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty { return trimmed }
-        let legacy = environment[
-            LegacyIntatisCompatibility.Environment.config]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return legacy.isEmpty ? nil : legacy
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func editableConfigFileURL() -> URL {

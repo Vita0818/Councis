@@ -6,9 +6,9 @@ import Crypto
 #error("CouncisCLI requires CryptoKit or swift-crypto")
 #endif
 import Foundation
-import CouncisCore
-import CouncisMCP
-import CouncisProtocol
+import IntatisCore
+import IntatisMCP
+import IntatisProtocol
 
 enum MCPCLIOAuthError:
     Error, LocalizedError, Equatable

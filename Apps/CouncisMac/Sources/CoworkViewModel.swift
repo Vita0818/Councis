@@ -2,18 +2,19 @@
 import SwiftUI
 import Combine
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisArtifacts
-import CouncisPermission
-import CouncisConversation
-import CouncisAgentKernel
-import CouncisCowork
-import CouncisSkills
-import CouncisMCP
-import CouncisTools
-import CouncisSharedUI
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisArtifacts
+import IntatisPermission
+import IntatisConversation
+import IntatisAgentKernel
+import IntatisCowork
+import IntatisSkills
+import IntatisMCP
+import IntatisTools
+import IntatisSharedUI
+import IntatisCodexRuntime
 
 private actor ProviderRegistryBox {
     private var registry: ProviderRegistry
@@ -64,7 +65,7 @@ private actor ProviderRegistryBox {
 
     func resolvedInference(for agent: Agent) async throws -> ResolvedInferenceProfile {
         guard let binding = agent.agentInferenceBinding else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "configurationUnresolved: agent has no exact inference profile binding")
         }
         return try await registry.agentInference(for: binding)
@@ -74,9 +75,15 @@ private actor ProviderRegistryBox {
         try await registry.agentInference(for: binding).provider
     }
 
+    func responsesRuntimeRoute(
+        for binding: AgentInferenceBinding
+    ) async throws -> ResponsesRuntimeRoute {
+        try await registry.responsesRuntimeRoute(for: binding)
+    }
+
     func controlPlaneProvider() async throws -> ToolCallingProvider {
         guard let controlPlaneBinding else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "configurationUnresolved: control-plane inference profile is not frozen")
         }
         return try await provider(for: controlPlaneBinding)
@@ -160,7 +167,7 @@ struct CoworkGoalEditDraft: Equatable {
     var tokenBudget: String
 }
 
-typealias CoworkDraftAttachment = CouncisComposerDraftAttachment
+typealias CoworkDraftAttachment = IntatisComposerDraftAttachment
 
 enum CoworkSessionLaunchMode: Sendable {
     case fresh
@@ -237,9 +244,9 @@ private final class CoworkAgentThreadUpdateHub {
 }
 
 /// Drives a Cowork project session: user input defaults to the project `Main`
-/// agent, while the orchestrator and scheduler handle sub-agent work behind it.
-/// The view model folds the shared event log into the visible thread, project
-/// summary, and agent roster.
+/// Codex thread, while native Codex subagents own delegated execution and
+/// context. The view model folds App Server threads plus the shared Intatis
+/// event log into the visible conversations, project summary, and agent roster.
 @MainActor
 final class CoworkViewModel: ObservableObject, PermissionResponder {
     private static let interruptedRunContinuationText =
@@ -247,6 +254,17 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         + "First inspect the current workspace and existing tool results. "
         + "Complete only the remaining work, and do not repeat operations "
         + "that already succeeded."
+
+    private struct CodexRootAuthority: Sendable {
+        let settings: CoworkProjectSettings
+        let mainAgentID: AgentID
+        let binding: AgentInferenceBinding
+        let permissionProfile: PermissionProfile
+        let workspaceURL: URL
+        let workspaceLease: WorkspaceLease
+        let capabilityLease: CapabilityLease
+        let agent: AgentAttachedPayload
+    }
 
     @Published private(set) var agents: [CoworkAgentInfo] = []
     @Published private(set) var summary = CoworkStatusSummary()
@@ -271,7 +289,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     @Published private(set) var isGoalRuntimeReady = false
     @Published var pendingPermission: PendingPermission?
     @Published private(set) var permissionNotice: PermissionResolutionNotice?
-    @Published private(set) var latestTurnStats: TurnStatsSnapshot?
     @Published private(set) var composerError: String?
     @Published private(set) var projectionError: String?
     @Published private(set) var sessionStorageWarning: String?
@@ -303,11 +320,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     var mainInferenceDisplayLabel: String {
         guard let main = liveAgentInfo(named: projectSettings.mainAgentName) else {
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "@%@ inference not attached",
                 projectSettings.mainAgentName)
         }
-        return main.inferenceDisplayLabel ?? CouncisLocalization.format(
+        return main.inferenceDisplayLabel ?? IntatisLocalization.format(
             "@%@ inference unavailable",
             main.name)
     }
@@ -334,7 +351,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     /// Project/roster mutations cannot cross an active invocation or Goal.
     /// The composer selector is intentionally independent from this fence.
     var isRuntimeMutationBlocked: Bool {
-        isWorking || isGoalContinuing
+        isWorking
+            || isGoalContinuing
+            || isAgentWorkActive
+            || hasActiveCodexChildWork
+            || codexStartupTask != nil
     }
 
     var inferenceComposerError: String? {
@@ -342,7 +363,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
               !isMainInferenceReady else {
             return nil
         }
-        return CouncisLocalization.format(
+        return IntatisLocalization.format(
             "@%@ needs an explicit, resolvable inference profile rebind before Cowork can run.",
             projectSettings.mainAgentName)
     }
@@ -357,21 +378,57 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
     private let sessionNaming: SessionNamingService
     private let artifactStore: ArtifactStore
-    private let composerAttachmentStore: CouncisComposerAttachmentStore
+    private let composerAttachmentStore: IntatisComposerAttachmentStore
     private let submittedIntentStore: SubmittedIntentStore
+    private let codexWorkTaskController: CodexWorkTaskController
     private let registryBox: ProviderRegistryBox
-    private let judgeInferenceBinding: AgentInferenceBinding?
-    private let judgeConfigurationError: String?
     private let permissionReviewerInferenceBinding:
         AgentInferenceBinding?
     private let permissionReviewerConfigurationError: String?
     private let mcpSnapshots:
         (@MainActor @Sendable () async throws
             -> MCPAgentRequestToolSnapshotSource)?
+    private let codexMCPConfiguration:
+        (@MainActor @Sendable (
+            AgentID,
+            CapabilityLeaseID,
+            TaskID?
+        ) async throws -> CodexRuntimeMCPConfiguration)?
     private let internalToolRegistryAugmenter:
         HostToolRegistryAugmenter?
     private var orchestrator: Orchestrator?
     private var goalRuntime: GoalRuntimeController?
+    private var codexRuntime: CodexAppServerSession?
+    private var codexRuntimeBinding: AgentInferenceBinding?
+    private var codexStartupTask:
+        Task<CodexAppServerSession, Error>?
+    private var codexRuntimeGeneration: UInt64 = 0
+    private var codexEventTask: Task<Void, Never>?
+    private var codexApprovalIDs:
+        [RequestID: CodexRuntimeRequestID] = [:]
+    private var codexApprovalActions:
+        [RequestID: PermissionResponseAction] = [:]
+    private var codexWriterLease: EventLogWriterLease?
+    private var codexAllowsThreadCreation = false
+    private var codexProjectionFailed = false
+    private var codexRootThreadID: String?
+    private var codexChildThreadsByID:
+        [String: CodexRuntimeThreadDescriptor] = [:]
+    private var codexChildThreadIDByAgentID: [AgentID: String] = [:]
+    private var codexChildItemsByAgentID: [AgentID: [CodeItem]] = [:]
+    private var codexChildItemIndicesByAgentID:
+        [AgentID: [String: Int]] = [:]
+    private var codexChildHistoryLoadedThreadIDs: Set<String> = []
+    private var codexChildRosterPayloadByThreadID:
+        [String: AgentAttachedPayload] = [:]
+    private var codexChildParentAgentByThreadID:
+        [String: AgentID] = [:]
+    private var codexChildStatusByThreadID:
+        [String: AgentState] = [:]
+    private var codexChildTaskNameByThreadID: [String: String] = [:]
+    private var codexDetachedChildThreadIDs: Set<String> = []
+    private var codexChildProjectionGeneration = UUID()
+    private var codexGoalSnapshot: CodexRuntimeGoalSnapshot?
     private var subscription: Task<Void, Never>?
     private var projectionPump:
         SessionProjectionPump<
@@ -422,8 +479,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
          sessionNaming: SessionNamingService,
          registry: ProviderRegistry,
          inferenceProfileOptions: [AppInferenceProfileOption],
-         judgeInferenceBinding: AgentInferenceBinding?,
-         judgeConfigurationError: String? = nil,
          permissionReviewerInferenceBinding:
             AgentInferenceBinding?,
          permissionReviewerConfigurationError: String? = nil,
@@ -435,17 +490,25 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             (@MainActor @Sendable () async throws
                 -> MCPAgentRequestToolSnapshotSource)?
                 = nil,
+         codexMCPConfiguration:
+            (@MainActor @Sendable (
+                AgentID,
+                CapabilityLeaseID,
+                TaskID?
+            ) async throws -> CodexRuntimeMCPConfiguration)? = nil,
          internalToolRegistryAugmenter:
             HostToolRegistryAugmenter? = nil) {
         self.sessionID = sessionID
         self.log = log
         self.sessionNaming = sessionNaming
         self.artifactStore = artifactStore
-        self.composerAttachmentStore = CouncisComposerAttachmentStore(
+        self.composerAttachmentStore = IntatisComposerAttachmentStore(
             store: artifactStore)
         self.submittedIntentStore = SubmittedIntentStore(log: log)
-        self.judgeInferenceBinding = judgeInferenceBinding
-        self.judgeConfigurationError = judgeConfigurationError
+        self.codexWorkTaskController = CodexWorkTaskController(
+            log: log,
+            rootAgentID: AgentID(
+                rawValue: projectSettings.mainAgentName))
         self.permissionReviewerInferenceBinding =
             permissionReviewerInferenceBinding
         self.permissionReviewerConfigurationError =
@@ -459,6 +522,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         self.voiceInput = ComposerVoiceInputController(registry: registry)
         #endif
         self.mcpSnapshots = mcpSnapshots
+        self.codexMCPConfiguration = codexMCPConfiguration
         self.internalToolRegistryAugmenter = internalToolRegistryAugmenter
         self.inferenceProfileOptions = inferenceProfileOptions
         self.nextMainInferenceOption = nil
@@ -479,15 +543,25 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     deinit {
         subscription?.cancel()
+        codexStartupTask?.cancel()
+        codexEventTask?.cancel()
     }
 
     var hasActiveWork: Bool {
         isWorking
             || isAgentWorkActive
+            || hasActiveCodexChildWork
             || isGoalContinuing
             || !activeOperations.isEmpty
             || !directOperationIDs.isEmpty
             || shutdownTask != nil
+    }
+
+    private var hasActiveCodexChildWork: Bool {
+        guard !didStop else { return false }
+        return codexChildThreadsByID.values.contains {
+            Self.codexThreadIsWorking($0.status)
+        }
     }
 
     private func refreshRuntimeBusy() {
@@ -543,6 +617,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             guard let self else { return }
             defer { self.activeOperations.removeValue(forKey: operationID) }
             await self.registryBox.update(registry)
+            if self.isAgentWorkActive {
+                self.codexRuntimeBinding = nil
+            } else {
+                await self.resetCodexRuntime()
+            }
             await self.orchestrator?.updateAvailableInferenceProfiles(
                 bindings,
                 routingMetadata: routingMetadata,
@@ -564,6 +643,99 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     func start() {
+        guard !didStop, subscription == nil,
+              shutdownTask == nil else { return }
+        do {
+            if codexWriterLease == nil {
+                codexWriterLease = try log.acquireWriterLease()
+            }
+        } catch {
+            projectionError = error.localizedDescription
+            return
+        }
+        let projectionIdentity = SessionProjectionIdentity(
+            sessionID: sessionID)
+        let projectionPump = SessionProjectionPump<
+            CoworkSessionProjectionState,
+            ContinuousClock>(
+                identity: projectionIdentity,
+                clock: ContinuousClock())
+        projectionCommitFence = SessionProjectionCommitFence(
+            identity: projectionIdentity)
+        self.projectionPump = projectionPump
+        setPermissionReviewerStatus(.enabling)
+
+        subscription = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let replayed = await self.log.replay()
+                let initialReplay = try await projectionPump
+                    .loadInitialReplay(replayed)
+                let initialCowork = initialReplay.cowork
+                    ?? CoworkProjection()
+                self.restoreWorkspaceAccess(for: initialCowork)
+                try await self.bootstrapCodexMainIfNeeded()
+
+                let restored = await self.log.replay()
+                let restoredCowork = CoworkProjection.build(
+                    from: restored)
+                self.codexAllowsThreadCreation =
+                    restoredCowork.sessionSettings?.cowork?
+                        .codexRuntimeGeneration
+                        == CoworkSessionSettings
+                            .currentCodexRuntimeGeneration
+                    && !Self.containsAgentHistory(restored)
+                let initial = try await projectionPump.synchronize(
+                    with: restored,
+                    markRestoredPermissionsNeedsRerun: true)
+                self.commitProjectionSnapshot(initial)
+                let stream = await self.log.stream(
+                    from: (restored.last?.seq ?? -1) + 1)
+                let publications = try await projectionPump.publications(
+                    consuming: stream)
+
+                // Restore the root and its verified descendants before the
+                // window consumes live publications. The exact App Server may
+                // automatically continue an already-active official Goal;
+                // `turn/started` remains authoritative for that work state.
+                do {
+                    _ = try await self
+                        .startCodexRuntimeForCurrentMain()
+                    self.isGoalRuntimeReady = true
+                    await self
+                        .settleRestoredCodexChildDeliveriesAsUnknown()
+                } catch {
+                    let message = error.localizedDescription
+                    self.projectionError = message
+                    self.setPermissionReviewerStatus(.failed(message))
+                }
+
+                for await output in publications {
+                    guard !Task.isCancelled else { break }
+                    switch output {
+                    case .snapshot(let snapshot):
+                        self.commitProjectionSnapshot(snapshot)
+                    case .failed(let failure):
+                        guard self.projectionCommitFence?.identity
+                            == projectionIdentity else { continue }
+                        self.projectionError = failure.localizedDescription
+                    }
+                }
+            } catch {
+                guard self.projectionCommitFence?.identity
+                    == projectionIdentity,
+                      !Task.isCancelled else { return }
+                let message = error.localizedDescription
+                self.projectionError = message
+                self.setPermissionReviewerStatus(.failed(message))
+            }
+        }
+    }
+
+    /// Retained temporarily only for a source-level/manual rollback. The
+    /// shipping Cowork path above never creates the Swift Orchestrator.
+    @available(*, unavailable, message: "Cowork uses Codex App Server")
+    private func retainedLegacyOrchestratorStart() {
         guard !didStop, orchestrator == nil, shutdownTask == nil else { return }
         let projectionIdentity =
             SessionProjectionIdentity(
@@ -602,7 +774,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     return nil
                 }
                 guard let workspaceLease else {
-                    throw CouncisError.config(
+                    throw IntatisError.config(
                         "MCP dispatch requires an exact workspace lease")
                 }
                 let source =
@@ -667,7 +839,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 })
         } catch {
             let message = RuntimeErrorPresentation.message(for: error)
-            projectionError = CouncisLocalization.format(
+            projectionError = IntatisLocalization.format(
                 "Cowork session could not start: %@",
                 message)
             setPermissionReviewerStatus(.failed(message))
@@ -788,6 +960,1604 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
     }
 
+    private func bootstrapCodexMainIfNeeded() async throws {
+        let (projection, durableSettings) =
+            try await checkedCodexRootProjection()
+        if let durableSettings {
+            _ = try validatedCodexRootAuthority(
+                projection: projection,
+                settings: durableSettings)
+            return
+        }
+        guard case .fresh = launchMode else {
+            throw IntatisError.config(
+                "This Cowork session has no durable current-generation Codex root registration. Create a new Cowork session; restored or partial sessions are not silently bootstrapped.")
+        }
+
+        let authority = try makeCodexRootAuthority(
+            settings: projectSettings,
+            workspaceLeaseID: WorkspaceLeaseID(
+                rawValue: "wlease_codex_main_\(sessionID.rawValue)"),
+            workspaceID: WorkspaceID(
+                rawValue: "workspace_codex_main_\(sessionID.rawValue)"),
+            capabilityLeaseID: CapabilityLeaseID(
+                rawValue: "clease_codex_main_\(sessionID.rawValue)"))
+        guard await registryBox.exactBindingIsResolvable(
+                authority.binding) else {
+            throw IntatisError.config(
+                "The exact @main Responses inference binding is unavailable; no Cowork root authority was persisted.")
+        }
+        let createdAt = Date()
+        let workspaceMetadata = CoworkEventMetadata(
+            agentID: authority.mainAgentID,
+            workspaceID: authority.workspaceLease.workspaceID,
+            workspaceLeaseID: authority.workspaceLease.id,
+            scope: .workspace,
+            createdAt: createdAt)
+        let capabilityMetadata = CoworkEventMetadata(
+            agentID: authority.mainAgentID,
+            capabilityLeaseID: authority.capabilityLease.id,
+            scope: .capability,
+            createdAt: createdAt)
+        let agentMetadata = CoworkEventMetadata(
+            agentID: authority.mainAgentID,
+            workspaceID: authority.workspaceLease.workspaceID,
+            workspaceLeaseID: authority.workspaceLease.id,
+            capabilityLeaseID: authority.capabilityLease.id,
+            scope: .agent,
+            createdAt: createdAt)
+        let events: [Event] = [
+            .sessionSettingsUpdated(SessionSettingsUpdatedPayload(
+                revision: 1,
+                changeKind: .created,
+                kind: .cowork,
+                cowork: authority.settings)),
+            .workspaceLeaseGranted(WorkspaceLeaseGrantedPayload(
+                agent: authority.mainAgentID,
+                lease: authority.workspaceLease,
+                metadata: workspaceMetadata)),
+            .capabilityLeaseCreated(CapabilityLeaseCreatedPayload(
+                agent: authority.mainAgentID,
+                lease: authority.capabilityLease,
+                metadata: capabilityMetadata)),
+            .agentAttached(AgentAttachedPayload(
+                agent: authority.agent.agent,
+                path: authority.agent.path,
+                model: authority.agent.model,
+                profile: projectSettings.defaultPermissionProfile,
+                agentInferenceBinding:
+                    authority.agent.agentInferenceBinding,
+                metadata: agentMetadata)),
+        ]
+        guard try await log.appendIfEmptyChecked(events) != nil else {
+            // Another process may have won the empty-session race. Accept only
+            // the same complete authority baseline; partial state remains a
+            // typed new-session requirement and is never repaired in place.
+            _ = try await loadCodexRootAuthority()
+            return
+        }
+        _ = try await SessionProjectionStore.rebuild(from: log)
+    }
+
+    private func checkedCodexRootProjection() async throws
+        -> (CoworkProjection, CoworkProjectSettings?)
+    {
+        let replay = try await log.replayForProjectionChecked()
+        guard replay.hasCompleteKnownHistory else {
+            throw EventLogError.unsupportedEventTypes
+        }
+        let canonical = try SessionProjectionStore
+            .canonicalSessionSettings(
+                from: replay.envelopes,
+                session: sessionID)
+        if let canonical {
+            guard canonical.kind == .cowork,
+                  let settings = canonical.cowork else {
+                throw IntatisError.config(
+                    "The durable session settings are not a Cowork configuration.")
+            }
+            return (
+                CoworkProjection.build(from: replay.envelopes),
+                settings)
+        }
+        return (CoworkProjection.build(from: replay.envelopes), nil)
+    }
+
+    private func loadCodexRootAuthority() async throws
+        -> CodexRootAuthority
+    {
+        let (projection, settings) =
+            try await checkedCodexRootProjection()
+        guard let settings else {
+            throw IntatisError.config(
+                "Cowork has no durable current-generation Codex root registration.")
+        }
+        return try validatedCodexRootAuthority(
+            projection: projection,
+            settings: settings)
+    }
+
+    private func makeCodexRootAuthority(
+        settings: CoworkProjectSettings,
+        workspaceLeaseID: WorkspaceLeaseID,
+        workspaceID: WorkspaceID,
+        capabilityLeaseID: CapabilityLeaseID,
+        agentInferenceBinding: AgentInferenceBinding? = nil
+    ) throws -> CodexRootAuthority {
+        let main = AgentID(rawValue: settings.mainAgentName)
+        guard settings.schemaVersion
+                == CoworkSessionSettings.currentSchemaVersion,
+              settings.sessionID == sessionID,
+              settings.codexRuntimeGeneration
+                == CoworkSessionSettings.currentCodexRuntimeGeneration,
+              main == AgentID(rawValue: "main") else {
+            throw IntatisError.config(
+                "Cowork requires the exact current-generation @main session settings before Codex can start.")
+        }
+        let primaryWorkspaces = settings.workspaces.filter(\.isPrimary)
+        guard primaryWorkspaces.count == 1,
+              let primary = primaryWorkspaces.first,
+              primary.agentName == nil
+                || primary.agentName == main.rawValue,
+              let defaultBinding = settings.defaultInferenceProfileBinding,
+              settings.defaultModelID == nil
+                || settings.defaultModelID
+                    == defaultBinding.modelID.rawValue,
+              let permissionProfile = PermissionProfile(
+                rawValue: settings.defaultPermissionProfile),
+              permissionProfile != .locked else {
+            throw IntatisError.config(
+                "Cowork requires one primary @main workspace, an exact Responses binding, and a Codex-representable permission profile.")
+        }
+        let binding = agentInferenceBinding ?? defaultBinding
+        let storedWorkspace = URL(fileURLWithPath: primary.path)
+            .standardizedFileURL
+        guard let retainedWorkspace = retainWorkspaceAccess(
+                forPath: storedWorkspace.path) else {
+            needsPrimaryWorkspaceAuthorization = true
+            throw IntatisError.permissionDenied(
+                "The primary Cowork workspace capability must be authorized again before Codex can start.")
+        }
+        let workspaceURL = retainedWorkspace
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard workspaceURL.path == storedWorkspace.path else {
+            throw IntatisError.config(
+                "The durable primary workspace path is not the canonical authorized directory.")
+        }
+        let workspaceAccess: IntatisProtocol.WorkspaceAccess =
+            permissionProfile == .readOnly ? .readOnly : .readWrite
+        let workspaceLease = WorkspaceLease(
+            id: workspaceLeaseID,
+            workspaceID: workspaceID,
+            rootPath: workspaceURL.path,
+            access: workspaceAccess)
+        guard workspaceLease.rootIdentity?
+                .matchesCurrentDirectory(
+                    rootPath: workspaceLease.rootPath) == true else {
+            throw IntatisError.permissionDenied(
+                "The primary Cowork workspace identity changed before root authority registration.")
+        }
+        let capabilityLease = CodexBusinessToolHost
+            .rootBusinessCapabilityLease(
+                id: capabilityLeaseID,
+                workspaceAccess: workspaceAccess,
+                includesSessionNaming: true,
+                includesWorkTaskManagement: true,
+                knowledgeCapabilities: codexKnowledgeCapabilities(
+                    workspaceAccess: workspaceAccess))
+        let agentMetadata = CoworkEventMetadata(
+            agentID: main,
+            workspaceID: workspaceLease.workspaceID,
+            workspaceLeaseID: workspaceLease.id,
+            capabilityLeaseID: capabilityLease.id,
+            scope: .agent)
+        return CodexRootAuthority(
+            settings: settings,
+            mainAgentID: main,
+            binding: binding,
+            permissionProfile: permissionProfile,
+            workspaceURL: workspaceURL,
+            workspaceLease: workspaceLease,
+            capabilityLease: capabilityLease,
+            agent: AgentAttachedPayload(
+                agent: main,
+                path: workspaceURL.path,
+                model: binding.modelID,
+                profile: permissionProfile.rawValue,
+                agentInferenceBinding: binding,
+                metadata: agentMetadata))
+    }
+
+    private func validatedCodexRootAuthority(
+        projection: CoworkProjection,
+        settings: CoworkProjectSettings
+    ) throws -> CodexRootAuthority {
+        let main = AgentID(rawValue: settings.mainAgentName)
+        guard let agent = projection.agentRoster[main] else {
+            let detached = projection.historicalAgentRoster[main] != nil
+            throw IntatisError.config(
+                detached
+                    ? "The durable @main identity is detached. Create a new Cowork session; Codex will not recreate it silently."
+                    : "The current-generation Cowork session is missing its atomic @main root registration. Create a new Cowork session; partial startup state is not repaired in place.")
+        }
+        let workspaceCandidates = projection.workspaceLeaseAgents
+            .compactMap { leaseID, agentID -> WorkspaceLease? in
+                guard agentID == main,
+                      let lease = projection.workspaceLeases[leaseID],
+                      lease.taskID == nil else {
+                    return nil
+                }
+                return lease
+            }
+        let capabilityCandidates = projection.capabilityLeaseAgents
+            .compactMap { leaseID, agentID -> CapabilityLease? in
+                guard agentID == main,
+                      let lease = projection.capabilityLeases[leaseID],
+                      lease.taskID == nil else {
+                    return nil
+                }
+                return lease
+            }
+        guard workspaceCandidates.count == 1,
+              capabilityCandidates.count == 1,
+              let workspaceLease = workspaceCandidates.first,
+              let capabilityLease = capabilityCandidates.first else {
+            throw IntatisError.config(
+                "The current-generation Cowork session is missing one exact @main workspace/capability lease pair. Create a new Cowork session; ambiguous or partial authority is not repaired in place.")
+        }
+        let expected = try makeCodexRootAuthority(
+            settings: settings,
+            workspaceLeaseID: workspaceLease.id,
+            workspaceID: workspaceLease.workspaceID,
+            capabilityLeaseID: capabilityLease.id,
+            agentInferenceBinding:
+                agent.agentInferenceBinding)
+        guard workspaceLease == expected.workspaceLease,
+              capabilityLease == expected.capabilityLease,
+              agent.path == expected.agent.path,
+              agent.model == expected.agent.model,
+              agent.profile == expected.agent.profile,
+              agent.agentInferenceBinding == expected.binding,
+              let metadata = agent.metadata,
+              metadata.agentID == main,
+              metadata.workspaceID == workspaceLease.workspaceID,
+              metadata.workspaceLeaseID == workspaceLease.id,
+              metadata.capabilityLeaseID == capabilityLease.id,
+              metadata.scope == .agent else {
+            throw IntatisError.permissionDenied(
+                "The durable @main registration does not match its exact workspace, capability, profile, or inference authority.")
+        }
+        return CodexRootAuthority(
+            settings: settings,
+            mainAgentID: main,
+            binding: expected.binding,
+            permissionProfile: expected.permissionProfile,
+            workspaceURL: expected.workspaceURL,
+            workspaceLease: workspaceLease,
+            capabilityLease: capabilityLease,
+            agent: agent)
+    }
+
+    private func codexSession(
+        for binding: AgentInferenceBinding
+    ) async throws -> CodexAppServerSession {
+        let rootAuthority = try await loadCodexRootAuthority()
+        guard rootAuthority.binding == binding else {
+            throw IntatisError.config(
+                "The requested Codex route does not match the durable exact @main inference binding.")
+        }
+        if let codexRuntime,
+           codexRuntimeBinding == binding {
+            return codexRuntime
+        }
+        if let codexStartupTask,
+           codexRuntimeBinding == binding {
+            let generation = codexRuntimeGeneration
+            let runtime = try await codexStartupTask.value
+            guard codexRuntimeGeneration == generation else {
+                await runtime.shutdown()
+                throw CancellationError()
+            }
+            return runtime
+        }
+        if codexRuntime != nil || codexStartupTask != nil {
+            guard !isAgentWorkActive else {
+                throw CodexRuntimeError.alreadyRunning
+            }
+            await resetCodexRuntime()
+        }
+        let startupGeneration = codexRuntimeGeneration
+        let route = try await registryBox.responsesRuntimeRoute(
+            for: binding)
+        let childProfiles = try await resolvedCodexChildProfiles()
+        let workspaceURL = rootAuthority.workspaceURL
+        let rootPermissionProfile = rootAuthority.permissionProfile
+        let workspaceLease = rootAuthority.workspaceLease
+        let mainAgentID = rootAuthority.mainAgentID
+        let mainCapabilityLease = rootAuthority.capabilityLease
+        let nativeMCP = try await codexMCPConfiguration?(
+            mainAgentID,
+            mainCapabilityLease.id,
+            nil) ?? .empty
+        let inheritedChildKnowledgeCapabilities =
+            codexKnowledgeCapabilities(
+                workspaceAccess: workspaceLease.access)
+        let nativeSkills = AppConfig.skillRootAccess
+            == .workspaceAndGlobal
+            ? try CodexRuntimeSkillConfiguration.hostUserCodexHome()
+            : .empty
+        let hostApplicationIdentity = IntatisHostApplication.identity
+        let businessToolHost = try CodexBusinessToolHost(
+            sessionID: sessionID,
+            agentID: mainAgentID,
+            workspaceURL: workspaceURL,
+            workspaceLease: workspaceLease,
+            childProfiles: childProfiles,
+            additionalRegistrations:
+                CodexWorkTaskToolRegistry.registrations,
+            registryAugmenter:
+                internalToolRegistryAugmenter,
+            workTaskManagerResolver: { [codexWorkTaskController] agentID in
+                await codexWorkTaskController.manager(
+                    for: agentID)
+            },
+            sessionNaming: sessionNaming,
+            hostApplicationIdentity: hostApplicationIdentity,
+            allowsShell: PlatformProfile.current.allowsShell,
+            log: log,
+            permissionResolver: { [weak self] request in
+                guard let self else {
+                    return PermissionApprovalResolution(
+                        decision: .deny,
+                        reason: "Cowork permission presenter is unavailable",
+                        risk: request.risk,
+                        source: .callerCancellation,
+                        reviewStatus: .cancelled,
+                        failureKind: .callerCancelled,
+                        failureSource: .turnCancelled)
+                }
+                return await self.requestResolution(request)
+            })
+        let dynamicTools = try await businessToolHost.dynamicTools()
+        guard codexRuntimeGeneration == startupGeneration else {
+            _ = await dynamicTools.shutdown()
+            throw CancellationError()
+        }
+        let configuration = CodexRuntimeConfiguration(
+            sessionID: sessionID,
+            mode: .cowork,
+            workspaceURL: workspaceURL,
+            runtimeRootURL: log.sessionDirectoryURL
+                .appendingPathComponent(
+                    "codex-runtime",
+                    isDirectory: true),
+            route: route,
+            approvalReviewer: .automatic,
+            reasoningEffort: route.reasoningEffort,
+            executableOverride: CouncisCodexRuntimeOverride.resolve(),
+            allowsThreadCreation: codexAllowsThreadCreation,
+            dynamicTools: dynamicTools,
+            mcpConfiguration: nativeMCP,
+            skillConfiguration: nativeSkills,
+            childProfiles: childProfiles,
+            inheritedChildKnowledgeCapabilities:
+                inheritedChildKnowledgeCapabilities,
+            rootPermissionProfile: rootPermissionProfile,
+            pauseActiveGoalBeforeResume: true,
+            hostApplicationIdentity: hostApplicationIdentity)
+        codexRuntimeBinding = binding
+        let task = Task { @MainActor [weak self] () throws
+            -> CodexAppServerSession in
+            guard let self else { throw CancellationError() }
+            let runtime = CodexAppServerSession(
+                configuration: configuration)
+            self.codexProjectionFailed = false
+            let events = await runtime.events()
+            let eventTask = Task { @MainActor [weak self] in
+                for await event in events {
+                    guard !Task.isCancelled else { return }
+                    await self?.handleCodexEvent(event)
+                }
+            }
+            self.codexEventTask = eventTask
+            do {
+                _ = try await runtime.start()
+                try Task.checkCancellation()
+                return runtime
+            } catch {
+                eventTask.cancel()
+                await runtime.shutdown()
+                throw error
+            }
+        }
+        codexStartupTask = task
+        do {
+            let runtime = try await task.value
+            guard codexRuntimeGeneration == startupGeneration else {
+                await runtime.shutdown()
+                throw CancellationError()
+            }
+            codexRuntime = runtime
+            codexStartupTask = nil
+            return runtime
+        } catch {
+            codexStartupTask = nil
+            codexEventTask = nil
+            codexRuntimeBinding = nil
+            throw error
+        }
+    }
+
+    private func resolvedCodexChildProfiles() async throws
+        -> [CodexRuntimeChildProfile]
+    {
+        var result: [CodexRuntimeChildProfile] = []
+        for profile in projectSettings.codexAgentProfiles.sorted(by: {
+            $0.roleName < $1.roleName
+        }) {
+            guard let configured = configuredWorkspace(
+                matching: profile.workspacePath),
+                  let canonical = canonicalWorkspaceIdentity(
+                    configured.path),
+                  let access = workspaceAccessLeases[canonical] else {
+                throw IntatisError.permissionDenied(
+                    "Codex role @\(profile.roleName) does not have a live session-owned workspace capability.")
+            }
+            let sandbox: CodexRuntimeChildSandbox
+            guard let permissionProfile = PermissionProfile(
+                    rawValue: profile.permissionProfile) else {
+                throw IntatisError.config(
+                    "Codex role @\(profile.roleName) has an unknown permission profile.")
+            }
+            switch permissionProfile {
+            case .autopilot, .reviewed, .manual:
+                sandbox = .workspaceWrite
+            case .readOnly:
+                sandbox = .readOnly
+            case .locked:
+                throw IntatisError.config(
+                    "Codex role @\(profile.roleName) uses the Councis locked profile, which the exact Codex custom-agent API cannot represent.")
+            }
+            let route = try await registryBox.responsesRuntimeRoute(
+                for: profile.inferenceBinding)
+            result.append(CodexRuntimeChildProfile(
+                roleName: profile.roleName,
+                description: profile.description,
+                workspaceURL: access.canonicalURL,
+                route: route,
+                sandbox: sandbox,
+                permissionProfile: permissionProfile,
+                knowledgeCapabilities: codexKnowledgeCapabilities(
+                    workspaceAccess: sandbox == .readOnly
+                        ? .readOnly
+                        : .readWrite)))
+        }
+        return result
+    }
+
+    private func codexKnowledgeCapabilities(
+        workspaceAccess: IntatisProtocol.WorkspaceAccess
+    ) -> Set<ToolCapability> {
+        var capabilities = internalToolRegistryAugmenter?
+            .additionalCapabilities
+            .intersection([.buildKnowledge, .searchKnowledge]) ?? []
+        if workspaceAccess == .readOnly {
+            capabilities.remove(.buildKnowledge)
+        }
+        return capabilities
+    }
+
+    private func resetCodexRuntime() async {
+        codexRuntimeGeneration &+= 1
+        let startupTask = codexStartupTask
+        startupTask?.cancel()
+        codexStartupTask = nil
+        codexEventTask?.cancel()
+        let eventTask = codexEventTask
+        codexEventTask = nil
+        let runtime = codexRuntime
+        codexRuntime = nil
+        codexRuntimeBinding = nil
+        codexApprovalIDs.removeAll()
+        codexApprovalActions.removeAll()
+        codexGoalSnapshot = nil
+        goal = nil
+        isGoalContinuing = false
+        isGoalRuntimeReady = false
+        await unregisterCodexWorkTaskAgents()
+        clearCodexChildPresentation()
+        await runtime?.shutdown()
+        if let startupTask {
+            _ = try? await startupTask.value
+        }
+        if let eventTask { await eventTask.value }
+        codexEventTask?.cancel()
+        let lateEventTask = codexEventTask
+        codexEventTask = nil
+        if let lateEventTask { await lateEventTask.value }
+    }
+
+    /// Native MCP config is process-frozen. Any durable authority mutation
+    /// drains this generation before another turn can observe stale grants.
+    func nativeMCPAuthorityDidChange() async {
+        await resetCodexRuntime()
+    }
+
+    @discardableResult
+    private func startCodexRuntimeForCurrentMain() async throws
+        -> CodexAppServerSession
+    {
+        let main = AgentID(rawValue: projectSettings.mainAgentName)
+        guard let binding = latestCoworkProjection.agentRoster[main]?
+                .agentInferenceBinding
+                ?? projectSettings.defaultInferenceProfileBinding else {
+            throw IntatisError.config(
+                "Cowork has no exact @main inference binding for Codex Runtime.")
+        }
+        return try await codexSession(for: binding)
+    }
+
+    private func codexImageURLs(
+        for attachments: [CoworkDraftAttachment]
+    ) async throws -> [URL] {
+        var urls: [URL] = []
+        urls.reserveCapacity(attachments.count)
+        for attachment in attachments {
+            guard attachment.mime.hasPrefix("image/") else {
+                throw IntatisComposerAttachmentResolutionError.unsupported(
+                    attachment.id,
+                    mime: attachment.mime,
+                    surface: "Codex Runtime")
+            }
+            guard let ref = await artifactStore.ref(
+                for: attachment.id) else {
+                throw IntatisComposerAttachmentResolutionError.missing(
+                    attachment.id)
+            }
+            urls.append(artifactStore.absoluteURL(for: ref))
+        }
+        return urls
+    }
+
+    private func handleCodexEvent(
+        _ event: CodexRuntimeEvent
+    ) async {
+        let main = AgentID(rawValue: projectSettings.mainAgentName)
+        switch event {
+        case .ready(let identity):
+            codexRootThreadID = identity.threadID
+            for child in codexChildThreadsByID.values.sorted(by: {
+                $0.threadID < $1.threadID
+            }) {
+                await reconcileCodexChildRoster(child)
+            }
+            agents = agentPresentation(from: latestCoworkProjection)
+            isGoalRuntimeReady = true
+            setPermissionReviewerStatus(.enabled(
+                AgentID(rawValue: "codex-auto-review")))
+        case .turnStarted:
+            isAgentWorkActive = true
+        case .assistantDelta(let itemID, let text, let phase):
+            _ = await appendCodexProjectionEvent(.messageDelta(
+                MessageDeltaPayload(
+                    messageId: MessageID(
+                        rawValue: "codex:\(itemID)"),
+                    role: .agent,
+                    agent: main,
+                    textDelta: text,
+                    phase: phase)))
+        case .assistantCompleted(let itemID, let text, let phase):
+            _ = await appendCodexProjectionEvent(.messageCompleted(
+                MessageCompletedPayload(
+                    messageId: MessageID(
+                        rawValue: "codex:\(itemID)"),
+                    role: .agent,
+                    agent: main,
+                    text: text,
+                    phase: phase)))
+        case .reasoningDelta:
+            break
+        case .appServerEvent(var payload):
+            payload.agent = main
+            _ = await appendCodexProjectionEvent(
+                .codexAppServerEvent(payload))
+        case .itemStarted(let item):
+            _ = await appendCodexProjectionEvent(.toolCall(ToolCallPayload(
+                toolCallId: "codex:\(item.id)",
+                agent: main,
+                name: item.title,
+                args: item.detail)))
+        case .itemCompleted(let item):
+            let observation = [item.status, item.detail]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            _ = await appendCodexProjectionEvent(.toolResult(ToolResultPayload(
+                toolCallId: "codex:\(item.id)",
+                observation: observation.isEmpty
+                    ? "completed"
+                    : observation,
+                outcome: item.isFailure ? .failed : .succeeded,
+                failureSource: item.isFailure ? .runtimeFailed : nil)))
+        case .approvalRequested(let request):
+            let localID = RequestID.new()
+            codexApprovalIDs[localID] = request.requestID
+            let requestingAgent = codexChildThreadsByID[request.threadID]?
+                .agentID ?? main
+            permissionQueue.append(PendingPermission(
+                request: PermissionRequestPayload(
+                    requestId: localID,
+                    agent: requestingAgent,
+                    tool: request.title,
+                    args: "",
+                    risk: .high,
+                    reason: request.summary,
+                    approvalMode: .manual),
+                requestedSeq: -1))
+            pendingPermission = permissionQueue.first
+        case .approvalResolved(let runtimeID):
+            guard let localID = codexApprovalIDs.first(where: {
+                $0.value == runtimeID
+            })?.key else { return }
+            codexApprovalIDs.removeValue(forKey: localID)
+            let action = codexApprovalActions.removeValue(forKey: localID)
+            permissionQueue.removeAll { $0.id == localID }
+            pendingPermission = permissionQueue.first
+            if let action {
+                let approved = action == .approve
+                    || action == .approveAndRemember
+                permissionNotice = PermissionResolutionNotice(
+                    id: "codex:\(runtimeID.description)",
+                    requestId: localID,
+                    tool: "Codex Runtime",
+                    decision: approved ? .allow : .deny,
+                    risk: .high,
+                    reason: approved
+                        ? "Codex Runtime request approved by user"
+                        : "Codex Runtime request declined by user",
+                    source: .user,
+                    action: action,
+                    resolvedSeq: -1)
+            }
+        case .responsesUsage(let usage):
+            _ = await appendCodexProjectionEvent(.responsesUsage(
+                ResponsesUsagePayload(
+                    turnID: TurnID(
+                        rawValue: "codex:\(usage.turnID)"),
+                    responseMessageID: usage.responseMessageItemID.map {
+                        MessageID(rawValue: "codex:\($0)")
+                    },
+                    agentID: main,
+                    inputTokens: usage.inputTokens,
+                    cachedInputTokens: usage.cachedInputTokens,
+                    cacheWriteInputTokens: usage.cacheWriteInputTokens,
+                    outputTokens: usage.outputTokens,
+                    reasoningOutputTokens: usage.reasoningOutputTokens,
+                    totalTokens: usage.totalTokens,
+                    durationMs: usage.durationMs)))
+        case .goalUpdated(let snapshot):
+            codexGoalSnapshot = snapshot
+            goal = snapshot.map(Self.codexGoalPresentation)
+            isGoalContinuing = snapshot?.status == "active"
+        case .turnCompleted(let result):
+            let outcome: TurnOutcome
+            let failureSource: ExecutionFailureSource?
+            switch result.status {
+            case "completed":
+                outcome = .completed
+                failureSource = nil
+            case "interrupted":
+                outcome = .interrupted
+                failureSource = .turnCancelled
+            default:
+                outcome = .failed
+                failureSource = .runtimeFailed
+            }
+            _ = await appendCodexProjectionEvent(.turnOutcome(
+                TurnOutcomePayload(
+                    turnID: TurnID(
+                        rawValue: "codex:\(result.turnID)"),
+                    outcome: outcome,
+                    failureSource: failureSource,
+                    reason: result.succeeded
+                        ? nil
+                        : "Codex Runtime turn ended with status \(result.status).",
+                    agentID: main)))
+            isAgentWorkActive = false
+            isWorking = false
+            if !result.succeeded {
+                composerError = result.errorMessage ?? result.status
+            }
+        case .runtimeError(let code, let message, let fatal):
+            composerError = message
+            _ = await appendCodexProjectionEvent(.error(ErrorPayload(
+                code: code,
+                message: fatal
+                    ? "Codex Runtime became unavailable."
+                    : "Codex Runtime reported a request failure.",
+                fatal: fatal)))
+            if fatal {
+                isAgentWorkActive = false
+                isWorking = false
+                isGoalRuntimeReady = false
+                isGoalContinuing = false
+                codexGoalSnapshot = nil
+                goal = nil
+                setPermissionReviewerStatus(.failed(message))
+                await unregisterCodexWorkTaskAgents()
+                clearCodexChildPresentation()
+                codexRuntime = nil
+                codexStartupTask = nil
+                codexEventTask = nil
+            }
+        case .child(let childEvent):
+            await handleCodexChildEvent(childEvent)
+        }
+    }
+
+    private func handleCodexChildEvent(
+        _ event: CodexRuntimeChildEvent
+    ) async {
+        switch event {
+        case .threadUpdated(let thread):
+            codexChildThreadsByID[thread.threadID] = thread
+            codexChildThreadIDByAgentID[thread.agentID] = thread.threadID
+            await registerCodexWorkTaskAgent(thread)
+            if codexRootThreadID != nil {
+                await reconcileCodexChildRoster(thread)
+            }
+            agents = agentPresentation(from: latestCoworkProjection)
+            refreshRuntimeBusy()
+            publishCodexChildUpdate(thread.agentID)
+        case .turnStarted(let threadID, _):
+            await updateLocalCodexChildStatus(
+                threadID: threadID,
+                status: "active")
+        case .assistantDelta(
+            let threadID,
+            _,
+            let itemID,
+            let text,
+            let phase):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            let id = codexChildMessageID(
+                threadID: threadID,
+                itemID: itemID)
+            var item = codexChildItem(agentID: agentID, id: id)
+                ?? CodeItem(
+                    id: id,
+                    kind: .agent,
+                    title: "@\(codexChildDisplayName(threadID))",
+                    body: "",
+                    complete: false,
+                    messagePhase: phase)
+            item.body += text
+            item.complete = false
+            if let phase { item.messagePhase = phase }
+            upsertCodexChildItem(item, agentID: agentID)
+            _ = await appendCodexProjectionEvent(.messageDelta(
+                MessageDeltaPayload(
+                    messageId: MessageID(rawValue: id),
+                    role: .agent,
+                    agent: agentID,
+                    textDelta: text,
+                    phase: phase)))
+        case .assistantCompleted(
+            let threadID,
+            _,
+            let itemID,
+            let text,
+            let phase):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            let id = codexChildMessageID(
+                threadID: threadID,
+                itemID: itemID)
+            var item = codexChildItem(agentID: agentID, id: id)
+                ?? CodeItem(
+                    id: id,
+                    kind: .agent,
+                    title: "@\(codexChildDisplayName(threadID))",
+                    body: text)
+            item.body = text
+            item.complete = true
+            item.messagePhase = phase
+            upsertCodexChildItem(item, agentID: agentID)
+            _ = await appendCodexProjectionEvent(.messageCompleted(
+                MessageCompletedPayload(
+                    messageId: MessageID(rawValue: id),
+                    role: .agent,
+                    agent: agentID,
+                    text: text,
+                    phase: phase)))
+        case .userMessage(
+            let threadID,
+            _,
+            let itemID,
+            let text):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            upsertCodexChildItem(CodeItem(
+                id: codexChildMessageID(
+                    threadID: threadID,
+                    itemID: itemID),
+                kind: .user,
+                title: "You → @\(codexChildDisplayName(threadID))",
+                body: text,
+                complete: true),
+                agentID: agentID)
+        case .reasoningDelta:
+            break
+        case .appServerEvent(let threadID, var payload):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            payload.agent = agentID
+            _ = await appendCodexProjectionEvent(
+                .codexAppServerEvent(payload))
+            let id = "\(threadID):\(payload.eventID)"
+            let fixedBody = [payload.itemType, payload.phase?.rawValue,
+                             payload.status]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            var item = codexChildItem(agentID: agentID, id: id)
+                ?? CodeItem(
+                    id: id,
+                    kind: .runtimeEvent,
+                    title: payload.method,
+                    body: fixedBody,
+                    complete: payload.textDelta == nil)
+            if let delta = payload.textDelta {
+                item.body += delta
+                item.complete = false
+            } else if !fixedBody.isEmpty {
+                item.body = fixedBody
+                item.complete = true
+            }
+            upsertCodexChildItem(item, agentID: agentID)
+        case .itemStarted(let threadID, _, let runtimeItem):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            upsertCodexChildItem(
+                codexCodeItem(
+                    runtimeItem,
+                    threadID: threadID,
+                    complete: false),
+                agentID: agentID)
+            _ = await appendCodexProjectionEvent(.toolCall(
+                ToolCallPayload(
+                    toolCallId: codexChildRuntimeItemID(
+                        threadID: threadID,
+                        itemID: runtimeItem.id),
+                    agent: agentID,
+                    name: runtimeItem.title,
+                    args: runtimeItem.detail)))
+        case .itemCompleted(let threadID, _, let runtimeItem):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                return
+            }
+            upsertCodexChildItem(
+                codexCodeItem(
+                    runtimeItem,
+                    threadID: threadID,
+                    complete: true),
+                agentID: agentID)
+            let observation = [runtimeItem.status, runtimeItem.detail]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            _ = await appendCodexProjectionEvent(.toolResult(
+                ToolResultPayload(
+                    toolCallId: codexChildRuntimeItemID(
+                        threadID: threadID,
+                        itemID: runtimeItem.id),
+                    observation: observation.isEmpty
+                        ? "completed"
+                        : observation,
+                    outcome: runtimeItem.isFailure
+                        ? .failed
+                        : .succeeded,
+                    failureSource: runtimeItem.isFailure
+                        ? .runtimeFailed
+                        : nil)))
+        case .responsesUsage(let threadID, let usage):
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID,
+                  let messageID = usage.responseMessageItemID else {
+                return
+            }
+            let id = codexChildMessageID(
+                threadID: threadID,
+                itemID: messageID)
+            let payload = ResponsesUsagePayload(
+                turnID: TurnID(
+                    rawValue: "codex:\(usage.turnID)"),
+                responseMessageID: MessageID(rawValue: id),
+                agentID: agentID,
+                inputTokens: usage.inputTokens,
+                cachedInputTokens: usage.cachedInputTokens,
+                cacheWriteInputTokens: usage.cacheWriteInputTokens,
+                outputTokens: usage.outputTokens,
+                reasoningOutputTokens: usage.reasoningOutputTokens,
+                totalTokens: usage.totalTokens,
+                durationMs: usage.durationMs)
+            _ = await appendCodexProjectionEvent(.responsesUsage(payload))
+            guard var item = codexChildItem(agentID: agentID, id: id) else {
+                publishCodexChildUpdate(agentID)
+                return
+            }
+            item.responsesUsage = ResponsesUsageSnapshot(
+                id: "codex:\(threadID):\(usage.turnID):usage",
+                payload: payload)
+            upsertCodexChildItem(item, agentID: agentID)
+        case .turnCompleted(let threadID, let result):
+            await updateLocalCodexChildStatus(
+                threadID: threadID,
+                status: result.succeeded ? "idle" : result.status)
+        }
+    }
+
+    private func codexChildDisplayName(_ threadID: String) -> String {
+        codexChildThreadsByID[threadID]?.displayName
+            ?? "agent-\(threadID.suffix(8))"
+    }
+
+    private func codexChildMessageID(
+        threadID: String,
+        itemID: String
+    ) -> String {
+        "codex:\(threadID):message:\(itemID)"
+    }
+
+    private func codexChildRuntimeItemID(
+        threadID: String,
+        itemID: String
+    ) -> String {
+        "codex:\(threadID):item:\(itemID)"
+    }
+
+    private func codexChildItem(
+        agentID: AgentID,
+        id: String
+    ) -> CodeItem? {
+        guard let index = codexChildItemIndicesByAgentID[agentID]?[id],
+              let items = codexChildItemsByAgentID[agentID],
+              items.indices.contains(index) else {
+            return nil
+        }
+        return items[index]
+    }
+
+    private func upsertCodexChildItem(
+        _ item: CodeItem,
+        agentID: AgentID,
+        publishes: Bool = true
+    ) {
+        var items = codexChildItemsByAgentID[agentID] ?? []
+        var indices = codexChildItemIndicesByAgentID[agentID] ?? [:]
+        if let index = indices[item.id], items.indices.contains(index) {
+            items[index] = item
+        } else {
+            indices[item.id] = items.count
+            items.append(item)
+        }
+        codexChildItemsByAgentID[agentID] = items
+        codexChildItemIndicesByAgentID[agentID] = indices
+        if publishes {
+            publishCodexChildUpdate(agentID)
+        }
+    }
+
+    private func mergeCodexChildHistory(
+        _ history: CodexRuntimeThreadHistory,
+        agentID: AgentID
+    ) {
+        var items: [CodeItem] = []
+        var indices: [String: Int] = [:]
+        for entry in history.items {
+            let item: CodeItem
+            switch entry {
+            case .user(let id, _, let text):
+                item = CodeItem(
+                    id: codexChildMessageID(
+                        threadID: history.threadID,
+                        itemID: id),
+                    kind: .user,
+                    title: "You → @\(codexChildDisplayName(history.threadID))",
+                    body: text,
+                    complete: true)
+            case .assistant(let id, _, let text, let phase, let complete):
+                item = CodeItem(
+                    id: codexChildMessageID(
+                        threadID: history.threadID,
+                        itemID: id),
+                    kind: .agent,
+                    title: "@\(codexChildDisplayName(history.threadID))",
+                    body: text,
+                    complete: complete,
+                    messagePhase: phase)
+            case .runtime(_, let runtimeItem):
+                item = codexCodeItem(
+                    runtimeItem,
+                    threadID: history.threadID,
+                    complete: true)
+            }
+            guard indices[item.id] == nil else { continue }
+            indices[item.id] = items.count
+            items.append(item)
+        }
+        let liveItems = codexChildItemsByAgentID[agentID] ?? []
+        for liveItem in liveItems {
+            if let index = indices[liveItem.id], items.indices.contains(index) {
+                items[index] = preferredCodexChildItem(
+                    items[index],
+                    liveItem)
+            } else {
+                indices[liveItem.id] = items.count
+                items.append(liveItem)
+            }
+        }
+        codexChildItemsByAgentID[agentID] = items
+        codexChildItemIndicesByAgentID[agentID] = indices
+        codexChildHistoryLoadedThreadIDs.insert(history.threadID)
+        publishCodexChildUpdate(agentID)
+    }
+
+    private func preferredCodexChildItem(
+        _ lhs: CodeItem,
+        _ rhs: CodeItem
+    ) -> CodeItem {
+        var preferred: CodeItem
+        if rhs.submissionID != nil,
+           lhs.submissionID == nil {
+            preferred = rhs
+        } else if lhs.complete != rhs.complete {
+            preferred = lhs.complete ? lhs : rhs
+        } else if rhs.body.count > lhs.body.count {
+            preferred = rhs
+        } else {
+            preferred = lhs
+        }
+        if preferred.responsesUsage == nil {
+            preferred.responsesUsage = lhs.responsesUsage
+                ?? rhs.responsesUsage
+        }
+        return preferred
+    }
+
+    /// Codex thread/read supplies the authoritative ordered transcript. The
+    /// EventLog contributes host audit/product rows and live callbacks may be
+    /// newer than the read response. Merge by stable item ID, with a counted
+    /// user-message key only for the unavoidable App Server/EventLog dual
+    /// representation of the same direct input.
+    private func mergeCodexChildPresentationItems(
+        _ codexItems: [CodeItem],
+        _ durableItems: [CodeItem]
+    ) -> [CodeItem] {
+        var result = codexItems
+        var indices = Dictionary(
+            uniqueKeysWithValues: result.enumerated().map {
+                ($0.element.id, $0.offset)
+            })
+        var userIndicesByBody: [String: [Int]] = [:]
+        for (index, item) in result.enumerated()
+            where item.kind == .user {
+            userIndicesByBody[item.body, default: []].append(index)
+        }
+        for durable in durableItems {
+            if let index = indices[durable.id],
+               result.indices.contains(index) {
+                result[index] = preferredCodexChildItem(
+                    result[index],
+                    durable)
+                continue
+            }
+            if durable.kind == .user,
+               var candidates = userIndicesByBody[durable.body],
+               let index = candidates.first,
+               result.indices.contains(index) {
+                candidates.removeFirst()
+                userIndicesByBody[durable.body] = candidates
+                result[index] = preferredCodexChildItem(
+                    result[index],
+                    durable)
+                continue
+            }
+            indices[durable.id] = result.count
+            result.append(durable)
+        }
+        return result
+    }
+
+    /// A local delivery attempt is not part of the Codex child transcript
+    /// until App Server acknowledges it or thread/read proves it. Pending rows
+    /// stay out of conversation presentation; rejected/unknown rows become an
+    /// explicit local error instead of masquerading as child history.
+    private func codexChildDeliveryPresentationItems(
+        _ items: [CodeItem]
+    ) -> [CodeItem] {
+        items.map { source in
+            guard source.kind == .user,
+                  source.submissionID != nil else { return source }
+            switch source.submissionStatus {
+            case .completed:
+                return source
+            case .failed:
+                return CodeItem(
+                    id: source.id + ":delivery",
+                    kind: .error,
+                    title: source.submissionFailure?.code
+                        == "child_message_delivery_unknown"
+                        ? "Subagent message delivery unknown"
+                        : "Subagent message not delivered",
+                    body: source.submissionFailure?.message
+                        ?? "The subagent message was not delivered.",
+                    complete: true,
+                    isFailure: true,
+                    submissionID: source.submissionID)
+            case .queued, .running, .none:
+                return CodeItem(
+                    id: source.id + ":delivery-pending",
+                    kind: .note,
+                    title: "Subagent message delivery pending",
+                    body: "Waiting for Codex App Server delivery confirmation.",
+                    complete: true,
+                    submissionID: source.submissionID)
+            case .cancelled:
+                return CodeItem(
+                    id: source.id + ":delivery-cancelled",
+                    kind: .error,
+                    title: "Subagent message delivery cancelled",
+                    body: "Delivery was cancelled before it could be confirmed.",
+                    complete: true,
+                    isFailure: true,
+                    submissionID: source.submissionID)
+            }
+        }
+    }
+
+    private func codexCodeItem(
+        _ runtimeItem: CodexRuntimeItem,
+        threadID: String,
+        complete: Bool
+    ) -> CodeItem {
+        let kind: CodeItem.Kind
+        switch runtimeItem.kind {
+        case .collaboration, .subagent:
+            kind = .agentToAgent
+        case .plan, .reasoning:
+            kind = .runtimeEvent
+        case .command, .fileChange, .mcpTool, .dynamicTool,
+             .webSearch, .image, .other:
+            kind = .toolCall
+        }
+        return CodeItem(
+            id: codexChildRuntimeItemID(
+                threadID: threadID,
+                itemID: runtimeItem.id),
+            kind: kind,
+            title: runtimeItem.title,
+            body: runtimeItem.detail,
+            complete: complete,
+            isFailure: runtimeItem.isFailure)
+    }
+
+    /// Projects only App Server-verified descendants into the existing durable
+    /// Cowork roster. The upstream thread ID is the identity; display names are
+    /// presentation only and never establish membership.
+    private func reconcileCodexChildRoster(
+        _ thread: CodexRuntimeThreadDescriptor
+    ) async {
+        let agentID = thread.agentID
+        let parentAgentID: AgentID? = {
+            if thread.parentThreadID == codexRootThreadID {
+                return AgentID(rawValue: projectSettings.mainAgentName)
+            }
+            return codexChildThreadsByID[thread.parentThreadID]?.agentID
+        }()
+        let metadata = CoworkEventMetadata(
+            threadID: ThreadID(rawValue: thread.threadID),
+            sender: parentAgentID,
+            agentID: agentID,
+            scope: .agent)
+
+        if thread.isArchived || thread.status == "shutdown" {
+            let wasAttached = codexChildRosterPayloadByThreadID[
+                thread.threadID] != nil
+                || latestCoworkProjection.agentRoster[agentID] != nil
+            guard wasAttached,
+                  !codexDetachedChildThreadIDs.contains(
+                    thread.threadID) else {
+                return
+            }
+            guard await appendCodexProjectionEvents([
+                .agentDetached(AgentDetachedPayload(
+                    agent: agentID,
+                    reason: "Codex descendant thread archived",
+                    metadata: metadata)),
+            ]) else { return }
+            codexDetachedChildThreadIDs.insert(thread.threadID)
+            codexChildStatusByThreadID.removeValue(
+                forKey: thread.threadID)
+            return
+        }
+
+        codexDetachedChildThreadIDs.remove(thread.threadID)
+        let proposed = await codexChildRosterPayload(
+            for: thread,
+            metadata: metadata)
+        let current = codexChildRosterPayloadByThreadID[thread.threadID]
+            ?? latestCoworkProjection.agentRoster[agentID]
+        var events: [Event] = []
+        if current.map({ !codexRosterFactsEqual($0, proposed) }) ?? true {
+            var attached = proposed
+            attached.previousAgentInferenceBinding = current?
+                .agentInferenceBinding
+            attached.inferenceBindingChangeReason = current == nil
+                ? nil
+                : "verified Codex descendant metadata changed"
+            events.append(.agentAttached(attached))
+        }
+        if let parentAgentID,
+           (codexChildParentAgentByThreadID[thread.threadID]
+                ?? latestCoworkProjection.agentOwners[agentID])
+                != parentAgentID {
+            events.append(.agentSpawned(AgentSpawnedPayload(
+                requestedBy: parentAgentID,
+                agent: agentID,
+                path: proposed.path,
+                model: proposed.model,
+                agentInferenceBinding: proposed.agentInferenceBinding,
+                metadata: metadata)))
+        }
+        if let state = codexDurableAgentState(thread.status),
+           (codexChildStatusByThreadID[thread.threadID]
+                ?? latestCoworkProjection.agentStatuses[agentID])
+                != state {
+            events.append(.agentStatus(AgentStatusPayload(
+                agent: agentID,
+                state: state)))
+        }
+        if !events.isEmpty {
+            guard await appendCodexProjectionEvents(events) else {
+                return
+            }
+        }
+        codexChildRosterPayloadByThreadID[thread.threadID] = proposed
+        if let parentAgentID {
+            codexChildParentAgentByThreadID[thread.threadID] = parentAgentID
+        }
+        if let state = codexDurableAgentState(thread.status) {
+            codexChildStatusByThreadID[thread.threadID] = state
+        }
+    }
+
+    /// Registers the exact canonical task name supplied by App Server for a
+    /// verified descendant. This directory is only a host-owned lookup used by
+    /// the explicit task_link_agent tool; no role, nickname, file name, or
+    /// WorkTask text is interpreted as an association.
+    private func registerCodexWorkTaskAgent(
+        _ thread: CodexRuntimeThreadDescriptor
+    ) async {
+        let directory = await codexWorkTaskController.agentDirectory
+        if thread.isArchived || thread.status == "shutdown" {
+            if let previous = codexChildTaskNameByThreadID.removeValue(
+                forKey: thread.threadID) {
+                await directory.unregister(
+                    taskName: previous,
+                    verifiedAgentID: thread.agentID)
+            }
+            return
+        }
+        guard let taskName = thread.agentPath?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !taskName.isEmpty else { return }
+        let previous = codexChildTaskNameByThreadID[thread.threadID]
+        if previous == taskName { return }
+        do {
+            try await directory.replace(
+                previousTaskName: previous,
+                taskName: taskName,
+                verifiedAgentID: thread.agentID)
+            codexChildTaskNameByThreadID[thread.threadID] = taskName
+        } catch {
+            let message = IntatisLocalization.format(
+                "Codex subagent @%@ has an ambiguous canonical task identity; WorkTask linking is disabled for it.",
+                thread.displayName)
+            composerError = message
+            _ = await appendCodexProjectionEvent(.error(ErrorPayload(
+                code: "codex_agent_task_identity_ambiguous",
+                message: message,
+                fatal: false)))
+        }
+    }
+
+    private func unregisterCodexWorkTaskAgents() async {
+        let directory = await codexWorkTaskController.agentDirectory
+        for (threadID, taskName) in codexChildTaskNameByThreadID {
+            guard let agentID = codexChildThreadsByID[threadID]?.agentID else {
+                continue
+            }
+            await directory.unregister(
+                taskName: taskName,
+                verifiedAgentID: agentID)
+        }
+        codexChildTaskNameByThreadID.removeAll(keepingCapacity: false)
+    }
+
+    private struct EffectiveCodexRosterPreset {
+        let path: String
+        let model: ModelID
+        let permissionProfile: String
+        let inferenceBinding: AgentInferenceBinding
+        let providerID: String
+        let reasoningEffort: String?
+    }
+
+    private func codexChildRosterPayload(
+        for thread: CodexRuntimeThreadDescriptor,
+        metadata: CoworkEventMetadata
+    ) async -> AgentAttachedPayload {
+        let fallbackPath = thread.cwd.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
+            ? projectSettings.primaryWorkspace?.path
+                ?? projectSettings.workspaces.first?.path
+                ?? ""
+            : URL(fileURLWithPath: thread.cwd)
+                .standardizedFileURL.path
+        let fallbackModel = thread.requestedModel.flatMap {
+            $0.isEmpty ? nil : ModelID(rawValue: $0)
+        } ?? ModelID(rawValue: "unknown")
+        guard let preset = await effectiveCodexRosterPreset(
+                for: thread,
+                visited: []),
+              codexThread(thread, matches: preset) else {
+            return AgentAttachedPayload(
+                agent: thread.agentID,
+                path: fallbackPath,
+                model: fallbackModel,
+                profile: PermissionProfile.locked.rawValue,
+                agentInferenceBinding: nil,
+                metadata: metadata)
+        }
+        return AgentAttachedPayload(
+            agent: thread.agentID,
+            path: preset.path,
+            model: preset.model,
+            profile: preset.permissionProfile,
+            agentInferenceBinding: preset.inferenceBinding,
+            metadata: metadata)
+    }
+
+    private func effectiveCodexRosterPreset(
+        for thread: CodexRuntimeThreadDescriptor,
+        visited: Set<String>
+    ) async -> EffectiveCodexRosterPreset? {
+        guard !visited.contains(thread.threadID) else { return nil }
+        var visited = visited
+        visited.insert(thread.threadID)
+
+        if let role = thread.agentRole {
+            guard let profile = projectSettings.codexAgentProfiles
+                    .first(where: { $0.roleName == role }),
+                  let configuredPath = canonicalWorkspaceIdentity(
+                    profile.workspacePath),
+                  let route = try? await registryBox.responsesRuntimeRoute(
+                    for: profile.inferenceBinding),
+                  route.model == profile.inferenceBinding.modelID,
+                  route.reasoningEffort == thread.reasoningEffort
+                    || thread.reasoningEffort == nil else {
+                // An explicit unknown or unresolvable role is never treated as
+                // inheritance from its parent.
+                return nil
+            }
+            return EffectiveCodexRosterPreset(
+                path: configuredPath,
+                model: profile.inferenceBinding.modelID,
+                permissionProfile: profile.permissionProfile,
+                inferenceBinding: profile.inferenceBinding,
+                providerID: "councis_agent_\(role)",
+                reasoningEffort: route.reasoningEffort)
+        }
+
+        if thread.parentThreadID == codexRootThreadID {
+            let main = AgentID(rawValue: projectSettings.mainAgentName)
+            guard let binding = latestCoworkProjection.agentRoster[main]?
+                    .agentInferenceBinding
+                    ?? projectSettings.defaultInferenceProfileBinding,
+                  let configuredPath = projectSettings.primaryWorkspace
+                    .flatMap({ canonicalWorkspaceIdentity($0.path) }),
+                  let route = try? await registryBox.responsesRuntimeRoute(
+                    for: binding) else {
+                return nil
+            }
+            return EffectiveCodexRosterPreset(
+                path: configuredPath,
+                model: binding.modelID,
+                permissionProfile:
+                    projectSettings.defaultPermissionProfile,
+                inferenceBinding: binding,
+                providerID: "councis",
+                reasoningEffort: route.reasoningEffort)
+        }
+
+        guard let parent = codexChildThreadsByID[thread.parentThreadID] else {
+            return nil
+        }
+        return await effectiveCodexRosterPreset(
+            for: parent,
+            visited: visited)
+    }
+
+    private func codexThread(
+        _ thread: CodexRuntimeThreadDescriptor,
+        matches preset: EffectiveCodexRosterPreset
+    ) -> Bool {
+        guard !thread.cwd.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty,
+              let actualPath = canonicalWorkspaceIdentity(thread.cwd),
+              actualPath == preset.path else {
+            return false
+        }
+        if !thread.modelProvider.isEmpty,
+           thread.modelProvider != preset.providerID {
+            return false
+        }
+        if let requestedModel = thread.requestedModel,
+           !requestedModel.isEmpty,
+           requestedModel != preset.model.rawValue {
+            return false
+        }
+        if let reasoningEffort = thread.reasoningEffort,
+           reasoningEffort != preset.reasoningEffort {
+            return false
+        }
+        return true
+    }
+
+    private func codexRosterFactsEqual(
+        _ lhs: AgentAttachedPayload,
+        _ rhs: AgentAttachedPayload
+    ) -> Bool {
+        lhs.agent == rhs.agent
+            && lhs.path == rhs.path
+            && lhs.model == rhs.model
+            && lhs.profile == rhs.profile
+            && lhs.agentInferenceBinding == rhs.agentInferenceBinding
+    }
+
+    private func codexDurableAgentState(
+        _ status: String
+    ) -> AgentState? {
+        switch status {
+        case "active", "running", "pendingInit":
+            return .thinking
+        case "systemError", "errored", "failed":
+            return .blocked
+        case "idle", "waiting", "completed", "notLoaded":
+            return .idle
+        default:
+            return nil
+        }
+    }
+
+    private func updateLocalCodexChildStatus(
+        threadID: String,
+        status: String
+    ) async {
+        guard let previous = codexChildThreadsByID[threadID] else { return }
+        let updated = CodexRuntimeThreadDescriptor(
+            threadID: previous.threadID,
+            parentThreadID: previous.parentThreadID,
+            sessionID: previous.sessionID,
+            agentNickname: previous.agentNickname,
+            agentRole: previous.agentRole,
+            agentPath: previous.agentPath,
+            name: previous.name,
+            preview: previous.preview,
+            cwd: previous.cwd,
+            modelProvider: previous.modelProvider,
+            requestedModel: previous.requestedModel,
+            reasoningEffort: previous.reasoningEffort,
+            serviceTier: previous.serviceTier,
+            runtimeWorkspaceRoots: previous.runtimeWorkspaceRoots,
+            isArchived: previous.isArchived,
+            status: status,
+            activeFlags: previous.activeFlags,
+            canAcceptDirectInput: previous.canAcceptDirectInput,
+            createdAt: previous.createdAt)
+        codexChildThreadsByID[threadID] = updated
+        await reconcileCodexChildRoster(updated)
+        agents = agentPresentation(from: latestCoworkProjection)
+        refreshRuntimeBusy()
+        publishCodexChildUpdate(updated.agentID)
+    }
+
+    private func publishCodexChildUpdate(_ agentID: AgentID) {
+        agentThreadUpdateHub.publish(
+            agentIDs: [agentID],
+            throughSeq: -1)
+    }
+
+    private static func codexThreadIsWorking(_ status: String) -> Bool {
+        status == "active"
+            || status == "running"
+            || status == "pendingInit"
+    }
+
+    private static func codexAgentStatus(_ status: String) -> String {
+        switch status {
+        case "active", "running", "pendingInit":
+            return "running"
+        case "notLoaded":
+            return "idle"
+        case "shutdown":
+            return "detached"
+        case "systemError", "errored":
+            return "failed"
+        default:
+            return status
+        }
+    }
+
+    private func clearCodexChildPresentation() {
+        codexRootThreadID = nil
+        codexChildThreadsByID.removeAll(keepingCapacity: false)
+        codexChildThreadIDByAgentID.removeAll(keepingCapacity: false)
+        codexChildItemsByAgentID.removeAll(keepingCapacity: false)
+        codexChildItemIndicesByAgentID.removeAll(keepingCapacity: false)
+        codexChildHistoryLoadedThreadIDs.removeAll(keepingCapacity: false)
+        codexChildRosterPayloadByThreadID.removeAll(keepingCapacity: false)
+        codexChildParentAgentByThreadID.removeAll(keepingCapacity: false)
+        codexChildStatusByThreadID.removeAll(keepingCapacity: false)
+        codexChildTaskNameByThreadID.removeAll(keepingCapacity: false)
+        codexDetachedChildThreadIDs.removeAll(keepingCapacity: false)
+        codexChildProjectionGeneration = UUID()
+        agents = agentPresentation(from: latestCoworkProjection)
+        refreshRuntimeBusy()
+    }
+
+    @discardableResult
+    private func appendCodexProjectionEvent(
+        _ event: Event
+    ) async -> Bool {
+        await appendCodexProjectionEvents([event])
+    }
+
+    @discardableResult
+    private func appendCodexProjectionEvents(
+        _ events: [Event]
+    ) async -> Bool {
+        guard !events.isEmpty else { return true }
+        guard !codexProjectionFailed else { return false }
+        do {
+            _ = try await log.append(events)
+            return true
+        } catch {
+            codexProjectionFailed = true
+            let message = IntatisLocalization.format(
+                "Codex Runtime stopped because its Councis projection could not be persisted: %@",
+                error.localizedDescription)
+            composerError = message
+            projectionError = message
+            isAgentWorkActive = false
+            isWorking = false
+            let runtime = codexRuntime
+            codexRuntime = nil
+            codexRuntimeBinding = nil
+            codexStartupTask = nil
+            codexEventTask = nil
+            await runtime?.shutdown()
+            return false
+        }
+    }
+
     private func commitProjectionSnapshot(
         _ snapshot:
             CoworkSessionProjectionSnapshot
@@ -821,7 +2591,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 snapshot.barrierEnvelope {
             observeProjectionBarrier(barrier)
         }
-        let changedThreadAgents = CouncisExecutionTracePresentation.isEnabled
+        let changedThreadAgents = IntatisExecutionTracePresentation.isEnabled
             ? snapshot.threadAgentIDs
             : snapshot.visibleThreadAgentIDs
         if !changedThreadAgents.isEmpty {
@@ -843,12 +2613,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             if nextNotice != permissionNotice {
                 permissionNotice = nextNotice
             }
-        }
-        if let turnStats = snapshot.turnStats,
-           turnStats.latest
-                != latestTurnStats {
-            latestTurnStats =
-                turnStats.latest
         }
         if let coworkProjection =
                 snapshot.cowork,
@@ -920,12 +2684,14 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     capabilityLeaseID:
                         lease.id,
                     taskID: lease.taskID,
+                    supportsNativeCodexMCP:
+                        agentID == main
+                            && lease.taskID == nil,
                     mcpCapabilityCeiling:
                         reviewer
                             ? []
-                            : Set(
-                                MCPServerEditorCapabilities
-                                    .all))
+                            : CodexRuntimeMCPProjector
+                                .requiredNativeSurfaceCapabilities)
             }
             .sorted {
                 if $0.agentID != $1.agentID {
@@ -945,6 +2711,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         let projection = latestCoworkProjection
         guard !didStop,
               !descriptor.isPermissionReviewer,
+              descriptor.supportsNativeCodexMCP,
               !MCPReservedControlPlaneIdentity
                 .deniesMCP(
                     descriptor.agentID),
@@ -956,7 +2723,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     descriptor.capabilityLeaseID],
               capabilityLease.taskID
                 == descriptor.taskID else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The selected Cowork Agent capability lease is no longer active.")
         }
         let workspaceCandidates =
@@ -984,7 +2751,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     rootPath:
                         workspaceLease.rootPath)
                 == true else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The selected Cowork Agent does not have one exact live workspace lease.")
         }
         let durable =
@@ -1041,17 +2808,25 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         subscription = nil
         let runningOrchestrator = orchestrator
         let runningGoalRuntime = goalRuntime
+        let runningCodexRuntime = codexRuntime
+        let runningCodexStartup = codexStartupTask
+        let runningCodexEvents = codexEventTask
+        runningCodexStartup?.cancel()
+        runningCodexEvents?.cancel()
         let runningOperations = Array(activeOperations.values)
         orchestrator = nil
         goalRuntime = nil
+        codexRuntime = nil
+        codexRuntimeBinding = nil
+        codexStartupTask = nil
+        codexEventTask = nil
         for operation in runningOperations { operation.cancel() }
         isWorking = false
         isAgentWorkActive = false
         isGoalContinuing = false
         isGoalRuntimeReady = false
-        goal = Self.goalPresentation(
-            from: latestCoworkProjection,
-            controlsEnabled: false)
+        codexGoalSnapshot = nil
+        goal = nil
         addAgentStatus = .idle
         setPermissionReviewerStatus(.disabled)
         let task = Task<Void, Never> {
@@ -1065,6 +2840,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             if let runningGoalRuntime {
                 await runningGoalRuntime.shutdown()
             }
+            await runningCodexRuntime?.shutdown()
+            _ = try? await runningCodexStartup?.value
+            if let runningCodexEvents {
+                await runningCodexEvents.value
+            }
             if let runningOrchestrator {
                 await runningOrchestrator.cancelAll(reason: reason)
             }
@@ -1073,6 +2853,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
         shutdownTask = task
         await task.value
+        await unregisterCodexWorkTaskAgents()
         activeOperations.removeAll()
         // Execution owns permission waits. Release any UI-only waiters only
         // after every data-plane task has observed cancellation and exited.
@@ -1083,6 +2864,10 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
         permissionWaiters.removeAll()
         permissionQueue.removeAll()
+        codexApprovalIDs.removeAll()
+        codexApprovalActions.removeAll()
+        codexWriterLease?.release()
+        codexWriterLease = nil
         if var pending = pendingPermission, pending.state.isActionable {
             pending.state = .expired
             pendingPermission = pending
@@ -1111,6 +2896,29 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
     }
 
+    private func settleRestoredCodexChildDeliveriesAsUnknown() async {
+        let events: [Event] = latestCoworkProjection.submittedIntents
+            .compactMap { intent in
+                guard intent.status == .queued || intent.status == .running,
+                      let attempt = intent.attempt,
+                      let target = intent.payload.to,
+                      codexChildThreadIDByAgentID[target] != nil else {
+                    return nil
+                }
+                return .submissionStatusChanged(
+                    SubmissionStatusChangedPayload(
+                        submissionID: intent.id,
+                        status: .failed,
+                        attempt: attempt,
+                        failure: SubmissionFailure(
+                            code: "child_message_delivery_unknown",
+                            message: "Delivery was interrupted before confirmation. Read this subagent's Codex history before retrying the message.",
+                            retryable: false)))
+            }
+        guard !events.isEmpty else { return }
+        _ = await appendCodexProjectionEvents(events)
+    }
+
     private func restoreSubmittedIntentOutbox() async {
         do {
             let document = try await submittedIntentStore.loadOutbox()
@@ -1121,7 +2929,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 })
             rebuildOutboxThreadItems(publishesChanges: true)
         } catch {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "The local submission outbox could not be read: %@",
                 error.localizedDescription)
         }
@@ -1158,30 +2966,62 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         agentThreadUpdateHub.stream(for: agentID)
     }
 
-    func agentThreadPage(
-        agentID: AgentID,
-        requestedUpperBound: Int?
-    ) async -> CoworkAgentThreadPage {
+    func agentThreadSnapshot(
+        agentID: AgentID
+    ) async -> CoworkAgentThreadSnapshot {
+        if let threadID = codexChildThreadIDByAgentID[agentID] {
+            let durable = await projectionPump?
+                .coworkAgentThreadSnapshot(
+                    agentID: agentID,
+                    showsExecutionTrace:
+                        IntatisExecutionTracePresentation.isEnabled,
+                    additionalItems: [])
+            if !codexChildHistoryLoadedThreadIDs.contains(threadID),
+               let runtime = codexRuntime {
+                do {
+                    let history = try await runtime.threadHistory(
+                        threadID: threadID)
+                    mergeCodexChildHistory(
+                        history,
+                        agentID: agentID)
+                } catch {
+                    composerError = error.localizedDescription
+                }
+            }
+            let descriptor = codexChildThreadsByID[threadID]
+            let items = mergeCodexChildPresentationItems(
+                codexChildItemsByAgentID[agentID] ?? [],
+                codexChildDeliveryPresentationItems(
+                    durable?.items ?? []))
+            return CoworkAgentThreadSnapshot(
+                agentID: agentID,
+                items: items,
+                projectedThroughSeq: durable?.projectedThroughSeq
+                    ?? projectionCommitFence?.throughSeq
+                    ?? -1,
+                projectionGeneration: codexChildProjectionGeneration,
+                isAgentWorking: descriptor.map {
+                    Self.codexThreadIsWorking($0.status)
+                } ?? durable?.isAgentWorking ?? false)
+        }
         let additionalItems = outboxThreadItemsByAgent[agentID] ?? []
         guard let projectionPump else {
-            return CodeProjection().coworkAgentThreadPage(
+            return CodeProjection().coworkAgentThreadSnapshot(
                 agentID: agentID,
-                requestedUpperBound: requestedUpperBound,
                 showsExecutionTrace:
-                    CouncisExecutionTracePresentation.isEnabled,
+                    IntatisExecutionTracePresentation.isEnabled,
                 additionalItems: additionalItems,
                 projectedThroughSeq: -1,
                 projectionGeneration: UUID(),
                 isAgentWorking: false)
         }
-        let projected = await projectionPump.coworkAgentThreadPage(
+        let projected = await projectionPump.coworkAgentThreadSnapshot(
             agentID: agentID,
-            requestedUpperBound: requestedUpperBound,
-            showsExecutionTrace: CouncisExecutionTracePresentation.isEnabled,
+            showsExecutionTrace: IntatisExecutionTracePresentation.isEnabled,
             additionalItems: additionalItems)
         let interruptedFailure = SubmissionFailure(
             code: "interrupted",
-            message: CouncisLocalization.string(
+            message: IntatisLocalization.string(
                 "This submission was queued or running when the previous runtime stopped. Retry explicitly to run it again."),
             retryable: true)
         let items = projected.items.map { item -> CodeItem in
@@ -1196,13 +3036,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             interrupted.isFailure = true
             return interrupted
         }
-        return CoworkAgentThreadPage(
+        return CoworkAgentThreadSnapshot(
             agentID: projected.agentID,
             items: items,
-            lowerBound: projected.lowerBound,
-            upperBound: projected.upperBound,
-            totalCount: projected.totalCount,
-            capacity: projected.capacity,
             projectedThroughSeq: projected.projectedThroughSeq,
             projectionGeneration: projected.projectionGeneration,
             isAgentWorking: projected.isAgentWorking)
@@ -1221,13 +3057,13 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             let failure = SubmissionFailure(
                 code: "event_log_unavailable",
                 message: entry.lastCanonicalError
-                    ?? CouncisLocalization.string(
+                    ?? IntatisLocalization.string(
                         "The submission is safe in the local outbox but has not entered the session EventLog."),
                 retryable: true)
             let item = CodeItem(
                 id: id.rawValue,
                 kind: .user,
-                title: CouncisLocalization.string("You"),
+                title: IntatisLocalization.string("You"),
                 body: entry.payload.text,
                 tags: entry.payload.tags ?? [],
                 goal: entry.payload.goal,
@@ -1268,36 +3104,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
            canonical != projectSettings {
             projectSettings = canonical
         }
-        let nextGoal = Self.goalPresentation(
-            from: projection,
-            controlsEnabled: isGoalRuntimeReady)
-        if nextGoal != goal {
-            goal = nextGoal
-        }
         let nextWorkTasks =
             Self.workTaskPresentation(
                 from: projection)
         if nextWorkTasks != workTasks {
             workTasks = nextWorkTasks
-        }
-        let nextIsGoalContinuing: Bool
-        if let currentGoalID =
-                projection.currentGoalID,
-           projection.goals[currentGoalID]?
-                .status == .active {
-            // A single continuation task may advance through several durable
-            // runs. Between run N settling and run N+1 being created, the
-            // projection briefly contains no non-terminal run even though the
-            // Goal still owns the data plane. Keep later submitted intents in
-            // FIFO order until the Goal leaves `.active` explicitly.
-            nextIsGoalContinuing = true
-        } else {
-            nextIsGoalContinuing = false
-        }
-        if nextIsGoalContinuing
-            != isGoalContinuing {
-            isGoalContinuing =
-                nextIsGoalContinuing
         }
         let nextAgents =
             agentPresentation(
@@ -1368,7 +3179,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             inferenceOptionsByBinding[option.binding] = option
         }
 
-        return projection.historicalAgentsInCreationOrder
+        var result = projection.historicalAgentsInCreationOrder
             .map { payload in
                 let mailbox = projection.mailboxes[payload.agent] ?? CoworkMailboxView()
                 let capabilityLeases = capabilityLeasesByAgent[payload.agent] ?? []
@@ -1377,18 +3188,24 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 let isMain = payload.agent.rawValue == projectSettings.mainAgentName
                 let isReviewer = payload.agent == Orchestrator.automaticPermissionReviewerID
                 let isAttached = liveAgentIDs.contains(payload.agent)
+                let codexThread = codexChildThreadIDByAgentID[payload.agent]
+                    .flatMap { codexChildThreadsByID[$0] }
                 let binding = payload.agentInferenceBinding
                 let inferenceOption = binding.flatMap { inferenceOptionsByBinding[$0] }
                 let inferenceResolution: CoworkInferenceResolution
                 if binding == nil {
-                    inferenceResolution = .legacy
+                    inferenceResolution = codexThread == nil
+                        ? .legacy
+                        : .unresolved
                 } else if inferenceResolutionFailures[payload.agent.rawValue] != nil {
                     inferenceResolution = .unresolved
                 } else {
                     inferenceResolution = .resolved
                 }
                 let status: String
-                if !isAttached {
+                if let codexThread {
+                    status = Self.codexAgentStatus(codexThread.status)
+                } else if !isAttached {
                     status = "detached"
                 } else if runningAgentIDs.contains(payload.agent) {
                     status = "running"
@@ -1405,34 +3222,101 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 }
                 return CoworkAgentInfo(
                     id: payload.agent.rawValue,
-                    name: payload.agent.rawValue,
-                    workspace: payload.path,
-                    model: payload.model.rawValue,
-                    permissionProfile: Self.permissionDescription(payload.profile),
-                    inferenceProfileLabel: inferenceOption?.title,
+                    name: codexThread?.displayName
+                        ?? payload.agent.rawValue,
+                    workspace: codexThread.flatMap {
+                        $0.cwd.isEmpty ? nil : $0.cwd
+                    } ?? payload.path,
+                    model: codexThread?.requestedModel
+                        ?? payload.model.rawValue,
+                    permissionProfile: Self.permissionDescription(
+                        payload.profile),
+                    inferenceProfileLabel: inferenceOption?.title
+                        ?? codexThread?.requestedModel,
                     inferenceProfileRef: binding?.inferenceProfileRef,
-                    inferenceConnectionLabel: binding?.safeRouteLabel,
-                    inferenceVariant: inferenceOption?.variantTitle ?? binding?.variantID,
+                    inferenceConnectionLabel: binding?.safeRouteLabel
+                        ?? codexThread?.modelProvider,
+                    inferenceVariant: inferenceOption?.variantTitle
+                        ?? binding?.variantID
+                        ?? codexThread.map {
+                            [$0.reasoningEffort, $0.serviceTier]
+                                .compactMap { $0 }
+                                .joined(separator: " · ")
+                        }.flatMap { $0.isEmpty ? nil : $0 },
                     inferenceResolution: inferenceResolution,
                     status: status,
-                    role: isMain ? "main" : isReviewer ? "reviewer" : Self.role(for: capabilityLeases),
+                    role: isMain
+                        ? "main"
+                        : isReviewer
+                            ? "reviewer"
+                            : codexThread?.agentRole
+                                ?? Self.role(for: capabilityLeases),
                     pendingTasks: mailbox.pendingTasks.count,
                     pendingMessages: mailbox.pendingMessages.count,
                     completedTasks: mailbox.completedTasks.count,
                     workspaceLease: workspaceLeaseCount > 0
-                        ? CouncisLocalization.format(
+                        ? IntatisLocalization.format(
                             "%lld workspace lease",
                             Int64(workspaceLeaseCount))
                         : nil,
                     capabilityLease: capabilityLeaseCount > 0
-                        ? CouncisLocalization.format(
+                        ? IntatisLocalization.format(
                             "%lld capability lease",
                             Int64(capabilityLeaseCount))
                         : nil,
-                    isAttached: isAttached,
-                    canRemove: isAttached && !isMain && !isReviewer,
+                    isAttached: codexThread.map {
+                        !$0.isArchived && $0.status != "shutdown"
+                    } ?? isAttached,
+                    canRemove: codexThread.map {
+                        !$0.isArchived
+                    } ?? (isAttached && !isMain && !isReviewer),
                     isConversationSelectable: !isReviewer)
             }
+        let existingIDs = Set(result.map(\.id))
+        for thread in codexChildThreadsByID.values.sorted(by: {
+            let lhsCreated = $0.createdAt ?? Int.max
+            let rhsCreated = $1.createdAt ?? Int.max
+            if lhsCreated != rhsCreated {
+                return lhsCreated < rhsCreated
+            }
+            return $0.threadID < $1.threadID
+        }) where !existingIDs.contains(thread.agentID.rawValue) {
+            let inferenceVariant = [
+                thread.reasoningEffort,
+                thread.serviceTier,
+            ].compactMap { $0 }.joined(separator: " · ")
+            result.append(CoworkAgentInfo(
+                id: thread.agentID.rawValue,
+                name: thread.displayName,
+                workspace: thread.cwd.isEmpty
+                    ? projectSettings.workspaces.first?.path ?? ""
+                    : thread.cwd,
+                model: thread.requestedModel
+                    ?? thread.modelProvider,
+                permissionProfile: "Codex",
+                inferenceProfileLabel: thread.requestedModel,
+                inferenceConnectionLabel: thread.modelProvider,
+                inferenceVariant: inferenceVariant.isEmpty
+                    ? nil
+                    : inferenceVariant,
+                inferenceResolution: .resolved,
+                status: Self.codexAgentStatus(thread.status),
+                role: thread.agentRole ?? "subagent",
+                pendingTasks: 0,
+                pendingMessages: 0,
+                completedTasks: 0,
+                workspaceLease: thread.runtimeWorkspaceRoots.isEmpty
+                    ? nil
+                    : IntatisLocalization.format(
+                        "%lld workspace root",
+                        Int64(thread.runtimeWorkspaceRoots.count)),
+                capabilityLease: nil,
+                isAttached: !thread.isArchived
+                    && thread.status != "shutdown",
+                canRemove: !thread.isArchived,
+                isConversationSelectable: true))
+        }
+        return result
     }
 
     /// UI history and runtime routing deliberately use different membership
@@ -1470,12 +3354,12 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         if let audit {
             var parts = [audit.verdict.rawValue]
             if !audit.remainingWork.isEmpty {
-                parts.append(CouncisLocalization.format(
+                parts.append(IntatisLocalization.format(
                     "Remaining: %@",
                     audit.remainingWork.joined(separator: "; ")))
             }
             if let blocker = audit.blocker, !blocker.isEmpty {
-                parts.append(CouncisLocalization.format("Blocker: %@", blocker))
+                parts.append(IntatisLocalization.format("Blocker: %@", blocker))
             }
             auditSummary = parts.joined(separator: " · ")
         } else {
@@ -1513,6 +3397,31 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             canClear: controlsEnabled)
     }
 
+    private static func codexGoalPresentation(
+        _ goal: CodexRuntimeGoalSnapshot
+    ) -> CoworkGoalCardInfo {
+        CoworkGoalCardInfo(
+            id: "codex:\(goal.threadID)",
+            objective: goal.objective,
+            status: goal.status,
+            activeElapsedSeconds: Double(goal.timeUsedSeconds),
+            activeSince: nil,
+            tokensUsed: goal.tokensUsed,
+            tokenBudget: goal.tokenBudget,
+            auditProvenCount: nil,
+            auditRequirementCount: nil,
+            latestAuditSummary: nil,
+            currentRunOrdinal: nil,
+            revision: goal.updatedAt,
+            canPause: goal.status == "active",
+            canResume: goal.status == "paused"
+                || goal.status == "blocked"
+                || goal.status == "usageLimited"
+                || goal.status == "budgetLimited",
+            canEdit: goal.status != "complete",
+            canClear: true)
+    }
+
     private static func workTaskPresentation(from projection: CoworkProjection) -> CoworkWorkTaskSummary {
         let ordered = projection.workTasks.values.sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
@@ -1545,7 +3454,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     private func taskLine(_ task: CoworkTaskView) -> CoworkTaskLine {
         let assignee = task.assignee.map { "@\($0.rawValue)" }
-            ?? CouncisLocalization.string("Unassigned")
+            ?? IntatisLocalization.string("Unassigned")
         let title = task.contract.map { "\(assignee) · \($0.roleHint)" } ?? assignee
         let detail = task.contract?.objective ?? task.report?.summary ?? task.error ?? task.result ?? ""
         return CoworkTaskLine(id: task.id.rawValue, title: title, detail: detail, status: task.status.rawValue)
@@ -1578,7 +3487,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             workspaceAccessLeases[lease.canonicalPath] = lease
             return lease.canonicalURL
         } catch {
-            sessionStorageWarning = CouncisLocalization.format(
+            sessionStorageWarning = IntatisLocalization.format(
                 "Workspace access could not be read safely: %@",
                 error.localizedDescription)
             return nil
@@ -1670,7 +3579,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private func ensureAutomaticPermissionReview(existingProjection projection: CoworkProjection) async {
         guard let orchestrator else {
             setPermissionReviewerStatus(.failed(
-                CouncisLocalization.string("Cowork session is not ready.")))
+                IntatisLocalization.string("Cowork session is not ready.")))
             return
         }
         setPermissionReviewerStatus(.enabling)
@@ -1680,7 +3589,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             $0.name == mainID
         }) else {
             setPermissionReviewerStatus(.failed(
-                CouncisLocalization.format(
+                IntatisLocalization.format(
                     "@%@ must be attached before automatic permission review can start.",
                     mainID.rawValue)))
             return
@@ -1698,7 +3607,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             .resolvablePermissionReviewerBinding() else {
             setPermissionReviewerStatus(.failed(
                 permissionReviewerConfigurationError
-                    ?? CouncisLocalization.string(
+                    ?? IntatisLocalization.string(
                         "The permission_reviewer_model exact inference profile is unavailable or incompatible.")))
             return
         }
@@ -1707,7 +3616,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             guard let restored = retainWorkspaceAccess(forPath: main.path) else {
                 needsPrimaryWorkspaceAuthorization = true
                 setPermissionReviewerStatus(.failed(
-                    CouncisLocalization.string(
+                    IntatisLocalization.string(
                         "Primary workspace access must be authorized again before automatic review can start.")))
                 return
             }
@@ -1716,14 +3625,14 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             guard let restored = retainWorkspaceAccess(forPath: workspace.path) else {
                 needsPrimaryWorkspaceAuthorization = true
                 setPermissionReviewerStatus(.failed(
-                    CouncisLocalization.string(
+                    IntatisLocalization.string(
                         "Primary workspace access must be authorized again before automatic review can start.")))
                 return
             }
             workspaceURL = restored
         } else {
             setPermissionReviewerStatus(.failed(
-                CouncisLocalization.format(
+                IntatisLocalization.format(
                     "No primary workspace is available for @%@.",
                     Orchestrator.automaticPermissionReviewerID.rawValue)))
             return
@@ -1781,6 +3690,27 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     func retryAutomaticPermissionReview() {
         guard acceptsNewOperations,
               permissionReviewerStatus.canRetry,
+              let binding = nextMainInferenceBinding else { return }
+        setPermissionReviewerStatus(.enabling)
+        let operationID = UUID()
+        let operation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.activeOperations.removeValue(forKey: operationID) }
+            do {
+                _ = try await self.codexSession(for: binding)
+            } catch {
+                let message = error.localizedDescription
+                self.composerError = message
+                self.setPermissionReviewerStatus(.failed(message))
+            }
+        }
+        activeOperations[operationID] = operation
+    }
+
+    @available(*, unavailable, message: "Cowork uses Codex auto_review")
+    private func retainedLegacyRetryAutomaticPermissionReview() {
+        guard acceptsNewOperations,
+              permissionReviewerStatus.canRetry,
               orchestrator != nil else { return }
         let operationID = UUID()
         let operation = Task { @MainActor [weak self] in
@@ -1814,7 +3744,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }
         await refreshInferenceResolutionState()
         guard inferenceResolutionFailures[mainID.rawValue] == nil else {
-            projectionError = CouncisLocalization.format(
+            projectionError = IntatisLocalization.format(
                 "@%@ has an unresolved inference profile. Rebind it before resuming Cowork.",
                 mainID.rawValue)
             return
@@ -1830,7 +3760,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             return
         }
         guard recoverySafe else {
-            let message = CouncisLocalization.string(
+            let message = IntatisLocalization.string(
                 "Goal recovery could not be completed safely. Pending Cowork work remains stopped; retry after resolving the persistence or cancellation error.")
             projectionError = message
             setPermissionReviewerStatus(.failed(message))
@@ -1893,15 +3823,15 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         guard let workspace = projectSettings.primaryWorkspace else { return }
         guard let url = retainWorkspaceAccess(forPath: workspace.path) else {
             needsPrimaryWorkspaceAuthorization = true
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Primary workspace access must be authorized again before @%@ can be registered.",
                 mainID.rawValue)
             setPermissionReviewerStatus(.failed(
-                composerError ?? CouncisLocalization.string("Workspace access unavailable.")))
+                composerError ?? IntatisLocalization.string("Workspace access unavailable.")))
             return
         }
         guard let binding = projectSettings.defaultInferenceProfileBinding else {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Choose a default inference profile before attaching @%@.",
                 mainID.rawValue)
             return
@@ -1916,17 +3846,10 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             coordinationDepth: Agent.defaultCoordinationDepth)
         let attached: Bool
         if allowsInitialSessionBootstrap {
-            guard let judgeInferenceBinding else {
-                didRequestMainAgentAttach = false
-                composerError = judgeConfigurationError
-                    ?? CouncisLocalization.string(
-                        "Configure a resolvable judge_model before creating Cowork.")
-                return
-            }
             guard let permissionReviewerInferenceBinding else {
                 didRequestMainAgentAttach = false
                 let message = permissionReviewerConfigurationError
-                    ?? CouncisLocalization.string(
+                    ?? IntatisLocalization.string(
                         "Configure a resolvable permission_reviewer_model before creating Cowork.")
                 composerError = message
                 setPermissionReviewerStatus(.failed(message))
@@ -1935,8 +3858,6 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             switch await orchestrator.bootstrapFreshSession(
                 main: main,
                 settings: projectSettings,
-                judgeModel: judgeInferenceBinding.modelID,
-                judgeInferenceBinding: judgeInferenceBinding,
                 permissionReviewerModel:
                     permissionReviewerInferenceBinding.modelID,
                 permissionReviewerInferenceBinding:
@@ -1980,13 +3901,14 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     /// model as part of this recovery.
     func reauthorizePrimaryWorkspace() {
         guard acceptsNewOperations,
+              !isRuntimeMutationBlocked,
               let primary = projectSettings.primaryWorkspace,
               let selected = WorkspaceAccess.choose(
-                prompt: CouncisLocalization.string("Reauthorize Primary Workspace")) else {
+                prompt: IntatisLocalization.string("Reauthorize Primary Workspace")) else {
             return
         }
         guard WorkspaceAccess.selectedLease(selected, matchesStoredPath: primary.path) else {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Choose the original primary workspace at %@.",
                 primary.path)
             needsPrimaryWorkspaceAuthorization = true
@@ -1996,7 +3918,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         do {
             try WorkspaceAccess.remember(selected.scopedURL, for: sessionID, isPrimary: true)
         } catch {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Primary workspace authorization could not be saved: %@",
                 error.localizedDescription)
             needsPrimaryWorkspaceAuthorization = true
@@ -2014,7 +3936,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             guard let self else { return }
             defer { self.activeOperations.removeValue(forKey: operationID) }
             if canonicalSettings != self.projectSettings {
-                guard await self.persistProjectSettings(canonicalSettings) else {
+                guard await self.updateProjectSettings(canonicalSettings) else {
                     self.needsPrimaryWorkspaceAuthorization = true
                     return
                 }
@@ -2062,41 +3984,261 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     @discardableResult
     func updateProjectSettings(_ settings: CoworkProjectSettings) async -> Bool {
+        guard acceptsNewOperations,
+              !isRuntimeMutationBlocked else {
+            composerError = IntatisLocalization.string(
+                "Wait for all Codex root and subagent work to finish before changing project settings.")
+            return false
+        }
         guard let operationID = beginDirectOperation() else {
-            composerError = CouncisLocalization.string(
+            composerError = IntatisLocalization.string(
                 "The Cowork session is stopping and cannot change project settings.")
             return false
         }
         defer { finishDirectOperation(operationID) }
-        return await persistProjectSettings(settings)
+        guard let rootProfile = PermissionProfile(
+                rawValue: settings.defaultPermissionProfile),
+              rootProfile != .locked else {
+            composerError = IntatisLocalization.string(
+                "The selected root permission profile cannot be represented by the exact Codex Runtime.")
+            return false
+        }
+
+        let priorSettings = projectSettings
+        let rebuildsRuntime = codexRuntimeConfigurationDiffers(
+            priorSettings,
+            settings)
+        let hadRuntime = codexRuntime != nil
+            || codexStartupTask != nil
+        isWorking = true
+        defer { isWorking = false }
+
+        if rebuildsRuntime, hadRuntime {
+            await resetCodexRuntime()
+        }
+        let saved = await persistProjectSettings(settings)
+        guard saved else {
+            if rebuildsRuntime, hadRuntime {
+                _ = try? await startCodexRuntimeForCurrentMain()
+            }
+            return false
+        }
+        guard rebuildsRuntime, hadRuntime else { return true }
+        do {
+            _ = try await startCodexRuntimeForCurrentMain()
+            return true
+        } catch {
+            composerError = IntatisLocalization.format(
+                "Settings were saved, but Codex Runtime could not be rebuilt safely: %@",
+                error.localizedDescription)
+            return false
+        }
+    }
+
+    private func codexRuntimeConfigurationDiffers(
+        _ lhs: CoworkProjectSettings,
+        _ rhs: CoworkProjectSettings
+    ) -> Bool {
+        lhs.mainAgentName != rhs.mainAgentName
+            || lhs.defaultPermissionProfile
+                != rhs.defaultPermissionProfile
+            || lhs.defaultInferenceProfileBinding
+                != rhs.defaultInferenceProfileBinding
+            || lhs.primaryWorkspace?.path != rhs.primaryWorkspace?.path
+            || lhs.codexAgentProfiles != rhs.codexAgentProfiles
+            || lhs.codexRuntimeGeneration != rhs.codexRuntimeGeneration
     }
 
     @discardableResult
     private func persistProjectSettings(_ settings: CoworkProjectSettings) async -> Bool {
-        if case .fresh = launchMode {
-            let mainID = AgentID(rawValue: projectSettings.mainAgentName)
-            let hasDurableBaseline = await orchestrator?.agentList().contains {
-                $0.name == mainID
-            } ?? false
-            guard hasDurableBaseline else {
-                composerError = CouncisLocalization.string(
-                    "Retry the initial @main registration before changing project settings; the seven-event session baseline must remain atomic.")
-                return false
-            }
-        }
         var normalized = settings
         normalized.schemaVersion = CoworkSessionSettings.currentSchemaVersion
         normalized.sessionID = sessionID
+        // Runtime generation is an admission fact, not a mutable UI setting.
+        // Preserve nil for legacy sessions and the exact durable generation for
+        // current sessions; never migrate it while saving ordinary settings.
+        normalized.codexRuntimeGeneration =
+            projectSettings.codexRuntimeGeneration
         let trimmedMainAgentName = normalized.mainAgentName.trimmingCharacters(in: .whitespacesAndNewlines)
         normalized.mainAgentName = trimmedMainAgentName.isEmpty ? "main" : trimmedMainAgentName
+        let canonicalSettings = normalized
         do {
-            let document = try await SessionProjectionStore.updateSettings(
-                in: log,
-                kind: .cowork,
-                coworkSettings: normalized,
-                changeKind: .updated)
+            let currentAuthority = try await loadCodexRootAuthority()
+            let sameIdentityTarget = try makeCodexRootAuthority(
+                settings: canonicalSettings,
+                workspaceLeaseID:
+                    currentAuthority.workspaceLease.id,
+                workspaceID:
+                    currentAuthority.workspaceLease.workspaceID,
+                capabilityLeaseID:
+                    currentAuthority.capabilityLease.id,
+                agentInferenceBinding:
+                    currentAuthority.binding)
+            let rotatesRootAuthority =
+                sameIdentityTarget.workspaceLease
+                    != currentAuthority.workspaceLease
+                || sameIdentityTarget.capabilityLease
+                    != currentAuthority.capabilityLease
+            let targetAuthority: CodexRootAuthority
+            if rotatesRootAuthority {
+                targetAuthority = try makeCodexRootAuthority(
+                    settings: canonicalSettings,
+                    workspaceLeaseID: .new(),
+                    workspaceID: .new(),
+                    capabilityLeaseID: .new(),
+                    agentInferenceBinding:
+                        currentAuthority.binding)
+            } else {
+                targetAuthority = sameIdentityTarget
+            }
+            let sessionID = sessionID
+            let mainID = AgentID(rawValue: canonicalSettings.mainAgentName)
+            _ = try await log.appendSessionStateTransaction { envelopes in
+                let current = try SessionProjectionStore
+                    .canonicalSessionSettings(
+                        from: envelopes,
+                        session: sessionID)
+                let projection = CoworkProjection.build(from: envelopes)
+                let rootWorkspaceLeaseIDs = projection
+                    .workspaceLeaseAgents.compactMap {
+                        leaseID, agentID -> WorkspaceLeaseID? in
+                        guard agentID == mainID,
+                              projection.workspaceLeases[leaseID]?
+                                .taskID == nil else {
+                            return nil
+                        }
+                        return leaseID
+                    }
+                let rootCapabilityLeaseIDs = projection
+                    .capabilityLeaseAgents.compactMap {
+                        leaseID, agentID -> CapabilityLeaseID? in
+                        guard agentID == mainID,
+                              projection.capabilityLeases[leaseID]?
+                                .taskID == nil else {
+                            return nil
+                        }
+                        return leaseID
+                    }
+                guard current?.kind == .cowork,
+                      current?.cowork == currentAuthority.settings,
+                      let main = projection.agentRoster[mainID],
+                      main == currentAuthority.agent,
+                      rootWorkspaceLeaseIDs.count == 1,
+                      rootWorkspaceLeaseIDs.first
+                        == currentAuthority.workspaceLease.id,
+                      projection.workspaceLeases[
+                        currentAuthority.workspaceLease.id]
+                        == currentAuthority.workspaceLease,
+                      rootCapabilityLeaseIDs.count == 1,
+                      rootCapabilityLeaseIDs.first
+                        == currentAuthority.capabilityLease.id,
+                      projection.capabilityLeases[
+                        currentAuthority.capabilityLease.id]
+                        == currentAuthority.capabilityLease else {
+                    throw IntatisError.config(
+                        "project settings cannot advance after the durable @main root authority changed")
+                }
+                var events: [Event] = []
+                if current?.kind != .cowork
+                    || current?.cowork != canonicalSettings {
+                    let (revision, overflow) = (current?.revision ?? 0)
+                        .addingReportingOverflow(1)
+                    guard !overflow else {
+                        throw IntatisError.config(
+                            "session settings revision overflow")
+                    }
+                    events.append(.sessionSettingsUpdated(
+                        SessionSettingsUpdatedPayload(
+                            revision: revision,
+                            previousRevision: current?.revision,
+                            changeKind: .updated,
+                            kind: .cowork,
+                            displayName: current?.displayName,
+                            cowork: canonicalSettings)))
+                }
+                if rotatesRootAuthority {
+                    let changedAt = Date()
+                    events.append(.capabilityLeaseRevoked(
+                        CapabilityLeaseRevokedPayload(
+                            agent: mainID,
+                            leaseID:
+                                currentAuthority.capabilityLease.id,
+                            reason:
+                                "Codex root authority changed with project settings",
+                            metadata: CoworkEventMetadata(
+                                agentID: mainID,
+                                capabilityLeaseID:
+                                    currentAuthority.capabilityLease.id,
+                                scope: .capability,
+                                createdAt: changedAt))))
+                    events.append(.workspaceLeaseRevoked(
+                        WorkspaceLeaseRevokedPayload(
+                            agent: mainID,
+                            leaseID:
+                                currentAuthority.workspaceLease.id,
+                            reason:
+                                "Codex root workspace authority changed with project settings",
+                            metadata: CoworkEventMetadata(
+                                agentID: mainID,
+                                workspaceID:
+                                    currentAuthority.workspaceLease.workspaceID,
+                                workspaceLeaseID:
+                                    currentAuthority.workspaceLease.id,
+                                scope: .workspace,
+                                createdAt: changedAt))))
+                    events.append(.workspaceLeaseGranted(
+                        WorkspaceLeaseGrantedPayload(
+                            agent: mainID,
+                            lease: targetAuthority.workspaceLease,
+                            metadata: CoworkEventMetadata(
+                                agentID: mainID,
+                                workspaceID:
+                                    targetAuthority.workspaceLease.workspaceID,
+                                workspaceLeaseID:
+                                    targetAuthority.workspaceLease.id,
+                                scope: .workspace,
+                                createdAt: changedAt))))
+                    events.append(.capabilityLeaseCreated(
+                        CapabilityLeaseCreatedPayload(
+                            agent: mainID,
+                            lease: targetAuthority.capabilityLease,
+                            metadata: CoworkEventMetadata(
+                                agentID: mainID,
+                                capabilityLeaseID:
+                                    targetAuthority.capabilityLease.id,
+                                scope: .capability,
+                                createdAt: changedAt))))
+                }
+                let targetMetadata = targetAuthority.agent.metadata
+                let metadataMatches = main.metadata?.agentID == mainID
+                    && main.metadata?.workspaceID
+                        == targetMetadata?.workspaceID
+                    && main.metadata?.workspaceLeaseID
+                        == targetMetadata?.workspaceLeaseID
+                    && main.metadata?.capabilityLeaseID
+                        == targetMetadata?.capabilityLeaseID
+                    && main.metadata?.scope == .agent
+                if main.profile != targetAuthority.agent.profile
+                    || main.path != targetAuthority.agent.path
+                    || main.model != targetAuthority.agent.model
+                    || main.agentInferenceBinding
+                        != targetAuthority.agent.agentInferenceBinding
+                    || !metadataMatches {
+                    events.append(.agentAttached(AgentAttachedPayload(
+                        agent: main.agent,
+                        path: targetAuthority.agent.path,
+                        model: targetAuthority.agent.model,
+                        profile: targetAuthority.agent.profile,
+                        agentInferenceBinding:
+                            targetAuthority.agent.agentInferenceBinding,
+                        metadata: targetMetadata)))
+                }
+                return events
+            }
+            let document = try await SessionProjectionStore.rebuild(
+                from: log)
             guard let canonical = document.coworkSettings else {
-                composerError = CouncisLocalization.string(
+                composerError = IntatisLocalization.string(
                     "Session settings were persisted without a readable Cowork snapshot.")
                 return false
             }
@@ -2110,7 +4252,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             composerError = nil
             return true
         } catch {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Session settings could not be saved: %@",
                 error.localizedDescription)
             return false
@@ -2118,17 +4260,51 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     func removeAgent(name rawName: String) {
-        guard acceptsNewOperations, !isRuntimeMutationBlocked, let orchestrator else { return }
+        guard acceptsNewOperations, !isRuntimeMutationBlocked else { return }
         let name = Self.normalizedAgentName(rawName)
         guard !name.isEmpty else { return }
+        if let thread = codexChildThreadsByID.values.first(where: {
+            $0.displayName == name && !$0.isArchived
+        }) {
+            guard let runtime = codexRuntime else {
+                composerError = IntatisLocalization.string(
+                    "The selected Codex subagent is not loaded in this Cowork session.")
+                return
+            }
+            isWorking = true
+            let operationID = UUID()
+            let operation = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    self.isWorking = false
+                    self.activeOperations.removeValue(forKey: operationID)
+                }
+                do {
+                    try await runtime.archiveDescendantThread(
+                        threadID: thread.threadID)
+                    self.composerError = nil
+                } catch {
+                    self.composerError = error.localizedDescription
+                }
+            }
+            activeOperations[operationID] = operation
+            return
+        }
+        if projectSettings.codexAgentProfiles.contains(where: {
+            $0.roleName == name
+        }) {
+            removeCodexAgentProfile(name: name)
+            return
+        }
+        guard let orchestrator else { return }
         guard name != projectSettings.mainAgentName else {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Cannot remove @%@.",
                 projectSettings.mainAgentName)
             return
         }
         guard AgentID(rawValue: name) != Orchestrator.automaticPermissionReviewerID else {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "@%@ is reserved.",
                 Orchestrator.automaticPermissionReviewerID.rawValue)
             return
@@ -2151,7 +4327,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             }
             await self.synchronizePermissionReviewerHealth(using: orchestrator)
             guard detached else {
-                self.composerError = CouncisLocalization.format(
+                self.composerError = IntatisLocalization.format(
                     "@%@ could not be removed; it may still have active tasks.",
                     name)
                 self.isWorking = false
@@ -2190,7 +4366,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     self.releaseWorkspaceAccess(forPath: removablePath)
                 }
             } catch {
-                self.composerError = CouncisLocalization.format(
+                self.composerError = IntatisLocalization.format(
                     "@%@ is detached, but its unreferenced workspace capability was retained because cleanup failed: %@",
                     name,
                     error.localizedDescription)
@@ -2202,8 +4378,81 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         activeOperations[operationID] = operation
     }
 
+    func removeCodexAgentProfile(name rawName: String) {
+        guard acceptsNewOperations, !isRuntimeMutationBlocked else { return }
+        let name = Self.normalizedAgentName(rawName)
+        guard let profile = projectSettings.codexAgentProfiles.first(where: {
+            $0.roleName == name
+        }) else { return }
+        isWorking = true
+        let operationID = UUID()
+        let operation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.isWorking = false
+                self.activeOperations.removeValue(forKey: operationID)
+            }
+            do {
+                let matchingThreads = self.codexChildThreadsByID.values
+                    .filter {
+                        !$0.isArchived
+                            && $0.agentRole == profile.roleName
+                    }
+                if !matchingThreads.isEmpty {
+                    guard let runtime = self.codexRuntime else {
+                        throw CodexRuntimeError.notStarted
+                    }
+                    for thread in matchingThreads {
+                        try await runtime.archiveDescendantThread(
+                            threadID: thread.threadID)
+                    }
+                }
+                var settings = self.projectSettings
+                settings.removeCodexAgentProfile(
+                    roleName: profile.roleName)
+                settings.removeWorkspaces(
+                    forAgent: profile.roleName)
+                guard await self.persistProjectSettings(settings) else {
+                    return
+                }
+                let remainingAgents = await self.orchestrator?
+                    .agentList() ?? []
+                if let removablePath = self.removableWorkspaceAccessPath(
+                    candidate: profile.workspacePath,
+                    settings: settings,
+                    remainingAgents: remainingAgents) {
+                    try WorkspaceAccess.forget(
+                        path: removablePath,
+                        in: self.sessionID)
+                    self.releaseWorkspaceAccess(
+                        forPath: removablePath)
+                }
+                await self.resetCodexRuntime()
+                try await self.startCodexRuntimeForCurrentMain()
+                self.composerError = nil
+            } catch {
+                self.composerError = error.localizedDescription
+            }
+        }
+        activeOperations[operationID] = operation
+    }
+
     func agentInferenceBinding(name rawName: String) -> AgentInferenceBinding? {
         let name = Self.normalizedAgentName(rawName)
+        if let profile = projectSettings.codexAgentProfiles.first(where: {
+            $0.roleName == name
+        }) {
+            return profile.inferenceBinding
+        }
+        if let thread = codexChildThreadsByID.values.first(where: {
+            $0.displayName == name
+        }),
+           let role = thread.agentRole,
+           let profile = projectSettings.codexAgentProfiles.first(where: {
+               $0.roleName == role
+           }) {
+            return profile.inferenceBinding
+        }
         return latestCoworkProjection.agentRoster[AgentID(rawValue: name)]?
             .agentInferenceBinding
     }
@@ -2222,9 +4471,30 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         name rawName: String,
         binding: AgentInferenceBinding
     ) {
-        guard acceptsNewOperations, !isRuntimeMutationBlocked, let orchestrator else { return }
+        guard acceptsNewOperations, !isRuntimeMutationBlocked else { return }
         let name = Self.normalizedAgentName(rawName)
         guard !name.isEmpty else { return }
+        if projectSettings.codexAgentProfiles.contains(where: {
+            $0.roleName == name
+        }) {
+            rebindCodexAgentProfile(
+                name: name,
+                binding: binding)
+            return
+        }
+        if let thread = codexChildThreadsByID.values.first(where: {
+            $0.displayName == name
+        }),
+           let role = thread.agentRole,
+           projectSettings.codexAgentProfiles.contains(where: {
+               $0.roleName == role
+           }) {
+            rebindCodexAgentProfile(
+                name: role,
+                binding: binding)
+            return
+        }
+        guard let orchestrator else { return }
         isWorking = true
         composerError = nil
         let operationID = UUID()
@@ -2258,19 +4528,57 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         activeOperations[operationID] = operation
     }
 
+    private func rebindCodexAgentProfile(
+        name: String,
+        binding: AgentInferenceBinding
+    ) {
+        isWorking = true
+        composerError = nil
+        let operationID = UUID()
+        let operation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.isWorking = false
+                self.activeOperations.removeValue(forKey: operationID)
+            }
+            var settings = self.projectSettings
+            guard let index = settings.codexAgentProfiles.firstIndex(where: {
+                $0.roleName == name
+            }) else { return }
+            let previous = settings.codexAgentProfiles[index]
+            settings.codexAgentProfiles[index] = CoworkCodexAgentProfile(
+                roleName: previous.roleName,
+                description: previous.description,
+                workspacePath: previous.workspacePath,
+                inferenceBinding: binding,
+                permissionProfile: previous.permissionProfile,
+                addedAt: previous.addedAt)
+            guard await self.persistProjectSettings(settings) else { return }
+            await self.resetCodexRuntime()
+            do {
+                try await self.startCodexRuntimeForCurrentMain()
+                self.composerError = nil
+            } catch {
+                self.composerError = error.localizedDescription
+            }
+        }
+        activeOperations[operationID] = operation
+    }
+
     func removeWorkspace(path: String) {
-        guard acceptsNewOperations else { return }
+        guard acceptsNewOperations,
+              !isRuntimeMutationBlocked else { return }
         let operationID = UUID()
         let operation = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.activeOperations.removeValue(forKey: operationID) }
             guard let configuredWorkspace = self.configuredWorkspace(matching: path) else {
-                self.composerError = CouncisLocalization.string(
+                self.composerError = IntatisLocalization.string(
                     "This workspace could not be matched safely to session settings.")
                 return
             }
             guard !configuredWorkspace.isPrimary else {
-                self.composerError = CouncisLocalization.string(
+                self.composerError = IntatisLocalization.string(
                     "The primary workspace cannot be removed.")
                 return
             }
@@ -2281,7 +4589,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 candidate: configuredWorkspace.path,
                 settings: settings,
                 remainingAgents: remainingAgents) else {
-                self.composerError = CouncisLocalization.string(
+                self.composerError = IntatisLocalization.string(
                     "This workspace is still referenced by session settings or an attached agent.")
                 return
             }
@@ -2290,7 +4598,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 try WorkspaceAccess.forget(path: removablePath, in: self.sessionID)
                 self.releaseWorkspaceAccess(forPath: removablePath)
             } catch {
-                self.composerError = CouncisLocalization.format(
+                self.composerError = IntatisLocalization.format(
                     "The workspace metadata was removed, but its capability was retained because cleanup failed: %@",
                     error.localizedDescription)
                 return
@@ -2312,7 +4620,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 in: sessionID)
             try WorkspaceAccess.remember(authorization.scopedURL, for: sessionID)
         } catch {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Workspace access could not be saved: %@",
                 error.localizedDescription)
             authorization.release()
@@ -2347,9 +4655,9 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     func addAgent(name rawName: String, workspace authorization: WorkspaceAccessLease) {
-        guard acceptsNewOperations, let orchestrator else {
+        guard acceptsNewOperations, !isRuntimeMutationBlocked else {
             addAgentStatus = .failed(
-                CouncisLocalization.string("Cowork session is not ready."))
+                IntatisLocalization.string("Cowork session is not ready."))
             authorization.release()
             return
         }
@@ -2363,12 +4671,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             return
         }
         guard let binding = projectSettings.defaultInferenceProfileBinding else {
-            addAgentStatus = .failed(CouncisLocalization.string(
+            addAgentStatus = .failed(IntatisLocalization.string(
                 "Choose a default inference profile for new agents."))
             authorization.release()
             return
         }
-        let workspace = authorization.canonicalURL
         let workspacePath = authorization.canonicalPath
         let hadRememberedAccess: Bool
         do {
@@ -2377,7 +4684,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 in: sessionID)
             try WorkspaceAccess.remember(authorization.scopedURL, for: sessionID)
         } catch {
-            addAgentStatus = .failed(CouncisLocalization.format(
+            addAgentStatus = .failed(IntatisLocalization.format(
                 "Workspace access could not be saved: %@",
                 error.localizedDescription))
             authorization.release()
@@ -2395,40 +4702,42 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 return
             }
             defer { self.activeOperations.removeValue(forKey: operationID) }
-            let replayed = await self.log.replay()
-            let startSeq = replayed.last?.seq ?? -1
-            let attached = await orchestrator.attach(Agent(name: AgentID(rawValue: normalizedName), workspaceRoot: workspace,
-                                            model: binding.modelID,
-                                            agentInferenceBinding: binding,
-                                            profile: self.projectSettings.defaultProfile,
-                                            coordinationDepth: 0))
-            await self.synchronizePermissionReviewerHealth(using: orchestrator)
-            if attached {
-                var settings = self.projectSettings
-                settings.upsertWorkspace(
-                    path: workspacePath,
-                    agentName: normalizedName,
-                    isPrimary: false)
-                if await self.persistProjectSettings(settings) {
-                    _ = self.adoptWorkspaceAccess(authorization)
-                    self.addAgentStatus = .attached(normalizedName)
-                } else {
-                    // The roster keeps this path visible and removable. Do not
-                    // hide or revoke the capability behind a false success.
-                    _ = self.adoptWorkspaceAccess(authorization)
-                    self.addAgentStatus = .failed(
-                        CouncisLocalization.format(
-                            "@%@ was attached, but its project settings could not be saved; remove it or retry settings before continuing.",
-                            normalizedName))
+            var settings = self.projectSettings
+            settings.upsertWorkspace(
+                path: workspacePath,
+                agentName: normalizedName,
+                isPrimary: false)
+            settings.upsertCodexAgentProfile(
+                CoworkCodexAgentProfile(
+                    roleName: normalizedName,
+                    description:
+                        "Use for Cowork work assigned to the \(normalizedName) role in its user-approved workspace.",
+                    workspacePath: workspacePath,
+                    inferenceBinding: binding,
+                    permissionProfile:
+                        self.projectSettings.defaultPermissionProfile))
+            guard await self.persistProjectSettings(settings) else {
+                if !hadRememberedAccess {
+                    try? WorkspaceAccess.forget(
+                        path: workspacePath,
+                        in: self.sessionID)
                 }
+                authorization.release()
+                self.addAgentStatus = .failed(
+                    self.composerError
+                        ?? IntatisLocalization.string(
+                            "The Codex custom-agent profile could not be saved."))
                 return
             }
-            let events = await self.log.replay(from: startSeq + 1)
-            self.addAgentStatus = self.attachFailureStatus(agentName: normalizedName, events: events)
-            if !hadRememberedAccess {
-                try? WorkspaceAccess.forget(path: workspacePath, in: self.sessionID)
+            _ = self.adoptWorkspaceAccess(authorization)
+            await self.resetCodexRuntime()
+            do {
+                try await self.startCodexRuntimeForCurrentMain()
+                self.addAgentStatus = .attached(normalizedName)
+            } catch {
+                self.addAgentStatus = .failed(
+                    error.localizedDescription)
             }
-            authorization.release()
         }
         activeOperations[operationID] = operation
     }
@@ -2441,12 +4750,12 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             defer { self.activeOperations.removeValue(forKey: operationID) }
             for url in urls {
                 do {
-                    let file = try CouncisComposerAttachmentFileReader.read(url)
+                    let file = try IntatisComposerAttachmentFileReader.read(url)
                     let attachment = try await self.composerAttachmentStore
                         .preserve(file)
                     self.draftAttachments.append(attachment)
                 } catch {
-                    self.composerError = CouncisLocalization.format(
+                    self.composerError = IntatisLocalization.format(
                         "Attachment %@ could not be preserved: %@",
                         url.lastPathComponent,
                         error.localizedDescription)
@@ -2467,7 +4776,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         _ insertion: MCPPromptInsertion
     ) async throws {
         guard acceptsNewOperations else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "The Cowork session is stopping.")
         }
         let selectedAgentID =
@@ -2476,7 +4785,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 pendingMCPExternalContextAgentID,
            let selectedAgentID,
            existing != selectedAgentID {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "External MCP context for different agents cannot be combined in one submission.")
         }
         let candidate =
@@ -2504,7 +4813,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 pendingMCPExternalContextAgentID,
            let selectedByAgentID,
            existing != selectedByAgentID {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "External MCP context for different agents cannot be combined in one submission.")
         }
         let candidate =
@@ -2528,12 +4837,325 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     func reportAttachmentImportFailure(_ error: Error) {
         guard acceptsNewOperations else { return }
-        composerError = CouncisLocalization.format(
+        composerError = IntatisLocalization.format(
             "Attachments could not be selected: %@",
             error.localizedDescription)
     }
 
     func send() {
+        guard acceptsNewOperations,
+              !isAcceptingSubmission else { return }
+        #if canImport(AVFoundation)
+        guard !voiceInput.isEngaged else { return }
+        #endif
+        guard pendingMCPExternalContexts.isEmpty else {
+            composerError = IntatisLocalization.string(
+                "Staged content from the retired Councis MCP client cannot be imported into a native Codex turn. Use an attached native MCP server directly, or cancel the staged context.")
+            return
+        }
+        let originalInput = input
+        let originalAttachments = draftAttachments
+        let parsed: ParsedUserInput
+        if originalInput.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty,
+           !originalAttachments.isEmpty {
+            parsed = ParsedUserInput(text: "")
+        } else {
+            switch GoalInputParser.parse(originalInput) {
+            case .success(let value):
+                parsed = value
+            case .failure(.empty):
+                return
+            case .failure(let error):
+                composerError = Self.presentationMessage(for: error)
+                return
+            }
+        }
+        let routeInput = parsed.isGoal ? parsed.text : originalInput
+        let route = routeInput.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
+            ? CoworkMentionRoute(
+                originalInput: routeInput,
+                outcome: .send(
+                    text: "",
+                    target: AgentID(
+                        rawValue: projectSettings.mainAgentName)))
+            : routeProjectInput(routeInput)
+        let text: String
+        let target: AgentID
+        let targetThreadID: String?
+        switch route.outcome {
+        case .blocked(let error):
+            composerError = Self.presentationMessage(for: error)
+            return
+        case .send(let routedText, let requestedTarget):
+            do {
+                let resolved = try resolveCodexUserTarget(
+                    requestedTarget)
+                text = routedText
+                target = resolved.agentID
+                targetThreadID = resolved.threadID
+            } catch {
+                composerError = error.localizedDescription
+                return
+            }
+        }
+        let main = AgentID(rawValue: projectSettings.mainAgentName)
+        if target == main, isAgentWorkActive {
+            return
+        }
+        let binding: AgentInferenceBinding?
+        if target == main {
+            guard let selected = nextMainInferenceBinding else {
+                composerError = IntatisLocalization.string(
+                    "Choose one resolvable Responses model before sending to Codex Runtime.")
+                return
+            }
+            binding = selected
+        } else {
+            binding = nil
+        }
+
+        if targetThreadID != nil,
+           codexRuntime == nil {
+            composerError = IntatisLocalization.string(
+                "The selected Codex subagent is not loaded in this Cowork session.")
+            return
+        }
+        if targetThreadID != nil,
+           parsed.goal != nil {
+            composerError = IntatisLocalization.string(
+                "A Codex Goal belongs to @main. Send ordinary text when addressing a subagent directly.")
+            return
+        }
+
+        let submissionID = SubmissionID.new()
+        var payload = UserMessagePayload(
+            text: text,
+            attachments: originalAttachments.isEmpty
+                ? nil
+                : originalAttachments.map(\.id),
+            to: target,
+            tags: parsed.tags.isEmpty ? nil : parsed.tags,
+            goal: parsed.goal,
+            submissionID: submissionID,
+            mainAgentInferenceBinding: binding,
+            turnID: TurnID.new())
+        // Intatis external contexts are rejected above; keep the durable
+        // payload explicit rather than silently dropping staged data.
+        payload.untrustedExternalContexts = nil
+        isAcceptingSubmission = true
+        isWorking = true
+        composerError = nil
+        let operationID = UUID()
+        let operation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.isAcceptingSubmission = false
+                self.isWorking = false
+                self.activeOperations.removeValue(forKey: operationID)
+            }
+            do {
+                let durableRoot = try await self
+                    .loadCodexRootAuthority()
+                let currentMain = durableRoot.agent
+                let currentBinding = currentMain
+                    .agentInferenceBinding
+                if let binding,
+                   currentBinding != binding {
+                    try await self.log.append(.agentAttached(
+                        AgentAttachedPayload(
+                            agent: main,
+                            path: currentMain.path,
+                            model: binding.modelID,
+                            profile: self.projectSettings
+                                .defaultPermissionProfile,
+                            agentInferenceBinding: binding,
+                            previousAgentInferenceBinding: currentBinding,
+                            inferenceBindingChangeReason:
+                                "selected for next Codex Runtime turn",
+                            metadata: currentMain.metadata)))
+                }
+                let runtime: CodexAppServerSession
+                if let binding {
+                    runtime = try await self.codexSession(
+                        for: binding)
+                } else if let active = self.codexRuntime {
+                    runtime = active
+                } else {
+                    throw CodexRuntimeError.notStarted
+                }
+                let imageURLs = try await self.codexImageURLs(
+                    for: originalAttachments)
+                let childHistoryBaseline: Set<String>?
+                if let targetThreadID {
+                    guard imageURLs.isEmpty else {
+                        throw CodexRuntimeError.malformedProtocol(
+                            "native Codex subagent messages do not accept image attachments")
+                    }
+                    try self.validateVerifiedCodexDescendant(
+                        threadID: targetThreadID)
+                    childHistoryBaseline = try? await runtime
+                        .threadHistory(threadID: targetThreadID)
+                        .userMessageIDs
+                    try await self.log.append([
+                        .userMessage(payload),
+                        .submissionStatusChanged(
+                            SubmissionStatusChangedPayload(
+                                submissionID: submissionID,
+                                status: .queued,
+                                attempt: 1)),
+                        .submissionStatusChanged(
+                            SubmissionStatusChangedPayload(
+                                submissionID: submissionID,
+                                status: .running,
+                                attempt: 1)),
+                    ])
+                } else {
+                    childHistoryBaseline = nil
+                    try await self.log.append(.userMessage(payload))
+                }
+                self.codexAllowsThreadCreation = false
+                if self.input == originalInput {
+                    self.input = ""
+                }
+                if self.draftAttachments.map(\.id)
+                    == originalAttachments.map(\.id) {
+                    self.draftAttachments = []
+                }
+                if target == main {
+                    self.nextMainInferenceOption = nil
+                }
+                if let goal = parsed.goal {
+                    try await runtime.setGoal(
+                        objective: goal,
+                        tokenBudget: self.projectSettings.tokenBudget)
+                } else if let targetThreadID {
+                    try await self
+                        .deliverMessageToVerifiedCodexDescendant(
+                        runtime: runtime,
+                        threadID: targetThreadID,
+                        text: text,
+                        submissionID: submissionID,
+                        baselineUserMessageIDs: childHistoryBaseline)
+                } else {
+                    _ = try await runtime.runTurn(
+                        text: text,
+                        localImageURLs: imageURLs)
+                }
+                self.composerError = nil
+            } catch {
+                let cancelled = Task.isCancelled
+                let message = error.localizedDescription
+                self.composerError = cancelled ? nil : message
+                if !cancelled,
+                   targetThreadID == nil {
+                    self.setPermissionReviewerStatus(.failed(message))
+                    _ = try? await self.log.append(.error(
+                        RuntimeErrorPresentation.payload(
+                            for: error,
+                            fallbackCode: "codex_runtime")))
+                }
+            }
+        }
+        activeOperations[operationID] = operation
+    }
+
+    /// The only product-layer path for explicitly addressing a native Codex
+    /// child. App Server routes it through native AgentControl/mailbox state;
+    /// there is deliberately no root-model, Orchestrator, or MessageBus hop.
+    private func validateVerifiedCodexDescendant(
+        threadID: String
+    ) throws {
+        guard let descriptor = codexChildThreadsByID[threadID],
+              codexChildThreadIDByAgentID[descriptor.agentID] == threadID,
+              !descriptor.isArchived,
+              descriptor.status != "shutdown" else {
+            throw CodexRuntimeError.malformedProtocol(
+                "subagent messaging requires a verified live Codex descendant")
+        }
+    }
+
+    private func deliverMessageToVerifiedCodexDescendant(
+        runtime: CodexAppServerSession,
+        threadID: String,
+        text: String,
+        submissionID: SubmissionID,
+        baselineUserMessageIDs: Set<String>?
+    ) async throws {
+        try validateVerifiedCodexDescendant(threadID: threadID)
+        do {
+            _ = try await runtime.sendMessage(
+                toDescendantThreadID: threadID,
+                text: text,
+                triggerTurn: true)
+        } catch {
+            if Self.isUncertainCodexChildDelivery(error),
+               let baselineUserMessageIDs,
+               let readback = try? await runtime.threadHistory(
+                    threadID: threadID),
+               readback.containsNewUserMessage(
+                    text,
+                    excluding: baselineUserMessageIDs) {
+                try await log.append(.submissionStatusChanged(
+                    SubmissionStatusChangedPayload(
+                        submissionID: submissionID,
+                        status: .completed,
+                        attempt: 1)))
+                return
+            }
+            let failure: SubmissionFailure
+            if Self.isUncertainCodexChildDelivery(error) {
+                failure = SubmissionFailure(
+                    code: "child_message_delivery_unknown",
+                    message: "Delivery could not be confirmed. Read this subagent's Codex history before retrying the message.",
+                    retryable: false)
+            } else {
+                failure = SubmissionFailure(
+                    code: "child_message_rejected",
+                    message: "Codex rejected this subagent message before delivery. Review the reason and explicitly send a new message: \(RuntimeErrorPresentation.message(for: error))",
+                    retryable: false)
+            }
+            try await log.append(.submissionStatusChanged(
+                SubmissionStatusChangedPayload(
+                    submissionID: submissionID,
+                    status: .failed,
+                    attempt: 1,
+                    failure: failure)))
+            if failure.code == "child_message_delivery_unknown" {
+                throw IntatisError.io(failure.message)
+            }
+            throw error
+        }
+        // Persistence is outside the delivery-error classifier. Once App
+        // Server returned a submission ID, a local EventLog failure must never
+        // be rewritten as a remote rejection.
+        try await log.append(.submissionStatusChanged(
+            SubmissionStatusChangedPayload(
+                submissionID: submissionID,
+                status: .completed,
+                attempt: 1)))
+    }
+
+    private static func isUncertainCodexChildDelivery(
+        _ error: Error
+    ) -> Bool {
+        if IntatisCancellation.isCancellationSignal(error) { return true }
+        guard let error = error as? CodexRuntimeError else { return false }
+        switch error {
+        case .requestTimedOut, .processTerminated:
+            return true
+        case .malformedProtocol(let message):
+            return message.contains("returned no submission id")
+        default:
+            return false
+        }
+    }
+
+    /// Retained temporarily only for source-level/manual rollback. It has no
+    /// callable production path after the Codex Runtime migration.
+    @available(*, unavailable, message: "Cowork uses Codex App Server")
+    private func retainedLegacySubmittedIntentSend() {
         guard acceptsNewOperations, !isAcceptingSubmission else { return }
         #if canImport(AVFoundation)
         guard !voiceInput.isEngaged else { return }
@@ -2577,7 +5199,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         case .send(let text, let target):
             if let frozenExternalContextAgentID,
                frozenExternalContextAgentID != target {
-                composerError = CouncisLocalization.format(
+                composerError = IntatisLocalization.format(
                     "The selected MCP context belongs to @%@, but this message targets @%@.",
                     frozenExternalContextAgentID.rawValue,
                     target.rawValue)
@@ -2601,7 +5223,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             let frozenMainInferenceBinding: AgentInferenceBinding?
             if isMainHostedSubmission {
                 guard let exactBinding = nextMainInferenceBinding else {
-                    composerError = CouncisLocalization.format(
+                    composerError = IntatisLocalization.format(
                         "Choose a resolvable model for the next @%@ message before sending.",
                         mainAgentID.rawValue)
                     return
@@ -2661,7 +5283,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         self.scheduleSubmissionDrain()
                     case .outbox(let entry, let canonicalError):
                         self.outboxEntries[submissionID] = entry
-                        self.composerError = CouncisLocalization.format(
+                        self.composerError = IntatisLocalization.format(
                             "Submission saved in the local outbox. Retry when the session EventLog is writable: %@",
                             canonicalError)
                         self.rebuildOutboxThreadItems(
@@ -2670,7 +5292,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 } catch {
                     // Neither canonical EventLog nor the owner-only outbox
                     // accepted the intent. Keep the original draft verbatim.
-                    self.composerError = CouncisLocalization.format(
+                    self.composerError = IntatisLocalization.format(
                         "The submission could not be preserved, so the draft was not cleared: %@",
                         error.localizedDescription)
                 }
@@ -2718,16 +5340,30 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             pendingMCPExternalContexts.count
     }
 
+    private static func containsAgentHistory(
+        _ envelopes: [Envelope]
+    ) -> Bool {
+        envelopes.contains { envelope in
+            switch envelope.event {
+            case .userMessage, .messageDelta, .messageCompleted,
+                 .toolCall, .toolResult, .patchProposed, .turnOutcome:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     private static func validateMCPExternalContexts(
         _ contexts: [UntrustedExternalContext]
     ) throws {
         guard contexts.count <= 16 else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "A submission can include at most 16 external MCP context items.")
         }
         let encoded = try JSONEncoder().encode(contexts)
         guard encoded.count <= 512 * 1_024 else {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "External MCP context exceeds the 512 KiB submission limit.")
         }
     }
@@ -2806,7 +5442,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         status: .running,
                         attempt: attempt))
             } catch {
-                composerError = CouncisLocalization.format(
+                composerError = IntatisLocalization.format(
                     "Submission %@ remains queued because its running state could not be persisted: %@",
                     submissionID.rawValue,
                     error.localizedDescription)
@@ -2891,7 +5527,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     // automatically when the terminal status could not be
                     // persisted; the restored UI will require an explicit
                     // reconciliation/retry decision.
-                    composerError = CouncisLocalization.format(
+                    composerError = IntatisLocalization.format(
                         "Submission %@ finished, but completion could not be persisted: %@",
                         submissionID.rawValue,
                         error.localizedDescription)
@@ -2928,7 +5564,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         retryable: retryable)))
             composerError = safeMessage
         } catch {
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "Submission failed, and its retry state could not be persisted: %@",
                 error.localizedDescription)
         }
@@ -2965,7 +5601,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                         self.scheduleSubmissionDrain()
                     case .outbox(let entry, let canonicalError):
                         self.outboxEntries[submissionID] = entry
-                        self.composerError = CouncisLocalization.format(
+                        self.composerError = IntatisLocalization.format(
                             "The submission is still safe in the local outbox: %@",
                             canonicalError)
                         self.rebuildOutboxThreadItems(
@@ -2975,7 +5611,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 }
 
                 guard let payload = self.submittedPayloads[submissionID] else {
-                    self.composerError = CouncisLocalization.string(
+                    self.composerError = IntatisLocalization.string(
                         "This submission payload is no longer available for retry.")
                     return
                 }
@@ -3025,7 +5661,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     retryAttempt = attempt
                     appendsQueuedStatus = true
                 case .reject:
-                    self.composerError = CouncisLocalization.string(
+                    self.composerError = IntatisLocalization.string(
                         "This submission already has active or inconsistent task state and cannot be retried.")
                     return
                 }
@@ -3046,7 +5682,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 self.publishSubmissionThreadChange(submissionID)
                 self.scheduleSubmissionDrain()
             } catch {
-                self.composerError = CouncisLocalization.format(
+                self.composerError = IntatisLocalization.format(
                     "The submission could not be queued for retry: %@",
                     error.localizedDescription)
             }
@@ -3064,7 +5700,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                     && $0.contract?.submissionID == submissionID
             }
         guard matches.count <= 1 else {
-            throw CouncisError.decoding(
+            throw IntatisError.decoding(
                 "submission \(submissionID.rawValue) is correlated with multiple root tasks")
         }
         return matches.first
@@ -3080,15 +5716,15 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             from: try await log.replayChecked())
         guard !projection.ambiguousContinuationRunCloseClaimIDs
             .contains(runID) else {
-            throw CouncisError.decoding(
+            throw IntatisError.decoding(
                 "continuation run \(runID.rawValue) has conflicting close claims")
         }
         guard let run = projection.continuationRuns[runID] else {
-            throw CouncisError.decoding(
+            throw IntatisError.decoding(
                 "continuation run \(runID.rawValue) is missing from durable history")
         }
         guard run.status.isTerminal else {
-            throw CouncisError.decoding(
+            throw IntatisError.decoding(
                 "continuation run \(runID.rawValue) is still \(run.status.rawValue)")
         }
         return true
@@ -3102,7 +5738,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         let target = original.to ?? mainAgentID
         if target == mainAgentID,
            original.mainAgentInferenceBinding == nil {
-            throw CouncisError.config(
+            throw IntatisError.config(
                 "The interrupted @\(mainAgentID.rawValue) submission has no exact model binding to carry into a fresh run.")
         }
         let submissionID = SubmissionID.new()
@@ -3131,7 +5767,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             scheduleSubmissionDrain()
         case .outbox(let entry, let canonicalError):
             outboxEntries[submissionID] = entry
-            composerError = CouncisLocalization.format(
+            composerError = IntatisLocalization.format(
                 "The continuation is safe in the local outbox: %@",
                 canonicalError)
             rebuildOutboxThreadItems(publishesChanges: true)
@@ -3169,8 +5805,29 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
               isAgentWorkActive || isGoalContinuing else {
             return
         }
+        if let codexRuntime {
+            isCancellingCurrentActivity = true
+            composerError = IntatisLocalization.string(
+                "Cancelling the current Codex Runtime turn…")
+            let operationID = UUID()
+            let operation = Task { @MainActor [weak self] in
+                defer {
+                    self?.isCancellingCurrentActivity = false
+                    self?.activeOperations.removeValue(
+                        forKey: operationID)
+                }
+                do {
+                    try await codexRuntime.interruptCurrentTurn()
+                    self?.composerError = nil
+                } catch {
+                    self?.composerError = error.localizedDescription
+                }
+            }
+            activeOperations[operationID] = operation
+            return
+        }
         isCancellingCurrentActivity = true
-        composerError = CouncisLocalization.string(
+        composerError = IntatisLocalization.string(
             "Cancelling the current Cowork task…")
         let operationID = UUID()
         let operation = Task { @MainActor [weak self] in
@@ -3184,7 +5841,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 || self.goal?.normalizedStatus == "active"
             if hasActiveGoal {
                 guard let goalRuntime = self.goalRuntime else {
-                    self.composerError = CouncisLocalization.string(
+                    self.composerError = IntatisLocalization.string(
                         "Cowork session is not ready.")
                     return
                 }
@@ -3198,7 +5855,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             }
 
             guard let orchestrator = self.orchestrator else {
-                self.composerError = CouncisLocalization.string(
+                self.composerError = IntatisLocalization.string(
                     "Cowork session is not ready.")
                 return
             }
@@ -3210,26 +5867,31 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     }
 
     func pauseGoal() {
-        guard acceptsNewOperations, isGoalRuntimeReady, let goalRuntime else { return }
-        performGoalAction {
-            _ = try await goalRuntime.pauseCurrentGoal()
+        guard acceptsNewOperations, codexGoalSnapshot != nil else { return }
+        performGoalAction { [weak self] in
+            guard let self else { return }
+            let runtime = try await self.codexRuntimeForGoalAction()
+            try await runtime.setGoalStatus("paused")
         }
     }
 
     func resumeGoal() {
-        guard acceptsNewOperations, isGoalRuntimeReady, let goalRuntime else { return }
-        performGoalAction {
-            _ = try await goalRuntime.resumeCurrentGoal()
+        guard acceptsNewOperations, codexGoalSnapshot != nil else { return }
+        performGoalAction { [weak self] in
+            guard let self else { return }
+            let runtime = try await self.codexRuntimeForGoalAction()
+            try await runtime.setGoalStatus("active")
         }
     }
 
     func currentGoalEditDraft() -> CoworkGoalEditDraft? {
-        guard let durableGoal = latestCoworkProjection.currentGoal else { return nil }
+        guard let codexGoalSnapshot else { return nil }
         return CoworkGoalEditDraft(
-            objective: durableGoal.objective,
-            successCriteria: durableGoal.successCriteria.joined(separator: "\n"),
-            constraints: durableGoal.constraints.joined(separator: "\n"),
-            tokenBudget: durableGoal.tokenBudget.map(String.init) ?? "")
+            objective: codexGoalSnapshot.objective,
+            successCriteria: "",
+            constraints: "",
+            tokenBudget: codexGoalSnapshot.tokenBudget
+                .map(String.init) ?? "")
     }
 
     @discardableResult
@@ -3239,44 +5901,60 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                   tokenBudget: String) -> String? {
         let objective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !objective.isEmpty else {
-            return CouncisLocalization.string("A Goal objective is required.")
+            return IntatisLocalization.string("A Goal objective is required.")
         }
 
         let budgetText = tokenBudget.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parsedBudget: Int?
+        let budgetUpdate: CodexRuntimeGoalBudgetUpdate
         if budgetText.isEmpty {
-            parsedBudget = nil
+            budgetUpdate = .clear
         } else if let value = Int(budgetText), value > 0 {
-            parsedBudget = value
+            budgetUpdate = .set(value)
         } else {
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Token budget must be a positive whole number, or left empty for no budget.")
         }
 
-        guard isGoalRuntimeReady,
-              acceptsNewOperations,
-              let goalRuntime,
-              latestCoworkProjection.currentGoal != nil else {
-            return CouncisLocalization.string(
-                "Goal recovery must finish before the durable Goal can be edited.")
+        guard acceptsNewOperations,
+              codexGoalSnapshot != nil else {
+            return IntatisLocalization.string(
+                "The Codex thread Goal must be loaded before it can be edited.")
         }
         let parsedCriteria = Self.goalEditLines(successCriteria)
         let parsedConstraints = Self.goalEditLines(constraints)
-        performGoalAction {
-            _ = try await goalRuntime.editCurrentGoal(
+        guard parsedCriteria.isEmpty,
+              parsedConstraints.isEmpty else {
+            return IntatisLocalization.string(
+                "The Codex thread Goal supports an objective and token budget; success criteria and constraints are not official Codex Goal fields.")
+        }
+        performGoalAction { [weak self] in
+            guard let self else { return }
+            let runtime = try await self.codexRuntimeForGoalAction()
+            try await runtime.updateGoal(
                 objective: objective,
-                successCriteria: parsedCriteria,
-                constraints: parsedConstraints,
-                tokenBudget: parsedBudget)
+                tokenBudget: budgetUpdate)
         }
         return nil
     }
 
     func clearGoal() {
-        guard acceptsNewOperations, isGoalRuntimeReady, let goalRuntime else { return }
-        performGoalAction {
-            try await goalRuntime.clearCurrentGoal(reason: "cleared by user from Cowork Goal card")
+        guard acceptsNewOperations, codexGoalSnapshot != nil else { return }
+        performGoalAction { [weak self] in
+            guard let self else { return }
+            let runtime = try await self.codexRuntimeForGoalAction()
+            try await runtime.clearGoal()
         }
+    }
+
+    private func codexRuntimeForGoalAction() async throws
+        -> CodexAppServerSession
+    {
+        if let codexRuntime { return codexRuntime }
+        try await startCodexRuntimeForCurrentMain()
+        guard let codexRuntime else {
+            throw CodexRuntimeError.notStarted
+        }
+        return codexRuntime
     }
 
     private func performGoalAction(
@@ -3309,14 +5987,61 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             defaultTarget: AgentID(rawValue: projectSettings.mainAgentName))
     }
 
+    private func resolveCodexUserTarget(
+        _ requested: AgentID
+    ) throws -> (agentID: AgentID, threadID: String?) {
+        let main = AgentID(rawValue: projectSettings.mainAgentName)
+        if requested == main
+            || requested.rawValue.lowercased()
+                == main.rawValue.lowercased() {
+            return (main, nil)
+        }
+
+        let exact = codexChildThreadsByID.values.filter {
+            $0.agentID == requested
+                || $0.displayName == requested.rawValue
+        }
+        let candidates: [CodexRuntimeThreadDescriptor]
+        if exact.isEmpty {
+            let folded = requested.rawValue.lowercased()
+            candidates = codexChildThreadsByID.values.filter {
+                $0.agentID.rawValue.lowercased() == folded
+                    || $0.displayName.lowercased() == folded
+            }
+        } else {
+            candidates = exact
+        }
+        guard candidates.count == 1,
+              let thread = candidates.first else {
+            if candidates.count > 1 {
+                throw IntatisError.config(
+                    IntatisLocalization.format(
+                        "More than one Codex subagent matches @%@; use the unique agent nickname shown by Codex.",
+                        requested.rawValue))
+            }
+            throw IntatisError.config(
+                IntatisLocalization.format(
+                    "No active Codex subagent matches @%@.",
+                    requested.rawValue))
+        }
+        guard !thread.isArchived,
+              thread.status != "shutdown" else {
+            throw IntatisError.config(
+                IntatisLocalization.format(
+                    "@%@ has ended and its conversation is read-only.",
+                    thread.displayName))
+        }
+        return (thread.agentID, thread.threadID)
+    }
+
     private static func presentationMessage(
         for error: GoalInputParseError
     ) -> String {
         switch error {
         case .empty:
-            return CouncisLocalization.string("Enter a message.")
+            return IntatisLocalization.string("Enter a message.")
         case .missingGoal:
-            return CouncisLocalization.string("Enter a goal after /goal.")
+            return IntatisLocalization.string("Enter a goal after /goal.")
         }
     }
 
@@ -3325,27 +6050,27 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     ) -> String {
         switch error {
         case .noAgents:
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Add an agent before sending a Cowork message.")
         case .emptyMessage:
-            return CouncisLocalization.string("Enter a message before sending.")
+            return IntatisLocalization.string("Enter a message before sending.")
         case .emptyMention:
-            return CouncisLocalization.string("Type an agent name after @.")
+            return IntatisLocalization.string("Type an agent name after @.")
         case .unknownMention(let name):
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "No attached agent matches @%@.",
                 name)
         case .invalidMention(let name):
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "@%@ is not a valid agent name. Use ASCII letters, digits, '-' or '_'.",
                 name)
         case .ambiguousMention(let name, let agents):
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "Ambiguous @%@: %@",
                 name,
                 agents.map { "@\($0.rawValue)" }.joined(separator: ", "))
         case .ambiguousDefault(let agents):
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "Use @Name to choose an agent: %@",
                 agents.map { "@\($0.rawValue)" }.joined(separator: ", "))
         }
@@ -3354,7 +6079,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     func retryFailedTask(id: String) {
         guard acceptsNewOperations, !isRuntimeMutationBlocked, let orchestrator else { return }
         guard let task = retryableTasks[id] else {
-            composerError = CouncisLocalization.string(
+            composerError = IntatisLocalization.string(
                 "This failed task is no longer retryable.")
             return
         }
@@ -3421,6 +6146,43 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
               presented.state.isActionable else { return }
         let request = presented.request
         let requestID = request.requestId
+        if let runtimeRequestID = codexApprovalIDs[requestID],
+           let codexRuntime {
+            if var pending = pendingPermission {
+                pending.state = .resolving
+                pendingPermission = pending
+            }
+            codexApprovalActions[requestID] = action
+            let decision: CodexRuntimeApprovalDecision
+            switch action {
+            case .approve:
+                decision = .accept
+            case .approveAndRemember:
+                decision = .acceptForSession
+            case .decline:
+                decision = .decline
+            case .cancelTurn:
+                decision = .cancel
+            }
+            Task { @MainActor [weak self] in
+                do {
+                    try await codexRuntime.resolveApproval(
+                        requestID: runtimeRequestID,
+                        decision: decision)
+                } catch {
+                    guard let self else { return }
+                    self.codexApprovalActions.removeValue(
+                        forKey: requestID)
+                    if var pending = self.pendingPermission,
+                       pending.id == requestID {
+                        pending.state = .livePending
+                        self.pendingPermission = pending
+                    }
+                    self.composerError = error.localizedDescription
+                }
+            }
+            return
+        }
         guard
               let waiter = permissionWaiters.removeValue(forKey: requestID) else {
             if pendingPermission?.state == .needsRerun {
@@ -3467,8 +6229,10 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
                 ? .resolving
                 : .livePending,
             requestedSeq: -1))
-        permissionReviewerStatus = .fallback(permissionFallbackReason)
-        schedulePermissionReviewerHealthRefresh()
+        if request.effectiveApprovalMode == .automaticReviewer {
+            permissionReviewerStatus = .fallback(permissionFallbackReason)
+            schedulePermissionReviewerHealthRefresh()
+        }
 
         // Cancellation can resolve the waiter from a non-MainActor thread
         // between the first guard and registration. Remove it immediately if so;
@@ -3558,17 +6322,17 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private var permissionFallbackReason: String {
         switch steadyPermissionReviewerStatus {
         case .enabled:
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Automatic review unexpectedly left the automatic path; ask-class tools fail closed until it recovers.")
         case .failed(let reason):
-            return CouncisLocalization.format(
+            return IntatisLocalization.format(
                 "Automatic review is unavailable (%@); ordinary submissions remain available, but ask-class tools fail closed.",
                 reason)
         case .disabled:
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Automatic review is disabled; ordinary submissions remain available, but ask-class tools fail closed.")
         case .enabling:
-            return CouncisLocalization.string(
+            return IntatisLocalization.string(
                 "Automatic review is still starting; ordinary submissions remain available.")
         case .degraded(let reason):
             return reason
@@ -3585,20 +6349,55 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private func validateNewAgentName(_ rawName: String) -> AgentNameValidation {
         let name = Self.normalizedAgentName(rawName)
         guard !name.isEmpty else {
-            return .failure(CouncisLocalization.string("Enter an agent name."))
+            return .failure(IntatisLocalization.string("Enter an agent name."))
         }
         guard name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
-            return .failure(CouncisLocalization.string(
+            return .failure(IntatisLocalization.string(
                 "Agent names cannot contain spaces."))
         }
+        guard name.unicodeScalars.allSatisfy({ scalar in
+            switch scalar.value {
+            case 45, 48...57, 65...90, 95, 97...122:
+                return true
+            default:
+                return false
+            }
+        }) else {
+            return .failure(IntatisLocalization.string(
+                "Agent names use ASCII letters, digits, '-' or '_'."))
+        }
+        let reserved = [
+            projectSettings.mainAgentName,
+            Orchestrator.automaticPermissionReviewerID.rawValue,
+            "default",
+            "enabled",
+            "max_concurrent_threads_per_session",
+            "max_threads",
+            "max_depth",
+            "default_subagent_model",
+            "default_subagent_reasoning_effort",
+            "job_max_runtime_seconds",
+            "interrupt_message",
+        ]
+        if reserved.contains(where: {
+            $0.lowercased() == name.lowercased()
+        }) {
+            return .failure(IntatisLocalization.format(
+                "@%@ is reserved.",
+                name))
+        }
         let existing = latestCoworkProjection.agentRoster.keys.map(\.rawValue)
+            + projectSettings.codexAgentProfiles.map(\.roleName)
+            + codexChildThreadsByID.values.flatMap {
+                [$0.displayName, $0.agentRole].compactMap { $0 }
+            }
         if existing.contains(name) {
-            return .failure(CouncisLocalization.format(
+            return .failure(IntatisLocalization.format(
                 "@%@ is already attached.",
                 name))
         }
         if existing.contains(where: { $0.lowercased() == name.lowercased() }) {
-            return .failure(CouncisLocalization.format(
+            return .failure(IntatisLocalization.format(
                 "@%@ conflicts with an attached agent name.",
                 name))
         }
@@ -3637,7 +6436,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
         }).last {
             return .failed(error.message)
         }
-        return .failed(CouncisLocalization.format(
+        return .failed(IntatisLocalization.format(
             "Could not attach @%@.",
             agentName))
     }
@@ -3716,7 +6515,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
             defaultModel: defaultModelDescription(settings),
             defaultPermission: permissionDescription(settings.defaultPermissionProfile),
             tokenBudget: settings.tokenBudget.map {
-                CouncisLocalization.format("%@ tok", formatNumber($0))
+                IntatisLocalization.format("%@ tok", formatNumber($0))
             },
             workspaces: workspaces)
     }
@@ -3743,7 +6542,7 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
     private static func defaultModelDescription(_ settings: CoworkProjectSettings) -> String {
         let model = settings.defaultModelID?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let model, !model.isEmpty else {
-            return CouncisLocalization.string("current model")
+            return IntatisLocalization.string("current model")
         }
         if let provider = settings.defaultProviderID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !provider.isEmpty {
@@ -3754,11 +6553,11 @@ final class CoworkViewModel: ObservableObject, PermissionResponder {
 
     private static func permissionDescription(_ rawValue: String) -> String {
         switch PermissionProfile(rawValue: rawValue) {
-        case .some(.manual): return CouncisLocalization.string("manual")
-        case .some(.reviewed): return CouncisLocalization.string("reviewed")
-        case .some(.autopilot): return CouncisLocalization.string("autopilot")
-        case .some(.readOnly): return CouncisLocalization.string("read only")
-        case .some(.locked): return CouncisLocalization.string("locked")
+        case .some(.manual): return IntatisLocalization.string("manual")
+        case .some(.reviewed): return IntatisLocalization.string("reviewed")
+        case .some(.autopilot): return IntatisLocalization.string("autopilot")
+        case .some(.readOnly): return IntatisLocalization.string("read only")
+        case .some(.locked): return IntatisLocalization.string("locked")
         case .none: return rawValue
         }
     }
@@ -3815,13 +6614,13 @@ enum CoworkAddAgentStatus: Equatable {
         case .idle:
             return nil
         case .validating:
-            return CouncisLocalization.string("Validating agent…")
+            return IntatisLocalization.string("Validating agent…")
         case .attaching(let name):
-            return CouncisLocalization.format("Attaching @%@…", name)
+            return IntatisLocalization.format("Attaching @%@…", name)
         case .attached(let name):
-            return CouncisLocalization.format("@%@ attached.", name)
+            return IntatisLocalization.format("@%@ attached.", name)
         case .denied(let reason):
-            return CouncisLocalization.format("Permission denied: %@", reason)
+            return IntatisLocalization.format("Permission denied: %@", reason)
         case .failed(let message):
             return message
         }
@@ -3831,5 +6630,26 @@ enum CoworkAddAgentStatus: Equatable {
 private enum AgentNameValidation {
     case success(String)
     case failure(String)
+}
+
+private extension CodexRuntimeThreadHistory {
+    var userMessageIDs: Set<String> {
+        Set(items.compactMap { item in
+            guard case .user(let id, _, _) = item else { return nil }
+            return id
+        })
+    }
+
+    func containsNewUserMessage(
+        _ text: String,
+        excluding baseline: Set<String>
+    ) -> Bool {
+        items.contains { item in
+            guard case .user(let id, _, let candidate) = item else {
+                return false
+            }
+            return !baseline.contains(id) && candidate == text
+        }
+    }
 }
 #endif

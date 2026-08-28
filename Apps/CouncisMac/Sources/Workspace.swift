@@ -1,6 +1,6 @@
 #if canImport(SwiftUI)
 import Foundation
-import CouncisCore
+import IntatisCore
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -50,11 +50,10 @@ final class WorkspaceAccessLease: @unchecked Sendable {
 }
 
 enum WorkspaceAccess {
+    /// Result produced only by an explicitly initiated legacy-data migration.
+    /// Normal session startup never calls the legacy migration path.
     struct LegacyBookmarkMigrationResult: Equatable {
         var didMigrate: Bool
-        /// Keys are syntactically normalized current settings paths. Values are the
-        /// canonical identities proven only after resolving and enabling the
-        /// corresponding security-scoped bookmark.
         var canonicalPathsByStoredPath: [String: String]
 
         static let none = LegacyBookmarkMigrationResult(
@@ -101,7 +100,7 @@ enum WorkspaceAccess {
                       || byte == 45
                       || byte == 95
               }) else {
-            throw CouncisError.config("The Cowork session identity is invalid.")
+            throw IntatisError.config("The Cowork session identity is invalid.")
         }
 
         let root = AppConfig.appSupportDir()
@@ -113,7 +112,7 @@ enum WorkspaceAccess {
             .appendingPathComponent(component, isDirectory: true)
             .standardizedFileURL
         guard workspace.deletingLastPathComponent() == root else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The Cowork workspace path is invalid.")
         }
         let rootDescriptor = try openOwnerOnlyDirectory(root)
@@ -121,7 +120,7 @@ enum WorkspaceAccess {
         let rootIdentity = try ownerOnlyDirectoryIdentity(rootDescriptor)
 
         guard mkdirat(rootDescriptor, component, S_IRWXU) == 0 else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "Councis could not create the Cowork workspace.")
         }
         let workspaceDescriptor = openat(
@@ -129,7 +128,7 @@ enum WorkspaceAccess {
             component,
             O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)
         guard workspaceDescriptor >= 0 else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "The Cowork workspace could not be verified.")
         }
         defer { _ = close(workspaceDescriptor) }
@@ -137,7 +136,7 @@ enum WorkspaceAccess {
             workspaceDescriptor)
         guard fsync(workspaceDescriptor) == 0,
               fsync(rootDescriptor) == 0 else {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "The Cowork workspace directory could not be persisted.")
         }
         try requireDirectory(root, matches: rootIdentity)
@@ -149,7 +148,7 @@ enum WorkspaceAccess {
         guard lease.canonicalURL.deletingLastPathComponent()
                 == canonicalRoot else {
             lease.release()
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The Cowork workspace escaped its managed root.")
         }
         do {
@@ -163,7 +162,7 @@ enum WorkspaceAccess {
         }
         return lease
         #else
-        throw CouncisError.io(
+        throw IntatisError.io(
             "Managed Cowork workspaces are unavailable on this platform.")
         #endif
     }
@@ -186,7 +185,7 @@ enum WorkspaceAccess {
                 bookmarkData: data,
                 isPrimary: isPrimary))
         #else
-        throw CouncisError.io("Security-scoped workspace bookmarks are unavailable on this platform.")
+        throw IntatisError.io("Security-scoped workspace bookmarks are unavailable on this platform.")
         #endif
     }
 
@@ -271,39 +270,12 @@ enum WorkspaceAccess {
     @discardableResult
     static func restoredWorkspace(for session: SessionID) throws -> WorkspaceAccessLease? {
         #if canImport(AppKit)
-        if let document = try SessionWorkspaceAccessStore.load(
+        guard let document = try SessionWorkspaceAccessStore.load(
             root: AppConfig.appSupportDir(),
             session: session),
-           let entry = document.entries.first(where: \.isPrimary) ?? document.entries.first,
-           let lease = resolveLease(entry, session: session) {
-            return lease
-        }
-        guard let data = UserDefaults.standard.data(forKey: sessionBookmarkKey(session)),
-              let path = UserDefaults.standard.string(forKey: sessionPathKey(session)) else {
-            return nil
-        }
-        guard let lease = resolveLegacyLease(
-            bookmarkData: data,
-            expectedPath: path) else {
-            return nil
-        }
-        do {
-            _ = try remember(lease.scopedURL, for: session, isPrimary: true)
-            guard let verified = try SessionWorkspaceAccessStore.entry(
-                root: AppConfig.appSupportDir(),
-                session: session,
-                path: lease.canonicalPath),
-                  let verificationLease = resolveLease(verified, session: session) else {
-                throw CouncisError.io("Migrated workspace access could not be verified safely.")
-            }
-            verificationLease.release()
-            UserDefaults.standard.removeObject(forKey: sessionBookmarkKey(session))
-            UserDefaults.standard.removeObject(forKey: sessionPathKey(session))
-            return lease
-        } catch {
-            lease.release()
-            throw error
-        }
+              let entry = document.entries.first(where: \.isPrimary)
+                ?? document.entries.first else { return nil }
+        return resolveLease(entry, session: session)
         #else
         return nil
         #endif
@@ -320,7 +292,7 @@ enum WorkspaceAccess {
             return document.entries.first(where: \.isPrimary)?.path
                 ?? document.entries.first?.path
         }
-        return UserDefaults.standard.string(forKey: sessionPathKey(session))
+        return nil
     }
 
     /// Copies every available legacy bookmark into the owner-only session
@@ -387,7 +359,7 @@ enum WorkspaceAccess {
                 match.lease.release()
                 guard isMatch else { continue }
                 guard matchingLegacyPath == nil else {
-                    throw CouncisError.io(
+                    throw IntatisError.io(
                         "Legacy workspace aliases are ambiguous for \(currentPath).")
                 }
                 matchingLegacyPath = legacyPath
@@ -418,7 +390,7 @@ enum WorkspaceAccess {
                     legacyLease.release()
                     guard isMatch else { continue }
                     guard matchingLegacyPath == nil else {
-                        throw CouncisError.io(
+                        throw IntatisError.io(
                             "Legacy workspace aliases are ambiguous for \(currentPath).")
                     }
                     matchingLegacyPath = legacyPath
@@ -481,13 +453,13 @@ enum WorkspaceAccess {
                 data = mayUseSharedBookmark ? shared[legacyLookupPath] : nil
             }
             guard let data else {
-                throw CouncisError.io(
+                throw IntatisError.io(
                     "Legacy workspace access is incomplete for \(legacyLookupPath). Reauthorize that workspace before migration can finish.")
             }
             guard let legacyLease = resolveLegacyLease(
                 bookmarkData: data,
                 expectedPath: legacyLookupPath) else {
-                throw CouncisError.io("Legacy workspace access is invalid or points to another directory.")
+                throw IntatisError.io("Legacy workspace access is invalid or points to another directory.")
             }
             defer { legacyLease.release() }
             let path = legacyLease.canonicalPath
@@ -507,7 +479,7 @@ enum WorkspaceAccess {
                 updated.entries.map { ($0.path, $0) })
         }
         guard completedLegacyPaths == requiredLegacyPaths else {
-            throw CouncisError.io("Not every session-owned legacy workspace capability was migrated.")
+            throw IntatisError.io("Not every session-owned legacy workspace capability was migrated.")
         }
         let verified = try SessionWorkspaceAccessStore.load(
             root: AppConfig.appSupportDir(),
@@ -516,7 +488,7 @@ enum WorkspaceAccess {
             (verified?.entries ?? []).map { ($0.path, $0) })
         let verifiedPaths = Set(verifiedEntries.keys)
         guard sourceBackedPaths.isSubset(of: verifiedPaths) else {
-            throw CouncisError.io("Legacy workspace access could not be verified in session storage.")
+            throw IntatisError.io("Legacy workspace access could not be verified in session storage.")
         }
         guard sourceBackedPaths.allSatisfy({ path in
             guard let entry = verifiedEntries[path],
@@ -525,7 +497,7 @@ enum WorkspaceAccess {
             lease.release()
             return true
         }) else {
-            throw CouncisError.io("Migrated workspace access could not be resolved safely.")
+            throw IntatisError.io("Migrated workspace access could not be resolved safely.")
         }
         return LegacyBookmarkMigrationResult(
             didMigrate: true,
@@ -688,7 +660,7 @@ enum WorkspaceAccess {
                     .posixPermissions: NSNumber(value: 0o700),
                 ])
         } catch {
-            throw CouncisError.io(
+            throw IntatisError.io(
                 "Councis could not prepare the Cowork workspace root.")
         }
         try validateOwnerOnlyDirectory(url)
@@ -710,7 +682,7 @@ enum WorkspaceAccess {
             url.path,
             O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)
         guard descriptor >= 0 else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The Cowork workspace directory is not owner-only.")
         }
         do {
@@ -731,7 +703,7 @@ enum WorkspaceAccess {
               value.st_uid == geteuid(),
               (value.st_mode & (S_IRWXG | S_IRWXO)) == 0,
               (value.st_mode & S_IRWXU) == S_IRWXU else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The Cowork workspace directory is not owner-only.")
         }
         return DirectoryIdentity(
@@ -746,7 +718,7 @@ enum WorkspaceAccess {
         let descriptor = try openOwnerOnlyDirectory(url)
         defer { _ = close(descriptor) }
         guard try ownerOnlyDirectoryIdentity(descriptor) == expected else {
-            throw CouncisError.permissionDenied(
+            throw IntatisError.permissionDenied(
                 "The Cowork workspace directory identity changed.")
         }
     }

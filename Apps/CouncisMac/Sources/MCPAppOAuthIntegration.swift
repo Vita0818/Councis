@@ -3,8 +3,8 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
-import CouncisMCP
-import CouncisProtocol
+import IntatisMCP
+import IntatisProtocol
 
 enum MCPAppOAuthError: Error, LocalizedError, Equatable {
     case unsupportedTransport

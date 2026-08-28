@@ -1,12 +1,12 @@
 import Foundation
-import CouncisCore
-import CouncisProtocol
-import CouncisProviders
-import CouncisConversation
-import CouncisTools
-import CouncisPermission
-import CouncisAgentKernel
-import CouncisCowork
+import IntatisCore
+import IntatisProtocol
+import IntatisProviders
+import IntatisConversation
+import IntatisTools
+import IntatisPermission
+import IntatisAgentKernel
+import IntatisCowork
 
 // Built-in fake models — let `councis selftest` prove the chat + code paths work
 // offline, with no API key and no network. They drive the exact same ChatLoop /
@@ -298,7 +298,7 @@ func runSelfTest() async throws {
         routeID: "route-a",
         model: "model-alpha",
         variantID: "careful") else {
-        throw CouncisError.config("offline profile fixture did not compile")
+        throw IntatisError.config("offline profile fixture did not compile")
     }
 
     // Change route A's upstream while retaining both route credentials and all
@@ -323,7 +323,7 @@ func runSelfTest() async throws {
             routeID: "route-b",
             model: "model-beta",
             variantID: "deep") else {
-        throw CouncisError.config("offline multi-route profiles did not compile")
+        throw IntatisError.config("offline multi-route profiles did not compile")
     }
 
     let exactRegistry = ProviderRegistry(

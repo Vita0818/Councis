@@ -1,18 +1,18 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisConversation
-import CouncisCore
-import CouncisCowork
-import CouncisKnowledge
-import CouncisPermission
-import CouncisProtocol
-import CouncisProviders
-import CouncisTools
+import IntatisAgentKernel
+import IntatisConversation
+import IntatisCore
+import IntatisCowork
+import IntatisKnowledge
+import IntatisPermission
+import IntatisProtocol
+import IntatisProviders
+import IntatisTools
 import XCTest
 @testable import CouncisCLI
 
 final class CLIProviderAdapterTests: XCTestCase {
-    func testFixedCoworkRolesFallBackToJSONModelNotEnvironmentMainOverride()
+    func testPermissionReviewerFallsBackToJSONModelNotEnvironmentMainOverride()
         async throws {
         let directory = try makeTemporaryDirectory(
             prefix: "councis-cli-reviewer-fallback")
@@ -41,11 +41,6 @@ final class CLIProviderAdapterTests: XCTestCase {
             CLIProviderModelSelection(
                 providerID: "primary",
                 modelID: "main-model"))
-        XCTAssertEqual(
-            config.judgeModel,
-            CLIProviderModelSelection(
-                providerID: "primary",
-                modelID: "main-model"))
 
         let providerConfig = config.providerConfig()
         let primary = try XCTUnwrap(
@@ -70,11 +65,9 @@ final class CLIProviderAdapterTests: XCTestCase {
         XCTAssertEqual(
             profiles.permissionReviewerBinding.modelID.rawValue,
             "main-model")
-        XCTAssertEqual(profiles.judgeBinding.modelID.rawValue, "main-model")
         XCTAssertNotEqual(
             profiles.defaultBinding,
             profiles.permissionReviewerBinding)
-        XCTAssertNotEqual(profiles.defaultBinding, profiles.judgeBinding)
     }
 
     func testExplicitPermissionReviewerModelMustResolveCanonicalConfiguredModel()
@@ -105,74 +98,6 @@ final class CLIProviderAdapterTests: XCTestCase {
                     error.localizedDescription.contains(
                         "permission_reviewer_model"),
                     "unexpected error for \(invalidValue): \(error)")
-            }
-        }
-    }
-
-    func testExplicitJudgeModelMustResolveCanonicalConfiguredModel() throws {
-        let directory = try makeTemporaryDirectory(
-            prefix: "councis-cli-judge-invalid")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("councis.json")
-
-        let invalidValues: [Any] = [
-            "arbiter/model",
-            "judge/missing-model",
-            NSNull(),
-            42,
-        ]
-        for invalidValue in invalidValues {
-            try writeProviderConfig([
-                "model": "main/main-model",
-                "judge_model": invalidValue,
-                "provider": [
-                    "main": provider(
-                        baseURL: "https://main.example.invalid/v1",
-                        models: ["main-model": ["name": "Main"]]),
-                    "judge": provider(
-                        baseURL: "https://judge.example.invalid/v1",
-                        models: ["arbiter/model": ["name": "Arbiter"]]),
-                ],
-            ], to: file)
-
-            XCTAssertThrowsError(try CLIConfig.load(
-                configurationFileURL: file,
-                environment: [:])) { error in
-                XCTAssertTrue(
-                    error.localizedDescription.contains("judge_model"),
-                    "unexpected Judge error for \(invalidValue): \(error)")
-            }
-        }
-    }
-
-    func testMissingJudgeCannotInventAnUnavailableJSONDefaultModel() throws {
-        let directory = try makeTemporaryDirectory(
-            prefix: "councis-cli-judge-missing-default")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("councis.json")
-        let configuredProvider = provider(
-            baseURL: "https://main.example.invalid/v1",
-            models: ["configured-model": ["name": "Configured"]])
-
-        for root in [
-            [
-                "permission_reviewer_model": "main/configured-model",
-                "provider": ["main": configuredProvider],
-            ],
-            [
-                "model": "main/unknown-model",
-                "permission_reviewer_model": "main/configured-model",
-                "provider": ["main": configuredProvider],
-            ],
-        ] {
-            try writeProviderConfig(root, to: file)
-
-            XCTAssertThrowsError(try CLIConfig.load(
-                configurationFileURL: file,
-                environment: [:])) { error in
-                XCTAssertTrue(
-                    error.localizedDescription.contains("judge_model"),
-                    "unexpected error: \(error)")
             }
         }
     }
@@ -209,7 +134,7 @@ final class CLIProviderAdapterTests: XCTestCase {
         }
     }
 
-    func testCoworkBootstrapKeepsConfiguredFixedRolesIndependentOfMainRebind()
+    func testCoworkBootstrapKeepsConfiguredReviewerIndependentOfMainRebind()
         async throws {
         let directory = try makeTemporaryDirectory(
             prefix: "councis-cli-reviewer-runtime")
@@ -217,7 +142,6 @@ final class CLIProviderAdapterTests: XCTestCase {
         let file = directory.appendingPathComponent("councis.json")
         try writeProviderConfig([
             "model": "main/main-model",
-            "judge_model": "judge/arbiter/model",
             "permission_reviewer_model": "reviewer/luna/model",
             "provider": [
                 "main": provider(
@@ -229,9 +153,6 @@ final class CLIProviderAdapterTests: XCTestCase {
                 "reviewer": provider(
                     baseURL: "https://reviewer.example.invalid/v1",
                     models: ["luna/model": ["name": "Luna"]]),
-                "judge": provider(
-                    baseURL: "https://judge.example.invalid/v1",
-                    models: ["arbiter/model": ["name": "Arbiter"]]),
             ],
         ], to: file)
 
@@ -242,9 +163,7 @@ final class CLIProviderAdapterTests: XCTestCase {
             config: config,
             fileURL: directory.appendingPathComponent("catalog.json"))
         let reviewerBinding = profiles.permissionReviewerBinding
-        let judgeBinding = profiles.judgeBinding
         XCTAssertEqual(reviewerBinding.modelID.rawValue, "luna/model")
-        XCTAssertEqual(judgeBinding.modelID.rawValue, "arbiter/model")
         let reboundBinding = try XCTUnwrap(profiles.option(
             routeID: "main",
             model: "rebound-model",
@@ -294,17 +213,10 @@ final class CLIProviderAdapterTests: XCTestCase {
                     path: workspace.path,
                     agentName: Orchestrator.mainAgentID.rawValue,
                     isPrimary: true)]),
-            judgeModel: judgeBinding.modelID,
-            judgeInferenceBinding: judgeBinding,
             permissionReviewerModel: reviewerBinding.modelID,
             permissionReviewerInferenceBinding: reviewerBinding)
         XCTAssertEqual(bootstrap, .attached(Orchestrator.mainAgentID))
         let agentsAfterBootstrap = await orchestrator.agentList()
-        XCTAssertEqual(
-            agentsAfterBootstrap.first(where: {
-                $0.name == Orchestrator.judgeAgentID
-            })?.agentInferenceBinding,
-            judgeBinding)
         XCTAssertEqual(
             agentsAfterBootstrap.first(where: {
                 $0.name == Orchestrator.automaticPermissionReviewerID
@@ -321,11 +233,6 @@ final class CLIProviderAdapterTests: XCTestCase {
         let agentsAfterRebind = await orchestrator.agentList()
         XCTAssertEqual(
             agentsAfterRebind.first(where: {
-                $0.name == Orchestrator.judgeAgentID
-            })?.agentInferenceBinding,
-            judgeBinding)
-        XCTAssertEqual(
-            agentsAfterRebind.first(where: {
                 $0.name == Orchestrator.mainAgentID
             })?.agentInferenceBinding,
             reboundBinding)
@@ -336,10 +243,6 @@ final class CLIProviderAdapterTests: XCTestCase {
             reviewerBinding)
 
         let projection = CoworkProjection.build(from: await log.replay())
-        XCTAssertEqual(
-            projection.agentRoster[Orchestrator.judgeAgentID]?
-                .agentInferenceBinding,
-            judgeBinding)
         XCTAssertEqual(
             projection.agentRoster[Orchestrator.automaticPermissionReviewerID]?
                 .agentInferenceBinding,
@@ -438,7 +341,7 @@ final class CLIProviderAdapterTests: XCTestCase {
                     "models": ["chat-model": ["name": "Chat"]],
                 ],
                 "embedding": [
-                    "npm": "councis:siliconflow-v1",
+                    "npm": "intatis:siliconflow-v1",
                     "options": [
                         "baseURL": "https://embedding.example.invalid/v1",
                         "apiKey": "{env:COUNCIS_TEST_EMBEDDING_KEY}",
@@ -446,7 +349,7 @@ final class CLIProviderAdapterTests: XCTestCase {
                     "models": [String: Any](),
                 ],
                 "reranker": [
-                    "npm": "councis:cohere-v2",
+                    "npm": "intatis:cohere-v2",
                     "options": [
                         "baseURL": "https://reranker.example.invalid/v2",
                         "apiKey": "{env:COUNCIS_TEST_RERANKER_KEY}",
@@ -573,7 +476,7 @@ final class CLIProviderAdapterTests: XCTestCase {
 
         let notice = try XCTUnwrap(
             cliKnowledgeToolsConfigurationNotice(config: config))
-        XCTAssertTrue(notice.contains("explicit councis:siliconflow-v1"))
+        XCTAssertTrue(notice.contains("explicit intatis:siliconflow-v1"))
         XCTAssertNil(makeCLIKnowledgeToolAugmenter(
             config: config,
             registry: registry))

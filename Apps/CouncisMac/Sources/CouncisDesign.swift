@@ -9,7 +9,7 @@
 
 #if canImport(SwiftUI)
 import SwiftUI
-import CouncisSharedUI
+import IntatisSharedUI
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -75,11 +75,44 @@ private struct CouncisLegacyWindowBackground: NSViewRepresentable {
 
 /// Compatibility name for existing macOS call sites. The role definitions
 /// live in SharedUI so presentation code uses one semantic typography source.
-typealias CouncisType = CouncisTypography
+typealias CouncisType = IntatisTypography
 
-extension CouncisThreadStyle {
-    static func councisMac(_ scheme: ColorScheme) -> CouncisThreadStyle {
-        CouncisThreadStyle(
+extension Font {
+    static func councisFixed(
+        size: CGFloat,
+        weight: Font.Weight = .regular
+    ) -> Font {
+        IntatisTypography.system(size: size, weight: weight)
+    }
+
+    static var councisBody: Font {
+        IntatisTypography.system(.body)
+    }
+
+    static var councisCallout: Font {
+        IntatisTypography.system(.callout)
+    }
+
+    static var councisCaption: Font {
+        IntatisTypography.system(.caption)
+    }
+
+    static var councisCaption2: Font {
+        IntatisTypography.system(.caption2)
+    }
+
+    static var councisHeadline: Font {
+        IntatisTypography.system(.headline)
+    }
+
+    static var councisTitle2: Font {
+        IntatisTypography.system(.title2)
+    }
+}
+
+extension IntatisThreadStyle {
+    static func councisMac(_ scheme: ColorScheme) -> IntatisThreadStyle {
+        IntatisThreadStyle(
             primaryText: CouncisTheme.deepText(scheme),
             secondaryText: CouncisTheme.softText(scheme),
             tertiaryText: CouncisTheme.tertiaryText(scheme),

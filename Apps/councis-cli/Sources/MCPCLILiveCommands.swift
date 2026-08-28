@@ -1,12 +1,12 @@
 import Foundation
-import CouncisAgentKernel
-import CouncisCore
-import CouncisMCP
-import CouncisPermission
-import CouncisProtocol
-import CouncisProviders
-import CouncisSkills
-import CouncisTools
+import IntatisAgentKernel
+import IntatisCore
+import IntatisMCP
+import IntatisPermission
+import IntatisProtocol
+import IntatisProviders
+import IntatisSkills
+import IntatisTools
 
 #if canImport(Darwin)
 import Darwin
@@ -539,6 +539,7 @@ func makeLiveSession(
 /// The dynamic MCP snapshot is resolved before every provider dispatch.
 /// Therefore a required connection/Test/consent failure exits non-zero without
 /// sending any request to the inference provider.
+@available(*, unavailable, message: "CLI execution uses Codex App Server")
 func runExecCommand(
     _ raw: ArraySlice<String>
 ) async throws {

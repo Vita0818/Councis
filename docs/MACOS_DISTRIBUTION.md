@@ -1,103 +1,86 @@
-# macOS 分发与沙箱边界
+# macOS 分发与 Runtime 边界
 
 文档状态：当前发行合同
-
-生效日期：2026-08-17
-
+最近核对：2026-08-28
 产品基线：v0.10（build 49）
 
 ## 产品决策
 
-Councis 只提供一个 Apple App：macOS Developer ID 签名、公证和直接下载分发的 `Councis`。
+Councis 只通过 Developer ID签名、公证和直接下载分发。唯一App target是`CouncisMac`，Bundle ID
+`com.Vita0818.Councis`。不提供Mac App Store、App Sandbox或iOS产品图。
 
-- Xcode project：`Councis.xcodeproj`。
-- target/scheme：`CouncisMac`。
-- App/product/executable：`Councis.app` / `Councis`。
-- Bundle ID：`com.Vita0818.Councis`。
-- entitlements：`Apps/CouncisMac/CouncisMac.DeveloperID.entitlements`。
-- 不做 Mac App Store；旧 App Store target/profile/entitlements 已删除。
-- 不提供 iOS App；旧 iOS target/source/resources 已删除。
+取消App Store约束不允许移除PermissionEngine、Lease、PathConfinement、SecretScanner、managed process
+sandbox、Hardened Runtime或签名/公证。
 
-删除 App Store/iOS 产品面不改变 Councis 的本地能力与安全合同。macOS 产品继续保留 Chat/Code/Cowork
-runtime、workspace/global Skills、managed terminal、本地 Git、browser/document helper、Knowledge、
-stdio + HTTP MCP；当前 UI 仍只显示 Cowork 入口，Chat/Code 实现与历史兼容保留。
+## 源码依赖与发行制品必须分离
 
-## 发行入口
+开发构建通过`../Intatis`直接编译共享源码。正式App不得在运行时依赖：
 
-仓库唯一正式打包入口是 `scripts/package-macos-release.sh`。它只构建 `CouncisMac`，要求：
+- `/Users/vita/Vitemis/Intatis`；
+- `.intatis/runtime-kit`；
+- `~/.local/bin/intatis-codex`或`codex`；
+- Homebrew、PATH或开发机cache；
+- Councis旧`Packages/`或`Vendor/`副本。
 
-1. `project.yml`、参考 plist、当前文档与最终 App 均为 `0.10 (49)`；
-2. `scripts/check-brand-boundary.sh` 通过；
-3. 最终 App 为 `Councis.app`、executable `Councis`、Bundle ID `com.Vita0818.Councis`；
-4. universal Release 同时包含 `arm64` 与 `x86_64`；
-5. Keychain 中存在有效 `Developer ID Application` identity；
-6. `COUNCIS_NOTARY_PROFILE` 指向用户通过 `notarytool store-credentials` 保存的 profile；
-7. 使用 Developer ID entitlements、secure timestamp 与 Hardened Runtime 完成签名；
-8. App 公证 Accepted、staple/validate、strict codesign、Gatekeeper assessment 全部通过；
-9. DMG 含 `/Applications` 拖放入口，单独签名、公证、staple/validate、codesign、Gatekeeper 全部通过；
-10. 最终输出 Councis ZIP、DMG 与 SHA-256 清单。
+源码共享只解决维护和升级，不解决二进制分发。
 
-使用方式：
+## Codex Runtime bundle
 
-```sh
-COUNCIS_NOTARY_PROFILE=<本机 profile 名称> \
-  scripts/package-macos-release.sh
+正式App必须把当前process architecture对应的exact executable放入sealed bundle，例如：
+
+```text
+Councis.app/Contents/Resources/CodexRuntime/arm64/codex
+Councis.app/Contents/Resources/CodexRuntime/x86_64/codex
 ```
 
-访问 GitHub 需要代理/VPN而 Apple notarization 需要另一网络时：
+发行门必须证明：
 
-```sh
-COUNCIS_PAUSE_BEFORE_NOTARIZATION=1 \
-COUNCIS_NOTARY_PROFILE=<本机 profile 名称> \
-  scripts/package-macos-release.sh
-```
+1. runtime version是`0.145.0-intatis.4`；
+2. derivation ID等于`CodexRuntimeExecutable.pinnedDerivationID`；
+3. source/patch/Cargo.lock/toolchain/binary hash可追溯到Intatis runtime kit；
+4. architecture正确，无开发机绝对load path；
+5. license/NOTICE closure完整；
+6. nested executable先用与outer App相同Developer ID identity签名；
+7. outer App strict resource seal、Hardened Runtime和entitlements通过；
+8. notarization、staple、codesign和Gatekeeper通过；
+9. fresh user/clean machine在无Intatis checkout、无PATH runtime时启动成功。
 
-脚本在 GitHub 不再需要后暂停；保持终端和脚本运行，切换网络后按 Return。上传使用可见 progress，
-记录 submission ID，再有界等待。默认等待 30 分钟，可用 `COUNCIS_NOTARY_TIMEOUT=2h` 等正时长调整。
+`COUNCIS_CODEX_RUNTIME`只用于开发。shipping composition必须明确传入/发现bundle内runtime，不能让
+external Runtime的开发发现路径成为发行fallback。
 
-若状态仍为 `In Progress`、网络失败、进程被中断或 Apple 返回 Invalid，脚本必须保留 owner-only
-`.councis/release-recovery/<run>/`：root/run 为 `0700`，state 为 `0600`，目录/state/App 均非
-symlink 且属于当前 UID。恢复命令：
+## 业务 external runtimes
 
-```sh
-COUNCIS_NOTARY_PROFILE=<本机 profile 名称> \
-COUNCIS_RESUME_RELEASE_DIR=<脚本打印的绝对路径> \
-  scripts/package-macos-release.sh
-```
+文档和浏览器等runtime由Intatis共享源码/spec/validator拥有，但Councis正式包仍须按自己的最终bundle
+重新完成architecture、hash、SBOM、license、signature与clean-machine验证。缺失或损坏时对应能力typed
+fail closed，不下载、不切换Homebrew/系统偶然安装/另一backend。
 
-恢复必须复用原 App/DMG submission ID，不重新构建或重复上传；只有 ZIP、DMG、manifest 全部成功
-落盘后才清理 recovery。可用 `COUNCIS_DEVELOPER_IDENTITY` 精确选择多个证书中的一个，
-`COUNCIS_OUTPUT_DIR` 改输出位置。证书、私钥、账号凭据和 profile 内容不得进入仓库。
+## 权限与凭据
 
-## App Sandbox 与 Councis sandbox 的区别
+- Developer ID target使用最小audio-input entitlement；不启用App Sandbox。
+- provider credential只进入Codex child process environment，不进入argv或bundle。
+- isolated `CODEX_HOME`位于Councis session Application Support root，不写进App bundle或Intatis checkout。
+- runtime process、dynamic tools、MCP和business helper在quit/delete/cancel时必须有界drain。
 
-项目没有 Mac App Store target，也不启用 `com.apple.security.app-sandbox`。因此不得仅为 App Store
-兼容而删除或禁用 managed terminal、PTY、spawn-based Git、browser helper、stdio MCP、global
-Skills，或新增进程内替代实现。
+## 打包脚本状态
 
-这不等于取消安全边界。以下继续是产品合同：
+`package-macos-release.sh` 已按当前 Intatis runtime-kit 发行图接入三组双架构 roots：Codex、Document、
+Browser。Councis 的 `validate-*-runtime.sh` 只是解析 `../Intatis` 并直接执行共享 validator；没有复制
+validator 或 runtime builder。脚本继续拥有 Councis bundle/version/identity、Developer ID、notary、
+recovery、ZIP/DMG 和 Gatekeeper 阶段。
 
-- `DeterministicPolicyGate` / `ModelPermissionReviewer` / `PermissionEngine`；
-- `CapabilityLease`、`WorkspaceLease`、`PathConfinement`、`SecretScanner`、Mediator；
-- EventLog/durable tool ticket 与 checked recovery；
-- managed terminal 的 workspace-scoped Seatbelt、默认断网、最小环境、输入清洗和进程清理；
-- browser broker + Chromium native sandbox；绝不使用 `--no-sandbox`；
-- Developer ID Hardened Runtime、代码签名、公证、Keychain 与最小 entitlements；
-- 麦克风必须同时有 TCC usage description 和最小 `com.apple.security.device.audio-input=true`；
-- `PlatformProfile.current = .restricted`，只有 `CouncisMac` 显式选择 `.macDeveloperID`。
+当前缺少经 Councis 最终发行流程验收的真实三组双架构 signed roots 与 clean-machine 证据，因此：
 
-文档提到 `sandbox` 时必须明确是已删除的 Mac App Store App Sandbox 历史，还是仍在运行的 Seatbelt、
-测试宿主 sandbox、Linux bwrap/guard、Chromium native sandbox 或权限/工作区围栏。
+- 不运行正式发行；
+- 不把 unsigned/ad-hoc App 或共享开发 runtime 发布为正式产物；
+- 不声称 ZIP/DMG、公证或 clean-machine 已闭环。
 
-## 默认验证矩阵
+## 默认验证
 
-1. `scripts/check-version-consistency.sh` 与 `scripts/check-brand-boundary.sh`；
-2. 与改动相称的 SwiftPM focused/full tests；
-3. `swift build`、`swift build --product councis` 与 CLI selftest；
-4. `xcodegen generate`；
-5. `CouncisMac` Debug unsigned build；
-6. `CouncisMac` universal Release unsigned build；
-7. 读回 `Councis.app` 的版本、Bundle ID、executable、双架构、icon、link/resource inventory；
-8. 触及实际发行时才运行 Developer ID 签名、公证、staple、Gatekeeper 和最终 ZIP/DMG gate。
-
-没有 iOS/App Store target 可构建或作为 release gate。不得通过重新加入这些 target 来获得“额外验证”。
+1. SwiftPM dependency/contract tests；
+2. Councis CLI build/tests；
+3. XcodeGen；
+4. CouncisMac Debug + universal Release；
+5. final bundle identity/resource/link inventory；
+6. exact Codex runtime version/derivation/architecture/license/signature；
+7. Developer ID/notary/staple/Gatekeeper；
+8. clean-machine startup与核心Cowork smoke。
