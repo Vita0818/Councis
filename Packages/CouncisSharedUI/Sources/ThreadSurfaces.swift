@@ -310,7 +310,7 @@ struct CouncisThreadErrorList: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if let title = error.title {
                         Text(title)
-                            .font(.caption.bold())
+                            .font(.councisCaption.bold())
                             .foregroundStyle(style.primaryText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -321,7 +321,7 @@ struct CouncisThreadErrorList: View {
                             onRetrySubmission(submissionID)
                         }
                         .buttonStyle(.borderless)
-                        .font(.caption.bold())
+                        .font(.councisCaption.bold())
                         .accessibilityIdentifier(
                             "submission.\(submissionID.rawValue).retry")
                     }
@@ -329,7 +329,7 @@ struct CouncisThreadErrorList: View {
             }
             ForEach(error.details, id: \.self) { detail in
                 Text(detail)
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(style.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -1514,7 +1514,7 @@ public struct CouncisJumpToLatestButton: View {
             Label(
                 CouncisLocalization.string("Jump to latest"),
                 systemImage: "arrow.down.to.line")
-                .font(.caption.bold())
+                .font(.councisCaption.bold())
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -1641,7 +1641,7 @@ public struct CouncisThreadHistoryPager: View {
             }
 
             Text(rangeLabel)
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
 
@@ -1663,7 +1663,7 @@ public struct CouncisThreadHistoryPager: View {
                 .accessibilityIdentifier("\(accessibilityPrefix).latest")
             }
         }
-        .font(.caption.bold())
+        .font(.councisCaption.bold())
         .buttonStyle(.bordered)
         .controlSize(.small)
         .padding(.vertical, 4)
@@ -2008,7 +2008,7 @@ public extension View {
     /// Gives native compact glass buttons a stable visual diameter instead of
     /// leaving their size to each SF Symbol's intrinsic bounds.
     func councisComposerIconLabel() -> some View {
-        font(.system(size: 15, weight: .semibold))
+        font(.councisFixed(size: 15, weight: .semibold))
             .frame(
                 width: CouncisComposerControlMetrics.iconLabelExtent,
                 height: CouncisComposerControlMetrics.iconLabelExtent)
@@ -2052,10 +2052,10 @@ public struct CouncisTurnStatsSummaryView: View {
     public var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "speedometer")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.councisFixed(size: 11, weight: .semibold))
                 .foregroundStyle(style.tertiaryText)
             Text(summary)
-                .font(.system(size: 12, weight: .medium))
+                .font(.councisFixed(size: 12, weight: .medium))
                 .foregroundStyle(style.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -2229,7 +2229,7 @@ public struct CouncisComposerUsageStrip: View {
                 .foregroundStyle(style.secondaryText)
                 .monospacedDigit()
         }
-        .font(.system(size: 11, weight: .medium))
+        .font(.councisFixed(size: 11, weight: .medium))
         .lineLimit(1)
     }
 
@@ -2348,7 +2348,7 @@ public struct CouncisSessionHistoryList: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.councisFixed(size: 12, weight: .semibold))
                     .foregroundStyle(style.secondaryText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -2357,7 +2357,7 @@ public struct CouncisSessionHistoryList: View {
 
             if items.isEmpty {
                 Text(emptyTitle)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.councisFixed(size: 12, weight: .medium))
                     .foregroundStyle(style.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 8)
@@ -2441,7 +2441,7 @@ public struct CouncisSessionHistoryList: View {
     private var newControlLabel: some View {
         Label(newTitle, systemImage: "plus")
             .labelStyle(.iconOnly)
-            .font(.system(size: 12, weight: .semibold))
+            .font(.councisFixed(size: 12, weight: .semibold))
             .frame(width: 24, height: 24)
     }
 }
@@ -2453,19 +2453,19 @@ private struct CouncisSessionHistoryRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: item.systemImage)
-                .font(.system(size: 12, weight: .medium))
+                .font(.councisFixed(size: 12, weight: .medium))
                 .foregroundStyle(item.isSelected ? style.accent : style.tertiaryText)
                 .frame(width: 16, height: 16)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
-                    .font(.system(size: 12, weight: item.isSelected ? .semibold : .medium))
+                    .font(.councisFixed(size: 12, weight: item.isSelected ? .semibold : .medium))
                     .foregroundStyle(item.isSelected ? style.primaryText : style.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if !item.detail.isEmpty {
                     Text(item.detail)
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.councisFixed(size: 11, weight: .regular))
                         .foregroundStyle(style.tertiaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -2501,10 +2501,10 @@ public struct CouncisRecoveryAdviceView: View {
             Label(
                 CouncisLocalization.string(advice.title),
                 systemImage: advice.retryable ? "arrow.clockwise" : "info.circle")
-                .font(.caption.bold())
+                .font(.councisCaption.bold())
                 .foregroundStyle(tint)
             Text(CouncisLocalization.string(advice.detail))
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(style.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2998,7 +2998,7 @@ public struct CouncisThreadThinkingRow: View {
                 CouncisThinkingElapsedLabel(
                     label: label,
                     phaseID: phaseID)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.councisFixed(size: 12, weight: .medium))
                     .foregroundStyle(style.secondaryText)
                 Spacer(minLength: 0)
             }

@@ -12,7 +12,7 @@
 
 文档状态：当前可执行验证规范
 
-最近核对：2026-08-18
+最近核对：2026-08-19
 
 产品基线：v0.10（build 49）
 
@@ -117,6 +117,8 @@ swift test --disable-automatic-resolution --filter SDKClientOnlySurfaceTests
 swift test --disable-automatic-resolution --filter HangDiagnosticsCommandTests
 swift test --disable-automatic-resolution --filter MessageRendererModeTests
 swift test --disable-automatic-resolution --filter ExecutionTracePresentationTests
+swift test --disable-automatic-resolution --filter CouncisTypographyTests
+swift test --disable-automatic-resolution --filter MessageRenderingTests
 ```
 
 验收语义：
@@ -130,6 +132,13 @@ swift test --disable-automatic-resolution --filter ExecutionTracePresentationTes
   必须输出 Councis identity；
 - 旧 EventLog、authorization、lease、snapshot/checksum 不原地改写，也不自动
   映射成新的执行授权。
+
+字体变更还必须证明：16 个 bundled TTF 与 OFL 逐文件 hash 匹配 JetBrains Mono 2.304
+inventory；Latin Core Text resolution 为 `JetBrains Mono`，简体中文为 `PingFang SC`；App/SharedUI
+源码不残留直接 `.system`/semantic Apple Latin font call；Markdown 可见 prose/code/selection 使用
+caller configuration；`InlineMathAttachment` 不给 `MTMathUILabel.font` 赋 interface font，iosMath
+公式测试继续通过。最终 `Councis.app` 必须读回 `Councis_CouncisSharedUI.bundle/Contents/Resources/Fonts`
+中的 16 TTF、`OFL.txt` 与 `SHA256SUMS`。
 
 用户已确认旧安装数据完整保留不是 release blocker。本轮不要求把整个旧
 Application Support session tree 自动复制到新 root；任何已实现 bridge 都必须
@@ -374,6 +383,28 @@ DMG 提交。正式发行还必须验证：
 未运行：真实 provider/credential/network、GUI 点击、Developer ID 正式签名、公证、
 staple、Gatekeeper、DMG/manifest 发行和 Linux 双架构 gate。最终 Release App 是
 unsigned/adhoc 验证产物，不能证明正式签名、公证或 Gatekeeper acceptance。
+
+## 13A. 2026-08-19 全局字体验证记录
+
+- `CouncisTypographyTests`：4/4；覆盖 16-face/OFL exact hash inventory、Latin family、
+  PingFang SC 中文 cascade 与 App/SharedUI system-font bypass source audit。
+- `MessageRenderingTests`：41/41；覆盖 JetBrains Mono Markdown configuration、Dynamic Type
+  scale 与 `.latex` math mode。
+- vendored `SwiftStreamingMarkdown` 独立 suite：80 XCTest + 11 Swift Testing，91 total / 0
+  failures；新增 source contract 证明可见 code/list/table/selection 辅助 surface 使用 caller font，
+  `InlineMathAttachment` 仍不设置 `MTMathUILabel.font`。
+- 完整 root suite 首次运行只有 2 条旧 `.body` / `.callout` source-shape 断言失败；断言迁移到
+  `councisBody` / `councisCallout` 后 focused 8/8 通过，随后 full
+  `swift test --disable-automatic-resolution --skip-build` 自然退出 0：15 bundles、2,119 tests、
+  41 skipped、0 failures。
+- `xcodegen generate`、unsigned Debug 和 unsigned universal Release `CouncisMac` 构建通过。
+  Release metadata 为 `com.Vita0818.Councis` / `0.10 (49)`，executable 为 `x86_64 arm64`。
+  最终 `CouncisSharedUI` bundle 含 16 个 TTF、OFL、`SHA256SUMS`，16 TTF + OFL 全部 hash
+  check 为 OK；App 另含 detailed notice 与完整 OFL license。
+- Computer Use 只读启动最终 Release App，确认 Cowork empty-state 的 App-owned Latin glyph 呈现
+  JetBrains Mono；未创建 session、未发送 provider 请求。未执行中文/LaTeX 同屏真实 conversation、
+  VoiceOver/clipboard 字体交互、Developer ID 签名、公证、staple、Gatekeeper、DMG、
+  Linux gate 或真实 provider/network；这些结论不得从 unsigned bundle 外推。
 
 ## 14. Release GO / NO-GO
 

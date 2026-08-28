@@ -4,6 +4,7 @@ import CryptoKit
 import Foundation
 import CouncisMCP
 import CouncisProtocol
+import CouncisSharedUI
 import SwiftUI
 import CouncisMCPStdio
 
@@ -503,7 +504,7 @@ struct MCPImportServerSheet: View {
             }
             LabeledContent("Source fingerprint") {
                 Text(preview.sourceFingerprint)
-                    .font(.caption.monospaced())
+                    .font(.councisCaption)
                     .textSelection(.enabled)
             }
             LabeledContent("Parser version") {
@@ -517,7 +518,7 @@ struct MCPImportServerSheet: View {
             }
             Text(
                 "Preview never displays imported secret values. Test & Import migrates them directly from bounded in-memory staging to Keychain, tests every exact draft, then commits the catalog as one atomic batch.")
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(.secondary)
         }
         if !preview.issues.isEmpty {
@@ -529,7 +530,7 @@ struct MCPImportServerSheet: View {
                     Label {
                         Text(
                             "\(issue.code.rawValue) · \(issue.path)")
-                            .font(.body.monospaced())
+                            .font(.councisBody)
                     } icon: {
                         Image(systemName:
                             issue.blocking
@@ -551,9 +552,9 @@ struct MCPImportServerSheet: View {
                 ) { descriptor in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(descriptor.kind.rawValue)
-                            .font(.body.weight(.semibold))
+                            .font(.councisBody.weight(.semibold))
                         Text(descriptor.fieldPath)
-                            .font(.caption.monospaced())
+                            .font(.councisCaption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -567,11 +568,11 @@ struct MCPImportServerSheet: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(
                         "\(proposal.alias) — \(proposal.displayName)")
-                        .font(.body.weight(.semibold))
+                        .font(.councisBody.weight(.semibold))
                     switch proposal.transport {
                     case .streamableHTTP(let http):
                         Text(http.endpoint)
-                            .font(.caption.monospaced())
+                            .font(.councisCaption)
                             .textSelection(.enabled)
                         if MCPImportEndpointPolicy
                             .isInsecureLoopbackDevelopmentHTTP(
@@ -589,19 +590,19 @@ struct MCPImportServerSheet: View {
                                         .proposalID) {
                                 Text(
                                     "Development only. Plain HTTP is accepted only for this exact loopback endpoint; OAuth, redirects, proxies, and non-loopback hosts remain blocked.")
-                                    .font(.caption)
+                                    .font(.councisCaption)
                                     .foregroundStyle(
                                         .orange)
                             }
                         }
                     case .stdio(let stdio):
                         Text(stdio.command)
-                            .font(.caption.monospaced())
+                            .font(.councisCaption)
                             .textSelection(.enabled)
                         if !stdio.arguments.isEmpty {
                             Text(
                                 "Imported arguments: \(stdio.arguments.joined(separator: " "))")
-                                .font(.caption.monospaced())
+                                .font(.councisCaption)
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                         }
@@ -655,7 +656,7 @@ struct MCPImportServerSheet: View {
                         }
                         Text(
                             "Declare the complete launch closure explicitly: exactly one executable plus every interpreter, script, package entrypoint, lockfile, and helper. Councis does not infer files from imported arguments.")
-                            .font(.caption)
+                            .font(.councisCaption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -673,7 +674,7 @@ struct MCPImportServerSheet: View {
                             "\(conflict.alias)-imported")
                     VStack(alignment: .leading, spacing: 6) {
                         Text(conflict.alias)
-                            .font(.body.weight(.semibold))
+                            .font(.councisBody.weight(.semibold))
                         Picker(
                             "Resolution",
                             selection: binding.choice
@@ -700,7 +701,7 @@ struct MCPImportServerSheet: View {
                         }
                         Text(
                             "No conflict is overwritten implicitly.")
-                            .font(.caption)
+                            .font(.councisCaption)
                             .foregroundStyle(.secondary)
                     }
                 }

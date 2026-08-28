@@ -605,9 +605,71 @@ Current patch-group-12 evidence (2026-07-31):
   validation were not run for patch group 12. The automated evidence above
   does not by itself establish renderer release readiness.
 
+### 13. Caller-owned typography on every visible non-math text surface
+
+Paths:
+
+- `Sources/MarkdownText/UI/CodeBlockView.swift`
+- `Sources/MarkdownText/UI/OrderedListView.swift`
+- `Sources/MarkdownText/UI/TableView.swift`
+- `Sources/MarkdownText/UI/TextSelection/SelectableTextView.swift`
+- `Sources/MarkdownText/UI/TextSelection/TextSelectionView.swift`
+- `Tests/MarkdownTextTests/FirstReleaseContractTests.swift`
+- containing Councis revision:
+  `Packages/CouncisSharedUI/Sources/MessageRendering/CouncisMicrosoftMarkdownPipeline.swift`
+- containing Councis revision:
+  `Packages/CouncisSharedUI/Sources/CouncisTypography.swift` and its exact
+  JetBrains Mono resource bundle
+
+Changes and reason:
+
+- Make code-block body, language label, and copy label consume the caller's
+  configured `tableStyle.textFonts` instead of the derivative's static
+  `Typography` family. The current Councis configuration keeps the same
+  nominal small/code size and supplies JetBrains Mono.
+- Use configured ordered-list fonts for the rare first-line alignment
+  fallback, configured table fonts for citation baseline metrics, and
+  configured paragraph fonts in the Select More Text native text view. These
+  close auxiliary UI paths that previously bypassed `MarkdownRenderConfig`.
+- Do not add another font API, parser, layout engine, or cache. The change is
+  the thinnest use of the derivative's existing caller-owned typography
+  configuration.
+- Do not assign an interface font to `MTMathUILabel`. Formula labels continue
+  to initialize with iosMath's existing default mathematical font; the
+  surrounding configured font contributes only the point size already
+  carried by `MathAttachmentData`.
+
+Regression obligations:
+
+- Source-contract tests must reject static `Typography` references in these
+  visible auxiliary surfaces and must confirm the math attachment creates an
+  `MTMathUILabel` without assigning `label.font`.
+- Root SharedUI tests must prove the caller configuration resolves every
+  visible Markdown prose/code font to the intended family while retaining
+  `.latex` math mode and the existing Dynamic Type scale relationship.
+- Existing TextKit 2, formula visibility, exact-source, selection, layout,
+  cache, streaming, and large-input tests remain mandatory.
+
+Current patch-group-13 evidence (2026-08-19):
+
+- The independent derivative suite passed 80 XCTest + 11 Swift Testing tests
+  (91 total) with zero failures, including the new auxiliary-typography/math
+  isolation contract and all existing iosMath attachment tests.
+- Root `CouncisTypographyTests` passed 4/4 and `MessageRenderingTests` passed
+  41/41. The unsigned CouncisMac Debug build completed and its final
+  `CouncisSharedUI` bundle contained all 16 pinned JetBrains Mono TTF files,
+  `OFL.txt`, and `SHA256SUMS`.
+- The corrected root full suite naturally exited zero across 15 bundles:
+  2,119 tests, 41 explicit opt-in skips, and zero failures. The unsigned
+  universal Release App built as `x86_64 arm64`; its font bundle passed every
+  pinned TTF/OFL hash and shipped the detailed/font/math notices.
+- This focused evidence does not replace the existing long-running renderer
+  soak, VoiceOver, clipboard, or historical retaining-edge release gates.
+
 ## Current validation evidence
 
-Unless explicitly identified as patch-group-10 or patch-group-12 evidence
+Unless explicitly identified as patch-group-10, patch-group-12, or
+patch-group-13 evidence
 above, the renderer evidence below predates the relevant math change. It
 remains a useful baseline for the earlier derivative but cannot be promoted
 to current math-integration evidence. Re-run the same checks with Swift 6.3.3 / Xcode
@@ -799,6 +861,26 @@ The 54 resource deletions and 235 test/snapshot changes are mechanical
 repository thinning. They must not be presented as 289 files of renderer
 redesign; the auditable implementation surface is the 39-file source delta
 above, plus manifest/README and the two new test files.
+
+### Current upstream delta recomputation (2026-08-19)
+
+The preceding figures remain the historical import accounting. After patch
+groups 10–13 and their retained tests/ledger, a fresh direct directory diff
+against the official upstream `v0.6.0` archive reports:
+
+- upstream archive SHA-256:
+  `a517cebd2edadfa31ad4d08c6626165c41d6013f05eafacad740396acd98716d`;
+- 423 changed paths in total;
+- 201 text paths with 5,234 insertions and 10,007 deletions;
+- 222 binary paths, predominantly intentionally removed upstream snapshots and
+  example assets.
+
+The recomputation extracted the official tag archive, copied the current
+vendored directory while excluding `.build`, `.swiftpm`, and `.git`, then ran
+`git diff --no-index --numstat`. It includes this permanent ledger and the
+retained derivative tests. These totals are accounting evidence, not a claim
+that all insertions are renderer logic; patch-group path lists remain the
+authority for the auditable implementation surface.
 
 ## Conditions for deleting the fork patch
 

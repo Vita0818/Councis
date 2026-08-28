@@ -536,7 +536,7 @@ struct CodeItemRow: View {
             if item.isFailure || item.recoveryAdvice != nil {
                 EmptyView()
             } else {
-                Text(item.body).font(.caption).foregroundStyle(.secondary)
+                Text(item.body).font(.councisCaption).foregroundStyle(.secondary)
             }
         case .error:
             EmptyView()
@@ -583,13 +583,13 @@ struct CodeItemRow: View {
                 HStack(spacing: 6) {
                     if let title {
                         Text(displayTitle(title))
-                            .font(.caption2.bold())
+                            .font(.councisCaption2.bold())
                             .foregroundStyle(
                                 isUser ? style.accent : style.tertiaryText)
                     }
                     if !isUser, let timestamp = item.timestamp {
                         Text(CouncisMessageTimestampPresentation.string(for: timestamp))
-                            .font(.caption2)
+                            .font(.councisCaption2)
                             .monospacedDigit()
                             .foregroundStyle(style.tertiaryText)
                     }
@@ -601,7 +601,7 @@ struct CodeItemRow: View {
             if isUser {
                 if !body.isEmpty {
                     Text(body)
-                        .font(.system(size: 15))
+                        .font(.councisFixed(size: 15))
                         .foregroundStyle(style.primaryText)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -616,7 +616,7 @@ struct CodeItemRow: View {
                                 "%lld attachments",
                                 Int64(item.attachments.count)),
                         systemImage: "paperclip")
-                        .font(.caption)
+                        .font(.councisCaption)
                         .foregroundStyle(style.secondaryText)
                 }
             } else {
@@ -657,13 +657,13 @@ struct CodeItemRow: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(submissionStatusLabel(status))
-                    .font(.caption2.bold())
+                    .font(.councisCaption2.bold())
                     .foregroundStyle(status == .failed || status == .cancelled
                         ? style.error
                         : style.secondaryText)
                 if let failure {
                     Text(failure.message)
-                        .font(.caption2)
+                        .font(.councisCaption2)
                         .foregroundStyle(style.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -672,7 +672,7 @@ struct CodeItemRow: View {
             if failure?.retryable == true, let onRetrySubmission {
                 Button("Retry") { onRetrySubmission(id) }
                     .buttonStyle(.borderless)
-                    .font(.caption.bold())
+                    .font(.councisCaption.bold())
                     .accessibilityIdentifier("submission.\(id.rawValue).retry")
             }
         }
@@ -702,8 +702,8 @@ struct CodeItemRow: View {
 
     private func card(icon: String, title: String, body: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(title, systemImage: icon).font(.caption.bold()).foregroundStyle(tint)
-            Text(body).font(.system(.caption, design: .monospaced))
+            Label(title, systemImage: icon).font(.councisCaption.bold()).foregroundStyle(tint)
+            Text(body).font(.councisCaption)
                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(11)
@@ -716,7 +716,7 @@ struct CodeItemRow: View {
 
     private func tagBadge(_ tag: String) -> some View {
         Text(tag.uppercased())
-            .font(.caption2.bold())
+            .font(.councisCaption2.bold())
             .foregroundStyle(style.accent)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -731,7 +731,7 @@ private struct CodeEmptyThreadView: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 30, weight: .semibold))
+                .font(.councisFixed(size: 30, weight: .semibold))
                 .foregroundStyle(style.accent)
                 .frame(width: 76, height: 76)
             Spacer()
@@ -789,15 +789,15 @@ public struct PermissionResolutionNoticeView: View {
     private var standardContent: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: statusIcon)
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(statusColor)
                 .padding(.top, 1)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.caption.weight(.medium))
+                    .font(.councisCaption.weight(.medium))
                 Text(notice.reason)
-                    .font(.caption2)
+                    .font(.councisCaption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -811,11 +811,11 @@ public struct PermissionResolutionNoticeView: View {
     private var compactRailContent: some View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: statusIcon)
-                .font(.body.weight(.semibold))
+                .font(.councisBody.weight(.semibold))
                 .foregroundStyle(statusColor)
                 .accessibilityHidden(true)
             Text(title)
-                .font(.body.weight(.semibold))
+                .font(.councisBody.weight(.semibold))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -986,7 +986,7 @@ public struct PermissionCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield")
-                    .font(.callout.weight(.medium))
+                    .font(.councisCallout.weight(.medium))
                     .foregroundStyle(riskColor)
                     .frame(width: 18)
                     .padding(.top, 1)
@@ -994,19 +994,19 @@ public struct PermissionCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
                         Text(CouncisLocalization.string("Permission needed"))
-                            .font(.callout.weight(.semibold))
+                            .font(.councisCallout.weight(.semibold))
                         Text(riskLabel)
-                            .font(.caption2.weight(.semibold))
+                            .font(.councisCaption2.weight(.semibold))
                             .foregroundStyle(riskColor)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(riskColor.opacity(0.10), in: Capsule())
                     }
                     Text(request.tool)
-                        .font(.caption.monospaced())
+                        .font(.councisCaption)
                         .foregroundStyle(.secondary)
                     Text(request.reason)
-                        .font(.callout)
+                        .font(.councisCallout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1021,19 +1021,19 @@ public struct PermissionCard: View {
                             ForEach(reviewDetails) { detail in
                                 Label {
                                     Text(detail.text)
-                                        .font(.caption)
+                                        .font(.councisCaption)
                                         .foregroundStyle(.secondary)
                                         .textSelection(.enabled)
                                 } icon: {
                                     Image(systemName: detail.systemImage)
-                                        .font(.caption2)
+                                        .font(.councisCaption2)
                                         .foregroundStyle(.tertiary)
                                 }
                             }
                             if let proposedDiff {
                                 ScrollView {
                                     Text(proposedDiff)
-                                        .font(.system(.caption, design: .monospaced))
+                                        .font(.councisCaption)
                                         .textSelection(.enabled)
                                         .frame(
                                             maxWidth: .infinity,
@@ -1049,7 +1049,7 @@ public struct PermissionCard: View {
                     },
                     label: {
                         Text(CouncisLocalization.string("Details"))
-                            .font(.caption.weight(.medium))
+                            .font(.councisCaption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
                 )
@@ -1067,7 +1067,7 @@ public struct PermissionCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield")
-                    .font(.body.weight(.semibold))
+                    .font(.councisBody.weight(.semibold))
                     .foregroundStyle(riskColor)
                     .frame(width: 20)
                     .padding(.top, 1)
@@ -1075,14 +1075,14 @@ public struct PermissionCard: View {
                         CouncisLocalization.format("%@ risk", riskLabel))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(CouncisLocalization.string("Permission Review"))
-                        .font(.body.weight(.semibold))
+                        .font(.councisBody.weight(.semibold))
                     Text(request.tool)
-                        .font(.callout.monospaced())
+                        .font(.councisCallout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Text(PermissionReviewPresentation.compactSummary(
                         for: request))
-                        .font(.callout)
+                        .font(.councisCallout)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1134,12 +1134,12 @@ public struct PermissionCard: View {
                 Text(request.effectiveApprovalMode == .automaticReviewer
                      ? CouncisLocalization.string("Automatic review in progress…")
                      : CouncisLocalization.string("Resolving…"))
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.secondary)
             }
         } else {
             Text(statusText)
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -1286,7 +1286,7 @@ private struct CodeInspectorView: View {
                         CouncisLocalization.string("Git"),
                         value: CouncisLocalization.string("status only"))
                     Text("Commit, branch, PR, CI, and review workflows are deferred.")
-                        .font(.caption2)
+                        .font(.councisCaption2)
                         .foregroundStyle(style.tertiaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1307,10 +1307,10 @@ private struct CodeInspectorView: View {
     private var inspectorHeader: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Inspector")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.councisFixed(size: 16, weight: .semibold))
                 .foregroundStyle(style.primaryText)
             Text("Task and workspace status")
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(style.secondaryText)
         }
     }
@@ -1319,7 +1319,7 @@ private struct CodeInspectorView: View {
                                                  @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title.uppercased())
-                .font(.caption2.bold())
+                .font(.councisCaption2.bold())
                 .foregroundStyle(style.tertiaryText)
             content()
         }
@@ -1331,11 +1331,11 @@ private struct CodeInspectorView: View {
     private func inspectorRow(_ title: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
-                .font(.caption)
+                .font(.councisCaption)
                 .foregroundStyle(style.secondaryText)
             Spacer(minLength: 8)
             Text(value)
-                .font(.caption.bold())
+                .font(.councisCaption.bold())
                 .foregroundStyle(style.primaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)

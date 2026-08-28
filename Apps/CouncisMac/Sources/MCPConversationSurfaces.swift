@@ -811,10 +811,10 @@ private struct MCPResourceCatalogRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.secondary)
                 Text(detail)
-                    .font(.caption2.monospaced())
+                    .font(.councisCaption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -943,11 +943,11 @@ private struct MCPResourceBrowserDetail: View {
                         TextField(
                             "Resource URI",
                             text: $model.readURI)
-                            .font(.body.monospaced())
+                            .font(.councisBody)
                         HStack {
                             Text(
                                 "Server-provided content is untrusted. Reading never grants the URI local-file or network authority.")
-                                .font(.caption)
+                                .font(.councisCaption)
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button("Read Resource") {
@@ -1005,9 +1005,9 @@ private struct MCPResourceBrowserDetail: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.title2.weight(.semibold))
+                .font(.councisTitle2.weight(.semibold))
             Text(server)
-                .font(.headline)
+                .font(.councisHeadline)
             if let summary {
                 Text(summary)
                     .foregroundStyle(.secondary)
@@ -1018,7 +1018,7 @@ private struct MCPResourceBrowserDetail: View {
                 }
                 Text("Catalog \(revision)")
             }
-            .font(.caption.monospaced())
+            .font(.councisCaption)
             .foregroundStyle(.secondary)
         }
     }
@@ -1032,7 +1032,7 @@ private struct MCPResourceBlockView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(block.uri)
-                    .font(.caption.monospaced())
+                    .font(.councisCaption)
                     .textSelection(.enabled)
                 Spacer()
                 Text(
@@ -1040,13 +1040,13 @@ private struct MCPResourceBlockView: View {
                         fromByteCount:
                             Int64(block.byteCount),
                         countStyle: .file))
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.secondary)
             }
             switch block.kind {
             case .inlineText:
                 Text(block.text ?? "")
-                    .font(.body.monospaced())
+                    .font(.councisBody)
                     .textSelection(.enabled)
                     .frame(
                         maxWidth: .infinity,
@@ -1072,7 +1072,7 @@ private struct MCPResourceBlockView: View {
                     .foregroundStyle(.orange)
             }
             Text("SHA-256 \(block.sha256)")
-                .font(.caption2.monospaced())
+                .font(.councisCaption2)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
@@ -1231,7 +1231,7 @@ private struct MCPPromptPickerView: View {
                                         ?? prompt.name)
                                 Text(
                                     "\(prompt.serverAlias) · \(prompt.name)")
-                                    .font(.caption)
+                                    .font(.councisCaption)
                                     .foregroundStyle(
                                         .secondary)
                             }
@@ -1254,18 +1254,18 @@ private struct MCPPromptPickerView: View {
                     {
                         Text(prompt.title ?? prompt.name)
                             .font(
-                                .title2
+                                .councisTitle2
                                     .weight(.semibold))
                         Text(
                             "\(prompt.serverAlias) · \(prompt.name)")
-                            .font(.headline)
+                            .font(.councisHeadline)
                         if let summary = prompt.summary {
                             Text(summary)
                                 .foregroundStyle(.secondary)
                         }
                         Text(
                             "Catalog \(prompt.rawCatalogRevision.rawValue)")
-                            .font(.caption.monospaced())
+                            .font(.councisCaption)
                             .foregroundStyle(.secondary)
 
                         GroupBox("Arguments") {
@@ -1286,7 +1286,7 @@ private struct MCPPromptPickerView: View {
                                                 Text(
                                                     "Required")
                                                     .font(
-                                                        .caption)
+                                                        .councisCaption)
                                                     .foregroundStyle(
                                                         .orange)
                                             }
@@ -1371,7 +1371,7 @@ private struct MCPPromptPickerView: View {
                         HStack {
                             Text(
                                 "Server prompt content remains untrusted and can only be inserted after this preview.")
-                                .font(.caption)
+                                .font(.councisCaption)
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button("Preview Prompt") {
@@ -1449,7 +1449,7 @@ private struct MCPPromptPreviewView: View {
                     id: \.offset
                 ) { _, message in
                     Text(MCPConversationJSON.text(message))
-                        .font(.body.monospaced())
+                        .font(.councisBody)
                         .textSelection(.enabled)
                         .frame(
                             maxWidth: .infinity,
@@ -1463,7 +1463,7 @@ private struct MCPPromptPreviewView: View {
                 HStack {
                     Text(
                         "Source: \(preview.serverAlias) / \(preview.promptName)")
-                        .font(.caption)
+                        .font(.councisCaption)
                         .foregroundStyle(.secondary)
                     Spacer()
                     if didInsert {
@@ -1585,8 +1585,8 @@ private struct MCPServerInstructionsView: View {
                             item.server.serverRevision
                                 .rawValue)
                             .font(
-                                .caption
-                                    .monospaced())
+                                .councisCaption
+                                    )
                             .foregroundStyle(
                                 .secondary)
                             .lineLimit(1)
@@ -1608,7 +1608,7 @@ private struct MCPServerInstructionsView: View {
                     {
                         Text(item.serverAlias)
                             .font(
-                                .title2
+                                .councisTitle2
                                     .weight(.semibold))
                         Text(
                             "Server instructions are display-only and untrusted by default.")
@@ -1621,8 +1621,8 @@ private struct MCPServerInstructionsView: View {
                             {
                                 Text(item.text)
                                     .font(
-                                        .body
-                                            .monospaced())
+                                        .councisBody
+                                            )
                                     .textSelection(
                                         .enabled)
                                     .frame(
@@ -1641,14 +1641,14 @@ private struct MCPServerInstructionsView: View {
                                     "Policy \(item.policyRevision.rawValue)")
                             }
                             .font(
-                                .caption
-                                    .monospaced())
+                                .councisCaption
+                                    )
                             .padding(4)
                         }
                         HStack {
                             Text(
                                 "Using these instructions creates provenance-tagged untrusted context for exactly the next message; it never becomes a system or developer instruction.")
-                                .font(.caption)
+                                .font(.councisCaption)
                                 .foregroundStyle(
                                     .secondary)
                             Spacer()
@@ -1958,10 +1958,10 @@ private struct MCPRemoteTaskCard: View {
                 Label(
                     task.operation.rawValue,
                     systemImage: stateIcon)
-                    .font(.headline)
+                    .font(.councisHeadline)
                 Spacer()
                 Text(task.state.rawValue)
-                    .font(.caption.weight(.semibold))
+                    .font(.councisCaption.weight(.semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(
@@ -1971,15 +1971,15 @@ private struct MCPRemoteTaskCard: View {
             }
             Text(
                 task.authority.server.serverID.rawValue)
-                .font(.body.monospaced())
+                .font(.councisBody)
             Text(task.taskID.rawValue)
-                .font(.caption2.monospaced())
+                .font(.councisCaption2)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             HStack {
                 Text(
                     "Revision \(task.stateRevision) · Updated \(task.lastUpdatedAt.formatted(date: .abbreviated, time: .standard))")
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 if !isTerminal {
@@ -2144,20 +2144,20 @@ struct MCPCallCard: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(call.toolName)
-                        .font(.headline)
+                        .font(.councisHeadline)
                     Text(call.serverAlias)
-                        .font(.caption)
+                        .font(.councisCaption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Label(
                     call.state.rawValue,
                     systemImage: stateIcon)
-                    .font(.caption.weight(.semibold))
+                    .font(.councisCaption.weight(.semibold))
                     .foregroundStyle(stateColor)
             }
             Text(call.argumentSummary)
-                .font(.body.monospaced())
+                .font(.councisBody)
                 .lineLimit(4)
                 .textSelection(.enabled)
             HStack {
@@ -2171,7 +2171,7 @@ struct MCPCallCard: View {
                         date: .abbreviated,
                         time: .standard))
             }
-            .font(.caption)
+            .font(.councisCaption)
             .foregroundStyle(.secondary)
 
             if let fraction = call.progressFraction {
@@ -2183,7 +2183,7 @@ struct MCPCallCard: View {
             }
             if let progress = call.progressSummary {
                 Text(progress)
-                    .font(.caption)
+                    .font(.councisCaption)
             }
             if let result = call.resultSummary {
                 Text(result)
@@ -2196,7 +2196,7 @@ struct MCPCallCard: View {
                         id: \.self
                     ) { source in
                         Text(source)
-                            .font(.caption.monospaced())
+                            .font(.councisCaption)
                             .textSelection(.enabled)
                     }
                 }

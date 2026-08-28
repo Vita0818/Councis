@@ -12,11 +12,14 @@ struct TextSelectionView: View {
   let text: String
   let backgroundColor: Color
   let onDismiss: () -> Void
+  @Environment(\.markdownConfig) private var markdownConfig: MarkdownRenderConfig
 
   var body: some View {
     VStack(spacing: 14) {
       TextSelectionHeader(title: String.selectMoreTextLabel, onDismiss: onDismiss)
-      SelectableTextView(text: text)
+      SelectableTextView(
+        text: text,
+        fonts: markdownConfig.paragraphStyle.textFonts)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 18)
     }

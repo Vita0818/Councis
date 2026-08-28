@@ -966,9 +966,24 @@ final class MessageRenderingTests: XCTestCase {
         let scaled = CouncisMicrosoftMarkdownRenderState.makeConfiguration(
             style: .standard(.light),
             typography: .accessibility3)
-        XCTAssertEqual(
+        XCTAssertNotEqual(
             baseline.paragraphStyle.textFonts,
             MarkdownRenderConfig.default.paragraphStyle.textFonts)
+        let configuredFonts: [NSFont] = [
+            baseline.blockQuoteStyle.textFonts.normal,
+            baseline.headingStyle.h1Font.normal,
+            baseline.headingStyle.h6Font.bold ?? baseline.headingStyle.h6Font.normal,
+            baseline.orderedListStyle.textFonts.normal,
+            baseline.paragraphStyle.textFonts.normal,
+            baseline.tableStyle.textFonts.normal,
+            baseline.inlineStyle.linkTextFont,
+            baseline.inlineStyle.codeTextFont,
+            baseline.citationConfig.font,
+        ]
+        for font in configuredFonts {
+            XCTAssertEqual(font.familyName, CouncisTypography.latinFamilyName)
+        }
+        XCTAssertEqual(baseline.mathConfig.mode, .latex)
         XCTAssertEqual(
             scaled.paragraphStyle.textFonts.normal.pointSize,
             baseline.paragraphStyle.textFonts.normal.pointSize

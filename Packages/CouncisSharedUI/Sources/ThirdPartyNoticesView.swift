@@ -3,8 +3,9 @@ import Foundation
 import SwiftUI
 
 /// User-accessible, renderer-independent presentation of the notices shipped
-/// in the final app bundle. It deliberately uses verbatim system text so legal
-/// notices remain readable even when rich Markdown is disabled or unavailable.
+/// in the final app bundle. It deliberately uses verbatim plain text with the
+/// shared interface typeface so legal notices remain readable even when rich
+/// Markdown is disabled or unavailable.
 public struct CouncisThirdPartyNoticesView: View {
     private let text: String
 
@@ -15,7 +16,7 @@ public struct CouncisThirdPartyNoticesView: View {
     public var body: some View {
         ScrollView {
             Text(verbatim: text)
-                .font(.system(.footnote, design: .monospaced))
+                .font(.councisFootnote)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(20)

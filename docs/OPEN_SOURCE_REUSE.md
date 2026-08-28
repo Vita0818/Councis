@@ -2,7 +2,7 @@
 
 文档状态：当前开源复用政策
 生效日期：2026-07-12
-最近核对：2026-08-18
+最近核对：2026-08-19
 产品基线：v0.10（build 49）
 
 ## 项目立场
@@ -105,6 +105,25 @@ external-runtime 以独立 helper/process/service 运行上游实现
 - 当前状态：`research-only`，截至本政策生效时尚未把 OpenCode 源码、公开 prompt 或 UI 资产加入 Councis。
 - 后续允许选择性复用其具体实现，但每批必须固定 commit、核对目标文件与传递依赖，并按本政策记录 provenance。
 - Councis 不使用 OpenCode 名称、Logo、图标或 UI 品牌；若复用 TypeScript 实现，优先选择可验证的逻辑/测试进行 Swift 派生实现，或作为 macOS-only 隔离 runtime 评估。
+
+## JetBrains Mono 当前准入结论
+
+- 上游为 `https://github.com/JetBrains/JetBrainsMono`，固定 release/tag
+  `v2.304`、commit `cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9`；官方
+  `JetBrainsMono-2.304.zip` 的 SHA-256 为
+  `6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf`。
+- 复用类型是 `vendored`：只采用 release 中 16 个未修改的标准静态 TTF（8 weight +
+  matching italic）和 exact `OFL.txt`，字体许可证为 SIL Open Font License 1.1。
+  未采用 JetBrains 源码、构建脚本、installer、webfont、variable font、NL family、Logo、IDE
+  资产、截图或产品文案。
+- 字体位于 `Packages/CouncisSharedUI/Sources/Resources/Fonts/`，随 SwiftPM resource
+  bundle 分发；相邻 `SHA256SUMS` 固定逐文件身份，完整许可证同时进入
+  `ThirdPartyNotices/Licenses/JetBrainsMono-2.304-OFL-1.1.txt`，详细边界见
+  `ThirdPartyNotices/JetBrainsMono.md` 与根 `NOTICE.md`。
+- runtime 直接从 bundle URL 取得 Core Text descriptor，不依赖用户安装，也不做系统全局字体注册。
+  Latin exact face 缺失、损坏或 identity mismatch 时明确失败；简体中文显式 cascade 到同字重
+  Apple system PingFang SC。Markdown 通过既有配置 API 接收相同字体；iosMath 的 LaTeX math font
+  bundle 与 label font 保持原样，不被界面字体替换。
 
 ## OpenCode provider adapter 与 AI SDK wire 参考记录
 

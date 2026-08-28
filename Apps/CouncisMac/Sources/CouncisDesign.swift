@@ -114,7 +114,7 @@ extension View {
 
 // MARK: - Shared header
 
-/// Page header: a serif title plus a system-secondary subtitle.
+/// Page header: JetBrains Mono title and subtitle over system semantic colors.
 struct CouncisPageHeader: View {
     let title: String
     var subtitle: String?

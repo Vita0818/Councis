@@ -103,6 +103,32 @@ final class FirstReleaseContractTests: XCTestCase {
     XCTAssertFalse(source.contains(".onTapGesture"))
   }
 
+  func testAuxiliaryRendererSurfacesUseCallerTypographyWhileMathKeepsIosMathFont() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let configuredTypographySources = [
+      "Sources/MarkdownText/UI/CodeBlockView.swift",
+      "Sources/MarkdownText/UI/OrderedListView.swift",
+      "Sources/MarkdownText/UI/TableView.swift",
+      "Sources/MarkdownText/UI/TextSelection/SelectableTextView.swift",
+    ]
+    for path in configuredTypographySources {
+      let source = try String(
+        contentsOf: packageRoot.appendingPathComponent(path),
+        encoding: .utf8)
+      XCTAssertFalse(source.contains("Typography."), path)
+    }
+
+    let mathSource = try String(
+      contentsOf: packageRoot.appendingPathComponent(
+        "Sources/MarkdownText/UI/Paragraph/InlineMathAttachment.swift"),
+      encoding: .utf8)
+    XCTAssertTrue(mathSource.contains("let label = MTMathUILabel()"))
+    XCTAssertFalse(mathSource.contains("label.font ="))
+  }
+
   func testSwiftUITextLeavesOwnTheirSelectionWithoutAWholeDocumentOverlay() throws {
     let packageRoot = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()

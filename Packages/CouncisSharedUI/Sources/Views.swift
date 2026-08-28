@@ -133,7 +133,7 @@ struct ThreadView: View {
             }
             if let errorText = presentedErrorText {
                 Text(errorText)
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal)
@@ -335,14 +335,14 @@ public struct CouncisMessageCitationsView: View {
         if !links.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text(CouncisLocalization.string("Sources"))
-                    .font(.caption.weight(.semibold))
+                    .font(.councisCaption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(links) { link in
                             Link(destination: link.url) {
                                 Label(link.title, systemImage: "link")
-                                    .font(.caption)
+                                    .font(.councisCaption)
                                     .lineLimit(1)
                             }
                             .buttonStyle(.bordered)

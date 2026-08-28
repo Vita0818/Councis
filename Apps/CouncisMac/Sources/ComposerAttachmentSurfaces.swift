@@ -55,7 +55,7 @@ struct CouncisMacComposerAttachmentAccessory: View {
                             .font(CouncisTypography.body(13, .semibold))
                             .foregroundStyle(.primary)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.councisFixed(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
                     }

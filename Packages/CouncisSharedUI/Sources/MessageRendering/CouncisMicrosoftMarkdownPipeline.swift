@@ -29,7 +29,7 @@ enum CouncisMarkdownRendererLimits {
     static let mathMode = CouncisMarkdownMathMode.resolve(
         arguments: ProcessInfo.processInfo.arguments)
     static let configurationRevision =
-        mathMode == .latex ? 4 : 3
+        mathMode == .latex ? 5 : 4
 }
 
 enum CouncisMarkdownMathMode: String, Hashable, Sendable {
@@ -763,24 +763,28 @@ final class CouncisMicrosoftMarkdownRenderState: ObservableObject {
         return MarkdownRenderConfig(
             shouldAnimateText: false,
             blockQuoteStyle: .init(
-                textFonts: defaults.blockQuoteStyle.textFonts.councisScaled(by: scale),
+                textFonts: defaults.blockQuoteStyle.textFonts
+                    .councisJetBrainsMono(by: scale),
                 textColor: style.secondaryText),
             headingStyle: .init(
-                h1Font: defaults.headingStyle.h1Font.councisScaled(by: scale),
-                h2Font: defaults.headingStyle.h2Font.councisScaled(by: scale),
-                h3Font: defaults.headingStyle.h3Font.councisScaled(by: scale),
-                h4Font: defaults.headingStyle.h4Font.councisScaled(by: scale),
-                h5Font: defaults.headingStyle.h5Font.councisScaled(by: scale),
-                h6Font: defaults.headingStyle.h6Font.councisScaled(by: scale),
+                h1Font: defaults.headingStyle.h1Font.councisJetBrainsMono(by: scale),
+                h2Font: defaults.headingStyle.h2Font.councisJetBrainsMono(by: scale),
+                h3Font: defaults.headingStyle.h3Font.councisJetBrainsMono(by: scale),
+                h4Font: defaults.headingStyle.h4Font.councisJetBrainsMono(by: scale),
+                h5Font: defaults.headingStyle.h5Font.councisJetBrainsMono(by: scale),
+                h6Font: defaults.headingStyle.h6Font.councisJetBrainsMono(by: scale),
                 textColor: style.primaryText),
             orderedListStyle: .init(
-                textFonts: defaults.orderedListStyle.textFonts.councisScaled(by: scale),
+                textFonts: defaults.orderedListStyle.textFonts
+                    .councisJetBrainsMono(by: scale),
                 textColor: style.primaryText),
             paragraphStyle: .init(
-                textFonts: defaults.paragraphStyle.textFonts.councisScaled(by: scale),
+                textFonts: defaults.paragraphStyle.textFonts
+                    .councisJetBrainsMono(by: scale),
                 textColor: style.primaryText),
             tableStyle: .init(
-                textFonts: defaults.tableStyle.textFonts.councisScaled(by: scale),
+                textFonts: defaults.tableStyle.textFonts
+                    .councisJetBrainsMono(by: scale),
                 headerTextColor: style.primaryText,
                 regularTextColor: style.primaryText,
                 headerBackgroundColor: style.stroke.opacity(0.12),
@@ -788,18 +792,28 @@ final class CouncisMicrosoftMarkdownRenderState: ObservableObject {
                 actionButtonColor: style.secondaryText),
             inlineStyle: .init(
                 boldTextColor: style.primaryText,
-                linkTextFont: councisScaledFont(
+                linkTextFont: councisJetBrainsMonoFont(
                     defaults.inlineStyle.linkTextFont,
-                    by: scale),
+                    by: scale,
+                    weight: .regular),
                 linkTextColor: style.accent,
-                codeTextFont: councisScaledFont(
+                codeTextFont: councisJetBrainsMonoFont(
                     defaults.inlineStyle.codeTextFont,
-                    by: scale),
+                    by: scale,
+                    weight: .regular),
                 codeTextColor: style.primaryText,
                 codeBackgroundColor: style.stroke.opacity(0.18),
                 codeUnderlineColor: style.stroke),
             textContextMenu: nil,
-            citationConfig: .default,
+            citationConfig: .init(
+                isEnabled: false,
+                coder: defaults.citationConfig.coder,
+                font: councisJetBrainsMonoFont(
+                    defaults.citationConfig.font,
+                    by: scale,
+                    weight: .regular),
+                textColor: defaults.citationConfig.textColor,
+                backgroundColor: defaults.citationConfig.backgroundColor),
             codeBlockConfig: .init(
                 backgroundColor: style.stroke.opacity(0.14),
                 foregroundColor: style.secondaryText),
@@ -812,28 +826,47 @@ final class CouncisMicrosoftMarkdownRenderState: ObservableObject {
 }
 
 private extension TextFonts {
-    func councisScaled(by scale: CGFloat) -> TextFonts {
-        guard scale != 1 else { return self }
+    func councisJetBrainsMono(by scale: CGFloat) -> TextFonts {
         return TextFonts(
-            normal: councisScaledFont(normal, by: scale),
-            italic: italic.map { councisScaledFont($0, by: scale) },
-            bold: bold.map { councisScaledFont($0, by: scale) },
-            boldItalic: boldItalic.map { councisScaledFont($0, by: scale) },
+            normal: councisJetBrainsMonoFont(
+                normal,
+                by: scale,
+                weight: .regular),
+            italic: italic.map {
+                councisJetBrainsMonoFont(
+                    $0,
+                    by: scale,
+                    weight: .regular,
+                    italic: true)
+            },
+            bold: bold.map {
+                councisJetBrainsMonoFont(
+                    $0,
+                    by: scale,
+                    weight: .semibold)
+            },
+            boldItalic: boldItalic.map {
+                councisJetBrainsMonoFont(
+                    $0,
+                    by: scale,
+                    weight: .semibold,
+                    italic: true)
+            },
             preferredLetterSpacing: preferredLetterSpacing.map { $0 * scale },
             preferredLineHeight: preferredLineHeight.map { $0 * scale })
     }
 }
 
-private func councisScaledFont(
+private func councisJetBrainsMonoFont(
     _ font: MDFont,
-    by scale: CGFloat
+    by scale: CGFloat,
+    weight: Font.Weight,
+    italic: Bool = false
 ) -> MDFont {
-    guard scale != 1 else { return font }
     let size = font.pointSize * scale
-#if canImport(AppKit)
-    return NSFont(descriptor: font.fontDescriptor, size: size) ?? font
-#elseif canImport(UIKit)
-    return UIFont(descriptor: font.fontDescriptor, size: size)
-#endif
+    return CouncisTypography.platformFont(
+        size: size,
+        weight: weight,
+        italic: italic)
 }
 #endif

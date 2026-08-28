@@ -905,7 +905,7 @@ struct WorkspaceSessionHome: View {
 
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: icon)
-                            .font(.system(size: 28, weight: .semibold))
+                            .font(.councisFixed(size: 28, weight: .semibold))
                             .foregroundStyle(CouncisTheme.accent(scheme))
                             .frame(width: 64, height: 64)
                         Text(primaryTitle)
@@ -1461,16 +1461,16 @@ struct CoworkSessionView: View {
     private var goalEditorSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Edit Goal")
-                .font(.title2.bold())
+                .font(.councisTitle2.bold())
             Text("Edit the durable objective and its requirements. Enter one success criterion or constraint per line. Leaving token budget empty means no Goal budget. A paused Goal remains paused.")
-                .font(.callout)
+                .font(.councisCallout)
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Objective")
-                    .font(.caption.bold())
+                    .font(.councisCaption.bold())
                 TextEditor(text: $goalObjectiveDraft)
-                    .font(.body)
+                    .font(.councisBody)
                     .frame(minWidth: 500, minHeight: 90)
                     .padding(8)
                     .overlay {
@@ -1484,14 +1484,14 @@ struct CoworkSessionView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Success criteria")
-                        .font(.caption.bold())
+                        .font(.councisCaption.bold())
                     Spacer()
                     Text("One per line")
-                        .font(.caption2)
+                        .font(.councisCaption2)
                         .foregroundStyle(.tertiary)
                 }
                 TextEditor(text: $goalSuccessCriteriaDraft)
-                    .font(.body)
+                    .font(.councisBody)
                     .frame(minHeight: 82)
                     .padding(8)
                     .overlay {
@@ -1505,14 +1505,14 @@ struct CoworkSessionView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Constraints")
-                        .font(.caption.bold())
+                        .font(.councisCaption.bold())
                     Spacer()
                     Text("One per line")
-                        .font(.caption2)
+                        .font(.councisCaption2)
                         .foregroundStyle(.tertiary)
                 }
                 TextEditor(text: $goalConstraintsDraft)
-                    .font(.body)
+                    .font(.councisBody)
                     .frame(minHeight: 82)
                     .padding(8)
                     .overlay {
@@ -1525,7 +1525,7 @@ struct CoworkSessionView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Token budget (optional)")
-                    .font(.caption.bold())
+                    .font(.councisCaption.bold())
                 TextField("No budget", text: $goalTokenBudgetDraft)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 220)
@@ -1535,7 +1535,7 @@ struct CoworkSessionView: View {
 
             if let validationMessage = goalEditorValidationMessage {
                 Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("cowork.goal.editor.validation")
@@ -1631,7 +1631,7 @@ private struct CoworkInferenceAccessory: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.councisFixed(size: 10, weight: .semibold))
                         .foregroundStyle(CouncisTheme.tertiaryText(scheme))
                         .accessibilityHidden(true)
                 }
@@ -1686,7 +1686,8 @@ final class CouncisApplicationDelegate: NSObject, NSApplicationDelegate {
         let controller = NSHostingController(
             rootView:
                 RendererFixtureView(
-                    arguments: arguments))
+                    arguments: arguments)
+                    .font(CouncisTypography.body()))
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
@@ -1786,6 +1787,10 @@ struct CouncisMacApp: App {
     private var applicationDelegate
     #endif
 
+    init() {
+        CouncisTypography.prepareBundledFonts()
+    }
+
     private var launchAppearance: ColorScheme? {
         #if DEBUG || COUNCIS_RENDERER_VALIDATION
         let arguments = ProcessInfo.processInfo.arguments
@@ -1806,40 +1811,51 @@ struct CouncisMacApp: App {
 
     var body: some Scene {
         WindowGroup {
-            #if DEBUG || COUNCIS_RENDERER_VALIDATION
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-CouncisPhaseLLifecycleFixture") {
-                PhaseLSessionLifecycleFixtureView()
-                    .preferredColorScheme(launchAppearance)
-            } else if ProcessInfo.processInfo.arguments.contains("-CouncisPhaseCPermissionFixture") {
-                PhaseCPermissionFixtureView()
-                    .preferredColorScheme(launchAppearance)
-            } else if launchesCoworkAgentConversationFixture {
-                CoworkAgentConversationFixtureView()
-                    .preferredColorScheme(launchAppearance)
-            } else if ProcessInfo.processInfo.arguments.contains("-CouncisRendererFixture") {
-                RendererFixtureView()
-                    .preferredColorScheme(launchAppearance)
-            } else {
+            Group {
+                #if DEBUG || COUNCIS_RENDERER_VALIDATION
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains(
+                    "-CouncisPhaseLLifecycleFixture"
+                ) {
+                    PhaseLSessionLifecycleFixtureView()
+                        .preferredColorScheme(launchAppearance)
+                } else if ProcessInfo.processInfo.arguments.contains(
+                    "-CouncisPhaseCPermissionFixture"
+                ) {
+                    PhaseCPermissionFixtureView()
+                        .preferredColorScheme(launchAppearance)
+                } else if launchesCoworkAgentConversationFixture {
+                    CoworkAgentConversationFixtureView()
+                        .preferredColorScheme(launchAppearance)
+                } else if ProcessInfo.processInfo.arguments.contains(
+                    "-CouncisRendererFixture"
+                ) {
+                    RendererFixtureView()
+                        .preferredColorScheme(launchAppearance)
+                } else {
+                    CouncisProductionRootView(launchAppearance: launchAppearance)
+                }
+                #else
+                if ProcessInfo.processInfo.arguments.contains(
+                    "-CouncisRendererFixture"
+                ) {
+                    // The validation-only AppDelegate owns the single deterministic
+                    // NSHostingController fixture window. Keeping this scene inert
+                    // avoids running the exact workload twice while preserving the
+                    // normal Debug fixture scene unchanged.
+                    Color.clear
+                        .accessibilityIdentifier(
+                            "renderer.validation.host.placeholder")
+                        .preferredColorScheme(launchAppearance)
+                } else {
+                    CouncisProductionRootView(launchAppearance: launchAppearance)
+                }
+                #endif
+                #else
                 CouncisProductionRootView(launchAppearance: launchAppearance)
+                #endif
             }
-            #else
-            if ProcessInfo.processInfo.arguments.contains("-CouncisRendererFixture") {
-                // The validation-only AppDelegate owns the single deterministic
-                // NSHostingController fixture window. Keeping this scene inert
-                // avoids running the exact workload twice while preserving the
-                // normal Debug fixture scene unchanged.
-                Color.clear
-                    .accessibilityIdentifier(
-                        "renderer.validation.host.placeholder")
-                    .preferredColorScheme(launchAppearance)
-            } else {
-                CouncisProductionRootView(launchAppearance: launchAppearance)
-            }
-            #endif
-            #else
-            CouncisProductionRootView(launchAppearance: launchAppearance)
-            #endif
+            .font(CouncisTypography.body())
         }
         .defaultSize(width: 1100, height: 760)
     }

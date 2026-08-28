@@ -87,6 +87,8 @@ SOFTWARE.
 ## Bundled font inventory and license mapping
 
 The following files are iosMath resources, not Councis-owned interface assets.
+Councis's separate JetBrains Mono interface family is documented in
+`ThirdPartyNotices/JetBrainsMono.md` and is never assigned to `MTMathUILabel`.
 They are distributed unmodified under their upstream filenames. The default
 iosMath font is Latin Modern Math; all eight fonts remain in the package
 resource bundle regardless of which one is selected for formula layout.

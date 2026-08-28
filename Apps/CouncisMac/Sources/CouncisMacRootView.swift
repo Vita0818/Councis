@@ -731,14 +731,14 @@ private struct SessionRenameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Rename Session")
-                .font(.headline)
+                .font(.councisHeadline)
             TextField("Session name", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(rename)
 
             if let errorText {
                 Text(errorText)
-                    .font(.caption)
+                    .font(.councisCaption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -871,7 +871,7 @@ private struct CouncisSidebarModeRow: View {
     private var content: some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.councisFixed(size: 14, weight: .semibold))
                 .foregroundStyle(selected
                     ? CouncisTheme.accent(scheme)
                     : CouncisTheme.softText(scheme))
@@ -896,7 +896,7 @@ private struct CouncisSidebarSettingsRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: "gearshape")
-                .font(.system(size: 13, weight: .medium))
+                .font(.councisFixed(size: 13, weight: .medium))
                 .foregroundStyle(selected ? CouncisTheme.accent(scheme) : CouncisTheme.softText(scheme))
                 .frame(width: 20)
             Text(CouncisLocalization.string("Settings"))

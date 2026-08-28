@@ -259,7 +259,7 @@ private struct CouncisChatSessionScreen: View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "sparkle")
-                .font(.system(size: 30, weight: .semibold))
+                .font(.councisFixed(size: 30, weight: .semibold))
                 .foregroundStyle(CouncisTheme.accent(scheme))
             .frame(width: 76, height: 76)
 
@@ -375,7 +375,7 @@ struct CouncisChatModelMenu: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.councisFixed(size: 10, weight: .semibold))
                 .foregroundStyle(CouncisTheme.tertiaryText(scheme))
         }
         .frame(
@@ -992,7 +992,7 @@ struct CouncisSettingsPanel: View {
                 Spacer()
                 Button(action: addProvider) {
                     Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.councisFixed(size: 13, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .help("Add provider")
@@ -1059,7 +1059,7 @@ struct CouncisSettingsPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.councisFixed(size: 12, weight: .medium))
                         .foregroundStyle(selected ? CouncisTheme.accent(scheme) : CouncisTheme.tertiaryText(scheme))
                     Text(provider.title)
                         .font(CouncisType.body(13, .semibold))
@@ -1183,7 +1183,7 @@ struct CouncisSettingsPanel: View {
     private func removeModelButton(providerIndex: Int, modelIndex: Int) -> some View {
         Button(action: { removeModel(providerIndex: providerIndex, modelIndex: modelIndex) }) {
             Image(systemName: "trash")
-                .font(.system(size: 13, weight: .medium))
+                .font(.councisFixed(size: 13, weight: .medium))
                 .foregroundStyle(CouncisTheme.tertiaryText(scheme))
         }
         .buttonStyle(.plain)

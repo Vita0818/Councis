@@ -49,6 +49,7 @@ struct OrderedListView: View {
 struct ListItemContentWrapper<Content: View>: View {
   let paragraphContents: NSMutableAttributedString
   let content: () -> Content
+  @Environment(\.markdownConfig) private var config: MarkdownRenderConfig
 
   init(paragraphContents: NSMutableAttributedString, @ViewBuilder content: @escaping () -> Content) {
     self.paragraphContents = paragraphContents
@@ -77,7 +78,7 @@ struct ListItemContentWrapper<Content: View>: View {
     if let font = firstFont(in: paragraphContents) {
       return font
     }
-    return Typography.base.mdFont
+    return config.orderedListStyle.textFonts.normal
   }
 
   private func firstCharacterCitationAttachment(in attributedString: NSAttributedString) -> InlineCitationAttachment? {

@@ -2,7 +2,7 @@
 
 文档状态：当前仓库地图
 
-最近自查日期：2026-08-18
+最近自查日期：2026-08-19
 
 产品基线：v0.10（build 49）
 
@@ -40,6 +40,7 @@ Councis/
 ├── Councis.icon/                   # canonical Apple Icon Composer source
 ├── Councis.xcodeproj/              # generated, ignored
 ├── Packages/Councis*/              # first-party Swift/C targets and tests
+│   └── CouncisSharedUI/Sources/Resources/Fonts/ # JetBrains Mono 2.304: 16 TTF + OFL + SHA256SUMS
 ├── Vendor/
 │   ├── SwiftStreamingMarkdown/
 │   └── MCPClientSDK/
@@ -78,7 +79,7 @@ Councis/
 | `CouncisAgentKernel` | Core, Protocol, Providers, Tools, Permission, Conversation, Artifacts, MCP, Skills | shared headless AgentRuntime/AgentLoop、context/model history/compaction、authorization sidecar、provider-bound services |
 | `CouncisCowork` | Core, Protocol, Providers, Tools, Permission, Conversation, AgentKernel, Skills | Orchestrator、scheduler、MessageBus/Mediator、agent registry、WorkTask/Goal/run、permission and verifier control planes |
 | `CouncisMultimodal` | Core, Protocol, Providers, Artifacts, Conversation | image/video/transcription artifact services |
-| `CouncisSharedUI` | Core, Protocol, Providers, Conversation, Artifacts, renderer vendor | cross-platform SwiftUI library；macOS current UI、bounded 16-row history、composer、permission/task/agent presentation |
+| `CouncisSharedUI` | Core, Protocol, Providers, Conversation, Artifacts, renderer vendor | cross-platform SwiftUI library；macOS current UI、bounded 16-row history、composer、permission/task/agent presentation；exact JetBrains Mono bundle + PingFang SC cascade，LaTeX 继续由 iosMath 独立排版 |
 
 ### Internal targets（3）
 

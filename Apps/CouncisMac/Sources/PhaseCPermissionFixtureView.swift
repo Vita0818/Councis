@@ -24,10 +24,10 @@ struct PhaseCPermissionFixtureView: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Phase C Permission Validation")
-                    .font(.title2.bold())
+                    .font(.councisTitle2.bold())
                     .accessibilityIdentifier("phase-c.fixture.title")
                 Text("Offline fixture — no provider, EventLog, credential resolver, responder, or executor.")
-                    .font(.callout)
+                    .font(.councisCallout)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("phase-c.fixture.offline")
             }

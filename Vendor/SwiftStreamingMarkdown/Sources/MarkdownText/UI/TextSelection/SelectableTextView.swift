@@ -10,14 +10,17 @@ import SwiftUI
 /// extend the selection.
 struct SelectableTextView: View {
   let text: String
+  let fonts: TextFonts
 
   var body: some View {
-    SelectableTextViewRepresentable(text: text)
+    SelectableTextViewRepresentable(text: text, fonts: fonts)
   }
 }
 
-private func selectionAttributedString(for text: String) -> NSAttributedString {
-  let fonts = Typography.baseTextFonts
+private func selectionAttributedString(
+  for text: String,
+  fonts: TextFonts
+) -> NSAttributedString {
   let font = fonts.normal
   let paragraphStyle = NSMutableParagraphStyle()
   paragraphStyle.alignment = .left
@@ -52,6 +55,7 @@ import UIKit
 
 private struct SelectableTextViewRepresentable: UIViewRepresentable {
   let text: String
+  let fonts: TextFonts
 
   func makeUIView(context: Context) -> UITextView {
     let textView = UITextView()
@@ -60,7 +64,7 @@ private struct SelectableTextViewRepresentable: UIViewRepresentable {
     textView.backgroundColor = .clear
     textView.showsVerticalScrollIndicator = false
     textView.tintColor = UIColor(Color.Theme.Accent.Accent600)
-    textView.attributedText = selectionAttributedString(for: text)
+    textView.attributedText = selectionAttributedString(for: text, fonts: fonts)
     DispatchQueue.main.async {
       let range = firstParagraphRange(in: text)
       if let start = textView.position(from: textView.beginningOfDocument, offset: range.location),
@@ -74,7 +78,7 @@ private struct SelectableTextViewRepresentable: UIViewRepresentable {
 
   func updateUIView(_ textView: UITextView, context: Context) {
     if textView.attributedText.string != text {
-      textView.attributedText = selectionAttributedString(for: text)
+      textView.attributedText = selectionAttributedString(for: text, fonts: fonts)
     }
   }
 }
@@ -83,6 +87,7 @@ import AppKit
 
 private struct SelectableTextViewRepresentable: NSViewRepresentable {
   let text: String
+  let fonts: TextFonts
 
   func makeNSView(context: Context) -> NSScrollView {
     let scrollView = NSTextView.scrollableTextView()
@@ -96,7 +101,8 @@ private struct SelectableTextViewRepresentable: NSViewRepresentable {
     textView.isSelectable = true
     textView.drawsBackground = false
     textView.textContainerInset = NSSize(width: 0, height: 0)
-    textView.textStorage?.setAttributedString(selectionAttributedString(for: text))
+    textView.textStorage?.setAttributedString(
+      selectionAttributedString(for: text, fonts: fonts))
 
     DispatchQueue.main.async {
       textView.setSelectedRange(firstParagraphRange(in: text))
@@ -108,7 +114,8 @@ private struct SelectableTextViewRepresentable: NSViewRepresentable {
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
     guard let textView = scrollView.documentView as? NSTextView else { return }
     if textView.string != text {
-      textView.textStorage?.setAttributedString(selectionAttributedString(for: text))
+      textView.textStorage?.setAttributedString(
+        selectionAttributedString(for: text, fonts: fonts))
     }
   }
 }

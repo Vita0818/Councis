@@ -37,7 +37,8 @@ permanent adjacent ledger at
 `Vendor/SwiftStreamingMarkdown/COUNCIS_PATCH_LEDGER.md` records
 dependency/resource thinning, ownership-transfer and Swift 6 concurrency
 hardening, disabled optional features, a native code-copy control, zero native
-paragraph-view retention, the later audited code-aware LaTeX patch,
+paragraph-view retention, the later audited code-aware LaTeX patch, caller-owned
+typography across visible prose/code/selection surfaces,
 and focused test changes. The initial import removed HighlightSwift, iosMath,
 Shimmer, SnapshotTesting, upstream branded color/media assets, the unsafe
 regex-based math path, syntax-highlighting implementations, and obsolete
@@ -76,6 +77,10 @@ iosMath and its eight bundled OpenType math fonts are covered in
 the shipped GUST notice, attributions, resource inventory, and distribution
 approval.
 The font resources are not part of Microsoft's source or license.
+Councis separately supplies its JetBrains Mono interface resources through
+`MarkdownRenderConfig`; their provenance and OFL terms are recorded in
+`ThirdPartyNotices/JetBrainsMono.md`. That caller font is not assigned to
+`MTMathUILabel`, so it does not replace any iosMath math font.
 The derivative hosts accepted formulas as live TextKit 2
 `MTMathUILabel` attachment views using intrinsic layout, semantic appearance,
 Dynamic Type-aware configuration, and exact literal fallback. It does not

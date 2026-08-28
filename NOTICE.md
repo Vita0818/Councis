@@ -75,6 +75,23 @@ boundary, and upgrade procedure are recorded in
 preserved at
 `ThirdPartyNotices/Licenses/Codex-61a44880-Apache-2.0.txt`.
 
+## JetBrains Mono interface font
+
+Councis bundles the unmodified **JetBrains Mono 2.304** static TTF family from
+`JetBrains/JetBrainsMono`, tag `v2.304`, commit
+`cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9`, under the SIL Open Font License
+1.1. The 16 regular/italic faces cover eight weights and are distributed in
+the `CouncisSharedUI` resource bundle with the upstream `OFL.txt` and a pinned
+SHA-256 inventory. Councis uses these files for app-owned Latin interface and
+message text, with the Apple system PingFang SC family as the explicit
+Simplified-Chinese cascade. iosMath continues to own LaTeX formula typefaces;
+the interface font is not assigned to formula labels.
+
+Exact release-asset provenance, inventory, hashes, runtime loading boundary,
+and exclusions are in `ThirdPartyNotices/JetBrainsMono.md`. The complete
+license is also available at
+`ThirdPartyNotices/Licenses/JetBrainsMono-2.304-OFL-1.1.txt`.
+
 ## Current Markdown and math renderer integration
 
 The current working tree replaces the former MarkdownUI/highlight.js renderer
@@ -96,6 +113,9 @@ resolution of this package.
   measurement. It retains the upstream Markdown parser and
   SwiftUI/AppKit/UIKit rendering structure; the removed highlighting,
   animation, image, citation, and legacy regex-math runtimes remain absent.
+  Councis now supplies its audited JetBrains Mono interface fonts through the
+  derivative's existing render configuration for visible prose/code surfaces;
+  it does not assign that interface face to iosMath formula labels.
   **Derivative location: `Vendor/SwiftStreamingMarkdown` in the Councis root
   revision being built or distributed.**
 - **swift-markdown 0.8.0** (`swiftlang/swift-markdown`), revision

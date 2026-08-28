@@ -123,8 +123,9 @@ final class CoworkInferencePresentationTests: XCTestCase {
         let selectedRow = source[rowStart.lowerBound..<rowEnd.lowerBound]
         XCTAssertTrue(source.contains(".fill(accent.opacity(0.16))"))
         XCTAssertFalse(selectedRow.contains("checkmark.circle.fill"))
-        XCTAssertTrue(selectedRow.contains(".font(.body.weight(.semibold))"))
-        XCTAssertTrue(selectedRow.contains(".font(.callout)"))
+        XCTAssertTrue(selectedRow.contains(
+            ".font(.councisBody.weight(.semibold))"))
+        XCTAssertTrue(selectedRow.contains(".font(.councisCallout)"))
         XCTAssertTrue(source.contains(".councisClearLiquidGlass(cornerRadius: 22)"))
         XCTAssertTrue(source.contains("presentationStyle: .compactRail"))
 

@@ -1,7 +1,7 @@
 # CURRENT_UI_COLOR_SYSTEM — 系统原生表面与 Liquid Glass 规范
 
 文档状态：当前 UI 实施规范
-最近核对日期：2026-08-17
+最近核对日期：2026-08-19
 产品基线：v0.10（build 49）
 
 > Councis 不把“系统外观”解释为固定的纯白和纯黑。页面、侧栏、内容层与控制层均使用 Apple 平台的动态语义资源；在支持的系统上，导航与交互控件采用原生 Liquid Glass。`docs/UI_COLOR_SYSTEM.md` 只保存上一版香槟金 / 暖中性色方案，不随当前方案修改。
@@ -19,6 +19,7 @@
 5. Liquid Glass 不铺满页面或整段 transcript，也不作为一般长文本或数据卡片的默认背景；用户消息气泡只包裹该条用户输入，其他对话正文仍直接位于 canvas。
 6. 文本、分隔线、强调色与错误色使用系统语义资源：`.primary`、`.secondary`、系统 separator、`.accentColor`、`.red` 等。
 7. 颜色不是状态的唯一信息通道；状态同时保留文字、图标或结构提示。
+8. 所有 Councis 自有 Latin/英文字体统一使用随包固定的 JetBrains Mono 2.304；简体中文继续显式回退到同字重的 Apple PingFang SC。唯一字体例外是 LaTeX 公式，它继续由 iosMath 当前数学字体排版。
 
 “系统原生”指由当前 Apple 平台实时解析的语义表面和材质，而不是把某一台设备上看到的像素颜色写死。取色器只能用于视觉核对，不能成为令牌来源。
 
@@ -35,6 +36,25 @@
 | Fallback | `.regularMaterial` 或系统 bordered button | 共享源码中的防御性旧系统分支；不属于当前 macOS 26 release gate |
 
 系统强调色用于焦点、选中态和 prominent 操作。Councis 不以固定黑白代替系统 accent，也不自行模拟玻璃的高光、折射、阴影或动态响应。
+
+### 2.1 字体合同
+
+- `CouncisTypography` 是 App shell、sidebar、session、设置、composer、状态卡、纯文本消息与技术值的
+  单一字体入口。所有角色保留既有名义字号和 weight，但 Latin glyph 全部来自随
+  `CouncisSharedUI` bundle 分发的 JetBrains Mono 2.304 静态 TTF；不再区分标题 serif、正文 sans
+  与技术 system-monospace 三套 Latin family。
+- App 启动时完整验证 16 个固定 face；每个 `Font` / platform font 直接从 bundle URL 的 Core Text
+  descriptor 创建，不依赖用户是否安装 JetBrains Mono，也不做 process/global system font 注册。资源
+  缺失、不可读或 PostScript/family identity 不匹配时明确失败，不能静默换回 SF、Helvetica、Menlo
+  或另一 Latin family。
+- 每个 JetBrains Mono face 显式把同 weight 的 `PingFang SC` 放入 cascade：Thin/Light/Regular/
+  Medium/Semibold 语义保持，PingFang 不随 App 分发，继续使用 Apple 平台字体。
+- Microsoft Markdown rich path 的 heading、paragraph、quote、list、table、link、inline code、code
+  block、copy label 与 Select More Text 同样消费上述字体配置；plain-safe/raw fallback 由同一
+  `CouncisTypography` 管理。
+- LaTeX 是唯一例外。`InlineMathAttachment` 只把周围 typography 的 point size 交给
+  `MTMathUILabel`，不设置 `label.font`；iosMath 继续用当前默认 Latin Modern Math 及其独立 math
+  resource bundle。改变界面字体不得改变公式 glyph family、parser、math table 或 layout。
 
 ## 3. 组件映射
 
@@ -116,7 +136,7 @@ Apple 官方设计与 API 依据：
 - Liquid Glass 主要出现在导航和交互功能层；内容层例外只包括用户消息气泡与用户明确指定的 Cowork 紧凑 trailing status rail。仅用户消息有外层对话气泡且不得叠加 accent 蓝色描边；assistant / agent / system（包括失败 / 中断回复）直接位于系统 canvas。专用结构化卡片继续使用 Material，页面与长 transcript 不整片玻璃化。
 - 支持的系统上使用真实 `glassEffect` / glass button；旧系统 fallback 仍由系统语义 Material / control 渲染。
 - macOS 当前可见 Cowork 的 Light / Dark 运行态应经过视觉核对；隐藏的 macOS Chat/Code 由源码与定向回归保证不被删除，需要恢复可见性做手动验收时必须由用户另行授权。不能只用源码搜索或固定像素值推断可见 surface。
-- thread header 显示 session display name；Cowork header 使用紧凑顶部留白且不常驻 permission-reviewer 横幅；消息无 agent 头像与通用 Agent badge；正常 agent 回复无外层卡片；agent 名称旁有本地化三级时间元数据；macOS sidebar 只显示 `Councis`、Cowork Recent/New 与 Settings，不显示模式行，Recent New `+` 为 30×30 原生圆形 glass；macOS composer 第一排保持 40pt、关闭态仅模型名的 model/profile glass 菜单左、usage 右，第二排保持已有 action 左、输入居中、voice 紧邻唯一 Send/Stop 左侧。iOS 顶部固定 sidebar/session/new，抽屉为 serif `Councis`、选中 Chat、Recent/New 和底部 Settings，空页无 onboarding/建议卡；底部同样为 model/usage 第一排和 paperclip/input/voice/Send-or-Stop 第二排。两平台标题使用系统 serif、正文与控件使用系统 sans；两平台第二排 action/voice/stop/Send 与单行输入均为 40pt，输入变为多行时按钮底边不漂移；Cowork 宽屏 rail 第一位为权限审查、其后为 Agents/Goal/Tasks 且无 Git，pending 时 rail 固定；无法容纳 rail 时只显示一个权限兜底卡且不复制 Goal/Tasks。
+- thread header 显示 session display name；Cowork header 使用紧凑顶部留白且不常驻 permission-reviewer 横幅；消息无 agent 头像与通用 Agent badge；正常 agent 回复无外层卡片；agent 名称旁有本地化三级时间元数据；macOS sidebar 只显示 `Councis`、Cowork Recent/New 与 Settings，不显示模式行，Recent New `+` 为 30×30 原生圆形 glass；macOS composer 第一排保持 40pt、关闭态仅模型名的 model/profile glass 菜单左、usage 右，第二排保持已有 action 左、输入居中、voice 紧邻唯一 Send/Stop 左侧。所有 Councis-owned Latin text 与 Markdown/code surface 均解析为 exact JetBrains Mono，简体中文解析为 PingFang SC；LaTeX live label 仍为 iosMath math font。两平台第二排 action/voice/stop/Send 与单行输入均为 40pt，输入变为多行时按钮底边不漂移；Cowork 宽屏 rail 第一位为权限审查、其后为 Agents/Goal/Tasks 且无 Git，pending 时 rail 固定；无法容纳 rail 时只显示一个权限兜底卡且不复制 Goal/Tasks。
 - `CouncisMac` 可编译，全量 SwiftPM 测试通过。
 
 静态复核重点：
@@ -124,9 +144,10 @@ Apple 官方设计与 API 依据：
 ```sh
 rg -n 'CouncisTheme\.canvas|scheme == \.dark \? \.black : \.white|Color\.(white|black)|LinearGradient' Apps Packages
 rg -n 'glassEffect|GlassEffectContainer|buttonStyle\(\.glass|regularMaterial|windowBackground' Apps Packages
+rg -n '\.font\(\s*\.(system|largeTitle|title|headline|body|callout|caption)|Font\.system|fontDesign|\.monospaced\(\)' Apps/CouncisMac/Sources Packages/CouncisSharedUI/Sources
 ```
 
-第一组命中需要人工确认是否属于图标、图片或测试语境；任何页面 / 组件固定表面色都不符合本规范。第二组用于确认系统语义表面和玻璃入口仍存在。
+第一组命中需要人工确认是否属于图标、图片或测试语境；任何页面 / 组件固定表面色都不符合本规范。第二组用于确认系统语义表面和玻璃入口仍存在。第三组在当前生产源码应无命中；任何命中必须证明不是重新引入 Apple Latin system font。
 
 ## 7. 2026-07-15 实施验证
 

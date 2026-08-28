@@ -2,9 +2,36 @@
 
 文档状态：当前源码摘要；底层品牌脱钩代码与本地 unsigned 验证完成
 
-最近核对：2026-08-18
+最近核对：2026-08-19
 
 产品基线：v0.10（build 49）
+
+## 2026-08-19 JetBrains Mono 全局字体
+
+- Councis-owned Latin/English UI roles、纯文本消息、Markdown prose/heading/list/table/link、inline
+  code、code block 与 selection surface 已统一为随 `CouncisSharedUI` bundle 分发的 exact
+  JetBrains Mono 2.304；既有名义字号与 weight 保留。
+- 16 个标准静态 TTF（8 weights + matching italics）直接来自官方 `v2.304` release，逐文件
+  SHA-256、OFL、commit 与 release archive identity 已进入 resource/NOTICE/ThirdPartyNotices。
+  runtime 从 bundle URL 创建 Core Text descriptor，不依赖用户安装或全局字体注册。
+- 简体中文通过 explicit same-weight cascade 继续使用 Apple PingFang SC。字体定向测试已证明
+  Latin family 为 `JetBrains Mono`、中文 resolved family 为 `PingFang SC`。
+- LaTeX 保持例外：公式继续由 iosMath 的 `MTMathUILabel` 默认数学字体排版，界面字体只影响周围
+  Markdown 和公式 point size，不给 math label 设置新 family。
+- 当前验证：`CouncisTypographyTests` 4/4、`MessageRenderingTests` 41/41；vendored renderer
+  80 XCTest + 11 Swift Testing（91 total）全部通过；`xcodegen generate` 与 unsigned
+  `CouncisMac` Debug build 退出 0，最终 App 的 `CouncisSharedUI` resource bundle 已读回全部
+  16 TTF、OFL 与 `SHA256SUMS`，抽查 Regular/OFL hash 与仓内一致。
+- 首次 full suite 仅暴露 2 条仍检查旧 `.body` / `.callout` 字面值的 presentation source-shape
+  断言；迁移为当前 `councisBody` / `councisCallout` 合同后，focused 8/8 通过，随后完整
+  `swift test --disable-automatic-resolution --skip-build` 自然退出 0：15 bundles、2,119 tests、
+  41 个显式 opt-in skipped、0 failures。
+- unsigned universal Release `Councis.app` 构建退出 0，最终 executable 为 `x86_64 arm64`，metadata
+  为 `com.Vita0818.Councis` / `0.10 (49)`；最终字体 bundle 的 16 TTF + OFL 全部通过
+  `SHA256SUMS`，App 同时包含 JetBrains Mono detailed notice、完整 OFL、Markdown/Math notices。
+- Computer Use 只读启动最终 Release App，Cowork empty-state/sidebar/settings 可见 Latin glyph 已呈现
+  JetBrains Mono；没有创建 session 或发送 provider 请求。中文 cascade 与公式 family 隔离由 Core Text/
+  renderer tests 证明，本轮未完成同屏真实 conversation、VoiceOver 或 clipboard 视觉/交互验收。
 
 ## 2026-08-18 v0.10（build 49）版本验证
 

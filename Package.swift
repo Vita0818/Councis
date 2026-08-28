@@ -255,7 +255,10 @@ let package = Package(
                     condition: .when(platforms: [.macOS, .iOS])
                 ),
             ],
-            path: "Packages/CouncisSharedUI/Sources"
+            path: "Packages/CouncisSharedUI/Sources",
+            resources: [
+                .copy("Resources/Fonts"),
+            ]
         ),
         // v0.6 — CLI: Swift-native `councis` command (chat + code agent), talks to
         // any OpenAI-compatible endpoint via env vars.
